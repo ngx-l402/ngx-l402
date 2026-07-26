@@ -1,10 +1,10 @@
 use env_logger;
 use hex;
+use l402_middleware::caveats::RequestBinding;
 use l402_middleware::lndrpc::lnrpc;
 use l402_middleware::middleware::L402Middleware;
 use l402_middleware::{bolt12, cln, eclair, l402, lnclient, lnd, lnurl, macaroon_util, nwc, utils};
 use log::{debug, error, info, warn};
-use macaroon::Verifier;
 use ngx::core::Buffer;
 use ngx::ffi::{
     nginx_version, ngx_array_push, ngx_chain_t, ngx_command_t, ngx_conf_t, ngx_cycle_s,
@@ -41,7 +41,6 @@ mod cashu;
 mod cashu_redemption_logger;
 mod manifest;
 mod metrics;
-mod payment_detector;
 mod payment_page;
 
 static MODULE: OnceLock<L402Module> = OnceLock::new();
@@ -781,6 +780,34 @@ impl L402Module {
         Self { middleware }
     }
 
+    /// Auto-detect settlement: ask the worker's LN client whether the invoice
+    /// for `payment_hash` is settled and, if so, return its preimage. Uses the
+    /// same per-worker client (and runtime) as invoice generation, so there is
+    /// no cross-runtime tonic channel. Backends that can't query their own node
+    /// (LNURL / NWC / BOLT12 / LNC) return an error via the LNClient default.
+    pub async fn lookup_invoice(&self, payment_hash: Vec<u8>) -> Result<Option<Vec<u8>>, String> {
+        let ln_client = match WORKER_LN_CLIENT
+            .get_or_try_init(|| async {
+                let config = LN_CLIENT_CONFIG.get().ok_or_else(
+                    || -> Box<dyn std::error::Error + Send + Sync> {
+                        "LN client config not available in worker".into()
+                    },
+                )?;
+                lnclient::LNClientConn::init(config).await
+            })
+            .await
+        {
+            Ok(c) => Arc::clone(c),
+            Err(e) => return Err(format!("worker LN client init failed: {}", e)),
+        };
+
+        let guard = ln_client.lock().await;
+        guard
+            .lookup_invoice(payment_hash)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     pub async fn get_l402_header(
         &self,
         mut caveats: Vec<String>,
@@ -868,10 +895,7 @@ impl L402Module {
             self.middleware.root_key.clone(),
         ) {
             Ok(macaroon_string) => {
-                let header_value = format!(
-                    "L402 macaroon=\"{}\", invoice=\"{}\"",
-                    macaroon_string, invoice
-                );
+                let header_value = l402::format_challenge(&macaroon_string, &invoice);
                 debug!("🍪 Generated macaroon header: {}", header_value);
                 Some(header_value)
             }
@@ -1103,6 +1127,11 @@ pub struct ModuleConfig {
     enable: bool,
     amount_msat: i64,
     macaroon_timeout: i64,
+    // Opt-in location-scoped ("realm") caveat. When set via `l402_realm "name"`,
+    // the minted macaroon binds to `Realm = name` + the HTTP method instead of
+    // the exact request path, so one payment authorizes every path this location
+    // serves (pair with l402_macaroon_timeout). `None` = default exact-path binding.
+    realm: Option<String>,
     lnurl_addr: Option<String>,
     // (max_requests, window_secs): e.g. (5, 60) means 5 invoices per minute per IP per route.
     // None means rate limiting is disabled for this location.
@@ -1122,7 +1151,7 @@ pub struct ModuleConfig {
     manifest_hidden: bool,
 }
 
-pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 12] = [
+pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 13] = [
     ngx_command_t {
         name: ngx_string!("l402"),
         type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1) as ngx_uint_t,
@@ -1212,6 +1241,14 @@ pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 12] = [
         offset: 0,
         post: std::ptr::null_mut(),
     },
+    ngx_command_t {
+        name: ngx_string!("l402_realm"),
+        type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1) as ngx_uint_t,
+        set: Some(ngx_http_l402_realm_set),
+        conf: NGX_HTTP_LOC_CONF_OFFSET,
+        offset: 0,
+        post: std::ptr::null_mut(),
+    },
     ngx_command_t::empty(),
 ];
 
@@ -1279,6 +1316,9 @@ impl Merge for ModuleConfig {
         if self.lnurl_addr.is_none() && prev.lnurl_addr.is_some() {
             self.lnurl_addr = prev.lnurl_addr.clone();
         }
+        if self.realm.is_none() && prev.realm.is_some() {
+            self.realm = prev.realm.clone();
+        }
         if self.invoice_rate_limit.is_none() {
             self.invoice_rate_limit = prev.invoice_rate_limit;
         }
@@ -1323,6 +1363,24 @@ fn method_caveat_value(method: u32) -> &'static str {
         m if m == NGX_HTTP_LOCK => "LOCK",
         m if m == NGX_HTTP_UNLOCK => "UNLOCK",
         _ => "UNKNOWN",
+    }
+}
+
+/// Build the [`RequestBinding`] for a request from nginx config. Realm mode
+/// (opt-in via `l402_realm`) binds the token to a named protection space + HTTP
+/// method; otherwise the exact request path + method (the default).
+///
+/// The caveat *construction and enforcement* — including the auth-bypass guard —
+/// live in `l402_middleware` (`caveats::RequestBinding`), shared with every L402
+/// consumer. This adapter only picks the scope from nginx-specific config.
+fn request_binding(
+    realm: Option<&str>,
+    request_path: &str,
+    request_method: &str,
+) -> RequestBinding {
+    match realm {
+        Some(name) => RequestBinding::realm(name, request_method),
+        None => RequestBinding::path(request_path, request_method),
     }
 }
 
@@ -1425,6 +1483,7 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         auto_detect_payment,
         dry_run,
         indefinite_access,
+        realm,
     ) = unsafe {
         // NOTE: `authorization` can be null — not every request carries the header.
         let auth_header = if !r.headers_in.authorization.is_null() {
@@ -1477,6 +1536,7 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         let auto_detect_payment = conf.auto_detect_payment;
         let dry_run = conf.dry_run.unwrap_or(false);
         let indefinite_access = conf.indefinite_access;
+        let realm = conf.realm.clone();
 
         (
             auth_header,
@@ -1489,6 +1549,7 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
             auto_detect_payment,
             dry_run,
             indefinite_access,
+            realm,
         )
     };
 
@@ -1497,12 +1558,13 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
     // NOTE: no path normalization — stripping .html / trailing-slash suffixes
     // would widen the macaroon scope to the parent directory, allowing a token
     // issued for /docs/page.html to be reused against /docs/secret.
+    // In realm mode the binding is `Realm = <name>` (one payment covers the whole
+    // location); otherwise it's the exact path. Method is bound either way.
     let request_path = uri.clone();
     let request_method = method_caveat_value(method);
-    let caveats = vec![
-        format!("RequestPath = {}", request_path),
-        format!("RequestMethod = {}", request_method),
-    ];
+    // One binding drives mint, verify, and the dry-run log — so they can't drift.
+    let binding = request_binding(realm.as_deref(), &request_path, request_method);
+    let caveats = binding.to_caveats();
 
     let module = match MODULE.get() {
         Some(m) => m,
@@ -1551,7 +1613,7 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         uri,
         method,
         final_amount,
-        caveats.clone(),
+        &binding,
         final_lnurl_addr.clone(),
         auto_detect_payment,
         indefinite_access,
@@ -1683,12 +1745,9 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         // Always send L402 header as well (for Lightning payments)
         // Pass lnurl_addr for per-location LNURL-based invoice generation
         let invoice_start = Instant::now();
-        // Caveats were consumed by the access handler above; rebuild on the 402
-        // path only — saves a Vec<String> clone on the auth-pass hot path.
-        let challenge_caveats = vec![
-            format!("RequestPath = {}", request_path),
-            format!("RequestMethod = {}", request_method),
-        ];
+        // Caveats for the 402 challenge come from the same binding, so the
+        // minted token matches what verification will expect (realm-aware).
+        let challenge_caveats = binding.to_caveats();
         // Catch any panic from the LNURL library (bare .unwrap() calls in
         // l402_middleware's lnurl.rs can panic on network errors). Without this
         // guard a panic would unwind through nginx's C stack — undefined
@@ -1786,7 +1845,7 @@ pub fn l402_access_handler(
     uri: String,
     method: u32,
     amount_msat: i64,
-    caveats: Vec<String>,
+    binding: &RequestBinding,
     lnurl_addr: Option<String>,
     auto_detect_payment: bool,
     indefinite_access: bool,
@@ -1868,67 +1927,46 @@ pub fn l402_access_handler(
                 };
 
                 // 3. Resolve preimage: Redis cache → node lookup
-                let preimage_bytes: Vec<u8> = if let Some(cached) =
-                    get_cached_settled_preimage(&payment_hash)
-                {
-                    debug!("💾 Using cached settled preimage");
-                    cached
-                } else {
-                    // Use a lazily initialized static runtime
-                    static AUTODETECT_RUNTIME: OnceLock<Runtime> = OnceLock::new();
-                    let rt = AUTODETECT_RUNTIME.get_or_init(|| {
-                        match tokio::runtime::Builder::new_multi_thread()
-                            .enable_all()
-                            .build()
-                        {
-                            Ok(rt) => rt,
-                            Err(e) => {
-                                eprintln!("FATAL: failed to create autodetect runtime: {}", e);
-                                std::process::abort();
+                let preimage_bytes: Vec<u8> =
+                    if let Some(cached) = get_cached_settled_preimage(&payment_hash) {
+                        debug!("💾 Using cached settled preimage");
+                        cached
+                    } else {
+                        // Reuse the per-worker LN client + handler runtime (same as
+                        // invoice generation) — no separate detector or runtime.
+                        let rt = get_handler_runtime();
+                        const AUTODETECT_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+                        match rt.block_on(async {
+                            tokio::time::timeout(
+                                AUTODETECT_LOOKUP_TIMEOUT,
+                                module.lookup_invoice(payment_hash.to_vec()),
+                            )
+                            .await
+                        }) {
+                            Ok(Ok(Some(p))) => {
+                                // Cache for future requests
+                                if let Err(e) = cache_settled_preimage(&payment_hash, &p) {
+                                    warn!("⚠️ Failed to cache settled preimage: {}", e);
+                                }
+                                p
+                            }
+                            Ok(Ok(None)) => {
+                                info!("⏳ Invoice not yet settled — returning 402");
+                                return 402;
+                            }
+                            Ok(Err(e)) => {
+                                error!("❌ Node invoice lookup failed: {}", e);
+                                return 500;
+                            }
+                            Err(_) => {
+                                warn!(
+                                "Auto-detect invoice lookup timed out after {}s — returning 402",
+                                AUTODETECT_LOOKUP_TIMEOUT.as_secs()
+                            );
+                                return 402;
                             }
                         }
-                    });
-
-                    match payment_detector::PAYMENT_DETECTOR.get() {
-                        Some(detector) => {
-                            const AUTODETECT_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
-                            match rt.block_on(async {
-                                tokio::time::timeout(
-                                    AUTODETECT_LOOKUP_TIMEOUT,
-                                    detector.lookup_settled_invoice(&payment_hash),
-                                )
-                                .await
-                            }) {
-                                Ok(Ok(Some(p))) => {
-                                    // Cache for future requests
-                                    if let Err(e) = cache_settled_preimage(&payment_hash, &p) {
-                                        warn!("⚠️ Failed to cache settled preimage: {}", e);
-                                    }
-                                    p
-                                }
-                                Ok(Ok(None)) => {
-                                    info!("⏳ Invoice not yet settled — returning 402");
-                                    return 402;
-                                }
-                                Ok(Err(e)) => {
-                                    error!("❌ Node invoice lookup failed: {}", e);
-                                    return 500;
-                                }
-                                Err(_) => {
-                                    warn!(
-                                            "Auto-detect invoice lookup timed out after {}s — returning 402",
-                                            AUTODETECT_LOOKUP_TIMEOUT.as_secs()
-                                        );
-                                    return 402;
-                                }
-                            }
-                        }
-                        None => {
-                            error!("❌ PAYMENT_DETECTOR not initialised");
-                            return 500;
-                        }
-                    }
-                };
+                    };
 
                 // 4. Check replay (skipped when indefinite access is enabled).
                 if !indefinite_access && is_preimage_used(&preimage_bytes) {
@@ -1936,41 +1974,9 @@ pub fn l402_access_handler(
                     return 401;
                 }
 
-                // 5. Build verifier (same logic as the classic path)
-                let mut verifier = Verifier::default();
-                verifier.satisfy_general(|predicate| {
-                    let predicate_str = match std::str::from_utf8(&predicate.0) {
-                        Ok(s) => s,
-                        Err(_) => return false,
-                    };
-                    if let Some(secs_str) = predicate_str.strip_prefix("ExpiresAt = ") {
-                        if let Ok(ts) = secs_str.parse::<i64>() {
-                            let current_time = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .map(|d| d.as_secs() as i64)
-                                .unwrap_or(0);
-                            return current_time <= ts;
-                        }
-                    }
-                    // `RequestMethod = …` and `RequestPath = …` must be
-                    // satisfied by the exact set only. Falling through to
-                    // `true` would let a token issued for one route or method
-                    // verify against any other, defeating the per-route and
-                    // per-method binding on the macaroon.
-                    if predicate_str.starts_with("RequestMethod = ")
-                        || predicate_str.starts_with("RequestPath = ")
-                    {
-                        return false;
-                    }
-                    true
-                });
-                for caveat in &caveats {
-                    if !caveat.starts_with("ExpiresAt = ") {
-                        verifier.satisfy_exact(caveat.clone().into());
-                    }
-                }
-
-                // 6. Verify macaroon signature + payment-hash binding
+                // 5. Verify the macaroon against the request binding. Scope,
+                // method, and expiry enforcement — including the auth-bypass
+                // guard — live in l402_middleware, shared with every consumer.
                 if preimage_bytes.len() != 32 {
                     error!("❌ Preimage from node is not 32 bytes");
                     return 500;
@@ -1979,9 +1985,9 @@ pub fn l402_access_handler(
                 preimage_arr.copy_from_slice(&preimage_bytes);
                 let preimage = lightning::types::payment::PaymentPreimage(preimage_arr);
 
-                match l402::verify_l402_with_verifier(
+                match l402::verify_l402_binding(
                     &mac,
-                    &mut verifier,
+                    binding,
                     module.middleware.root_key.clone(),
                     preimage,
                 ) {
@@ -2014,46 +2020,12 @@ pub fn l402_access_handler(
                         return 401;
                     }
 
-                    // Check expiry using verifier
-                    let mut verifier = Verifier::default();
-                    verifier.satisfy_general(|predicate| {
-                        let predicate_str = match std::str::from_utf8(&predicate.0) {
-                            Ok(s) => s,
-                            Err(_) => return false,
-                        };
-                        if let Some(secs_str) = predicate_str.strip_prefix("ExpiresAt = ") {
-                            if let Ok(ts) = secs_str.parse::<i64>() {
-                                let current_time = SystemTime::now()
-                                    .duration_since(UNIX_EPOCH)
-                                    .map(|d| d.as_secs() as i64)
-                                    .unwrap_or(0);
-                                let is_valid = current_time <= ts;
-                                return is_valid;
-                            }
-                        }
-                        // `RequestMethod = …` and `RequestPath = …` must be
-                        // satisfied by the exact set only. Falling through to
-                        // `true` would let a token issued for one route or
-                        // method verify against any other, defeating the
-                        // per-route and per-method binding.
-                        if predicate_str.starts_with("RequestMethod = ")
-                            || predicate_str.starts_with("RequestPath = ")
-                        {
-                            return false;
-                        }
-                        true
-                    });
-
-                    // Add exact caveats, ignoring ExpiresAt
-                    for caveat in caveats {
-                        if !caveat.starts_with("ExpiresAt = ") {
-                            verifier.satisfy_exact(caveat.into());
-                        }
-                    }
-
-                    match l402::verify_l402_with_verifier(
+                    // Verify the macaroon against the request binding — scope,
+                    // method, and expiry enforcement (plus the auth-bypass guard)
+                    // all live in l402_middleware, shared with every consumer.
+                    match l402::verify_l402_binding(
                         &mac,
-                        &mut verifier,
+                        binding,
                         module.middleware.root_key.clone(),
                         preimage,
                     ) {
@@ -2102,7 +2074,6 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
     info!("🚀 Starting L402 module initialization");
     ngx_log_error!(NGX_LOG_INFO, log, "Starting module initialization");
 
-    payment_detector::init_payment_detector();
     manifest::init_env_snapshot();
 
     // Cache the LN backend type string for structured log lines. We can't
@@ -2956,6 +2927,48 @@ pub unsafe extern "C" fn ngx_http_l402_lnurl_set(
 
         conf.lnurl_addr = Some(lnurl_addr.clone());
         info!("Set L402 LNURL address to: {}", lnurl_addr);
+    }
+
+    std::ptr::null_mut()
+}
+
+/// `l402_realm "<name>";` — opt into location-scoped macaroon binding so one
+/// payment authorizes every path this location serves (see `request_binding`).
+///
+/// # Safety
+///
+/// An nginx config-parsing callback. `cf`, `conf`, and `(*cf).args` are
+/// guaranteed valid and non-null by nginx for the duration of the call, and
+/// `NGX_CONF_TAKE1` guarantees exactly one argument at `args.add(1)`.
+pub unsafe extern "C" fn ngx_http_l402_realm_set(
+    cf: *mut ngx_conf_t,
+    _cmd: *mut ngx_command_t,
+    conf: *mut c_void,
+) -> *mut c_char {
+    // SAFETY: `cf`, `conf`, and `(*cf).args` are guaranteed valid by Nginx
+    // during config-parsing callbacks. `args.add(1)` is safe because
+    // NGX_CONF_TAKE1 ensures exactly one argument is present.
+    unsafe {
+        let conf = &mut *(conf as *mut ModuleConfig);
+        let args = (*(*cf).args).elts as *mut ngx_str_t;
+        let val = (*args.add(1)).to_str().unwrap_or_default().trim();
+
+        // The name goes verbatim into the `Realm = <name>` caveat, which is
+        // compared by exact match. Reject empty / whitespace / control chars so
+        // the caveat can't be malformed or ambiguous. Fails config parse (closed).
+        if val.is_empty() || val.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            error!(
+                "❌ l402_realm requires a non-empty name with no whitespace or control characters"
+            );
+            return b"l402_realm requires a non-empty name without whitespace\0".as_ptr()
+                as *mut c_char;
+        }
+
+        conf.realm = Some(val.to_string());
+        info!(
+            "⚙️ l402_realm = \"{}\" — one payment authorizes this whole location",
+            val
+        );
     }
 
     std::ptr::null_mut()

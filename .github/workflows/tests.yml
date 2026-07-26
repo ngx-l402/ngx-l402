@@ -1507,7 +1507,7 @@ jobs:
           CASHU_WALLET_MNEMONIC="" docker-compose -f docker-compose.yml up -d --no-deps nginx-lnd
           sleep 15
           # A wallet.mnemonic file must have been created
-          MNEMONIC_FILE=$(docker run --rm -v ngx_l402_cashu-data:/data alpine \
+          MNEMONIC_FILE=$(docker run --rm -v ngx-l402_cashu-data:/data alpine \
             sh -c 'cat /data/wallet.mnemonic 2>/dev/null || echo ""')
           if [ -z "$MNEMONIC_FILE" ]; then
             echo "❌ No wallet.mnemonic generated on first run"
@@ -1516,7 +1516,7 @@ jobs:
           fi
           echo "✅ wallet.mnemonic generated on first run"
           # A fingerprint must have been recorded
-          FP1=$(docker run --rm -v ngx_l402_cashu-data:/data alpine \
+          FP1=$(docker run --rm -v ngx-l402_cashu-data:/data alpine \
             sh -c 'cat /data/wallet.fingerprint 2>/dev/null | tr -d "[:space:]" || echo ""')
           if [ -z "$FP1" ]; then
             echo "❌ No wallet.fingerprint recorded on first run"
@@ -1527,7 +1527,7 @@ jobs:
           # the same fingerprint must be re-recorded.
           docker-compose -f docker-compose.yml restart nginx-lnd
           sleep 10
-          FP2=$(docker run --rm -v ngx_l402_cashu-data:/data alpine \
+          FP2=$(docker run --rm -v ngx-l402_cashu-data:/data alpine \
             sh -c 'cat /data/wallet.fingerprint 2>/dev/null | tr -d "[:space:]" || echo ""')
           if [ "$FP1" != "$FP2" ]; then
             echo "❌ Fingerprint changed across restart ($FP1 != $FP2) — mnemonic not persisted"
@@ -2301,7 +2301,7 @@ jobs:
           # CI run causes Eclair to get stuck waiting for a funding tx that no
           # longer exists on the regtest chain.
           docker-compose -f docker-compose.yml rm -fsv eclair || true
-          docker volume rm ngx_l402_eclair-data 2>/dev/null || true
+          docker volume rm ngx-l402_eclair-data 2>/dev/null || true
           docker-compose -f docker-compose.yml up -d eclair nginx-eclair
 
           echo "Waiting for Eclair to be ready and synced..."

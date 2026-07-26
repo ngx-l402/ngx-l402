@@ -22,3 +22,38 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # tonic's build script shells out to protoc; not present on clean runners.
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      # nginx-sys builds bindings from the nginx source tree, so clippy needs
+      # it configured first. --with-compat matches the Dockerfile build and
+      # covers the x_real_ip field that src/lib.rs reads (NGX_HTTP_REALIP is
+      # defined by --with-compat; the two --without flags only keep runner
+      # deps minimal and don't affect the binding surface for this code).
+      - name: Download and configure nginx source
+        run: |
+          curl -fsSL https://nginx.org/download/nginx-1.28.0.tar.gz | tar xz
+          cd nginx-1.28.0
+          ./configure --with-compat \
+            --without-http_rewrite_module --without-http_gzip_module
+
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
+        env:
+          NGINX_SOURCE_DIR: ${{ github.workspace }}/nginx-1.28.0

@@ -1,5 +1,3 @@
-use env_logger;
-use hex;
 use l402_middleware::caveats::RequestBinding;
 use l402_middleware::lndrpc::lnrpc;
 use l402_middleware::middleware::L402Middleware;
@@ -159,6 +157,9 @@ fn get_cashu_token_ttl() -> u64 {
 
 // Cache for LNURL clients - lazy initialization on first use per address
 // Uses RwLock instead of Mutex since reads (cache hits) vastly outnumber writes (new client creation)
+// The nested type mirrors the cached value's shape; extracting a `type`
+// alias for it is intentionally deferred.
+#[allow(clippy::type_complexity)]
 static LNURL_CLIENT_CACHE: OnceLock<
     tokio::sync::RwLock<HashMap<String, Arc<tokio::sync::Mutex<dyn lnclient::LNClient + Send>>>>,
 > = OnceLock::new();
@@ -480,7 +481,7 @@ pub fn cache_settled_preimage(payment_hash: &[u8], preimage: &[u8]) -> Result<()
 
 /// Parse the macaroon from an L402 authorization string and return
 /// the raw 32-byte payment hash embedded in its identifier.
-
+///
 /// Accepts both formats:
 ///   - `L402 <macaroon_b64>:<preimage_hex>`  (classic)
 ///   - `L402 <macaroon_b64>`                 (auto-detect)
@@ -1096,7 +1097,7 @@ unsafe extern "C" fn metrics_shm_init(zone: *mut ngx_shm_zone_t, data: *mut c_vo
         error!("⚠️ l402_metrics: slab allocation failed; metrics will be per-worker");
         return NGX_ERROR as ngx_int_t;
     }
-    if (raw as usize) % metrics::BLOCK_ALIGN != 0 {
+    if !(raw as usize).is_multiple_of(metrics::BLOCK_ALIGN) {
         // Should not happen (slab slots are at least word-aligned), but writing
         // an AtomicU64 array through a misaligned pointer would be UB.
         error!("⚠️ l402_metrics: slab allocation misaligned; metrics will be per-worker");
@@ -1425,7 +1426,7 @@ unsafe fn send_html_response(r: *mut ngx_http_request_t, status: u16, body: Stri
         || send_status.0 > NGX_OK as ngx_int_t
         || req.header_only()
     {
-        return send_status.0 as isize;
+        return send_status.0;
     }
 
     let rc = unsafe { req.output_filter(&mut *chain).0 };
@@ -1456,10 +1457,11 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-// SAFETY: This function is an Nginx access-phase handler registered via
-// `postconfiguration`. Nginx guarantees that `request`, `request->connection`,
-// `request->connection->log`, and `request->loc_conf` are valid, non-null
-// pointers for the handler's lifetime.
+/// # Safety
+/// This function is an Nginx access-phase handler registered via
+/// `postconfiguration`. Nginx guarantees that `request`, `request->connection`,
+/// `request->connection->log`, and `request->loc_conf` are valid, non-null
+/// pointers for the handler's lifetime.
 pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_request_t) -> isize {
     let handler_start = Instant::now();
 
@@ -1507,8 +1509,7 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         let loc_conf = r.loc_conf;
         // SAFETY: The config slot is allocated by `create_loc_conf` and merged
         // by Nginx before the access phase runs.
-        let conf =
-            &*((*loc_conf.offset(ngx_http_l402_module.ctx_index as isize)) as *const ModuleConfig);
+        let conf = &*((*loc_conf.add(ngx_http_l402_module.ctx_index)) as *const ModuleConfig);
 
         if !conf.enable {
             ngx_log_error!(NGX_LOG_INFO, log_ref, "L402 is disabled for this location");
@@ -1840,6 +1841,9 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
     result
 }
 
+// Thin entry point the C wrapper forwards to; packing its 8 parameters into
+// a struct is intentionally deferred to keep the FFI call site simple.
+#[allow(clippy::too_many_arguments)]
 pub fn l402_access_handler(
     auth_header: Option<String>,
     uri: String,
@@ -2059,6 +2063,12 @@ pub fn l402_access_handler(
     402
 }
 
+/// Nginx module init callback, invoked once at master-process startup.
+///
+/// # Safety
+/// `cycle` must be the valid cycle pointer supplied by Nginx when it invokes
+/// the module's init callback. It is null-checked defensively before any
+/// dereference; `cycle->log` is guaranteed valid by Nginx at this stage.
 pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
     if cycle.is_null() {
         return -1;
@@ -2485,6 +2495,10 @@ fn dry_run_runtime() -> &'static Runtime {
 /// exposition format at the configured location (e.g. `/metrics`).
 ///
 /// Only `GET` and `HEAD` are accepted; anything else returns `405`.
+///
+/// # Safety
+/// `r` must be the non-null, valid request pointer Nginx passes to
+/// content-phase handlers; it stays valid for the handler's lifetime.
 pub unsafe extern "C" fn l402_metrics_content_handler(r: *mut ngx_http_request_t) -> ngx_int_t {
     // SAFETY: nginx passes a non-null, valid request pointer to content
     // phase handlers for the lifetime of the call.
@@ -2538,6 +2552,13 @@ pub unsafe extern "C" fn l402_metrics_content_handler(r: *mut ngx_http_request_t
     unsafe { req.output_filter(&mut *chain).0 }
 }
 
+/// Directive handler for `l402_dry_run on|off;`.
+///
+/// # Safety
+/// `cf` and `conf` are the valid, non-null pointers Nginx passes to
+/// directive-parsing callbacks; `conf` points to this location's
+/// `ModuleConfig`. `(*cf).args` holds exactly one argument because the
+/// directive is declared `NGX_CONF_TAKE1`.
 pub unsafe extern "C" fn ngx_http_l402_dry_run_set(
     cf: *mut ngx_conf_t,
     _cmd: *mut ngx_command_t,
@@ -2558,12 +2579,19 @@ pub unsafe extern "C" fn ngx_http_l402_dry_run_set(
             conf.dry_run = Some(false);
         } else {
             error!("Invalid l402_dry_run value: '{}' (expected on/off)", val);
-            return b"l402_dry_run: expected 'on' or 'off'\0".as_ptr() as *mut c_char;
+            return c"l402_dry_run: expected 'on' or 'off'".as_ptr() as *mut c_char;
         }
     }
     std::ptr::null_mut()
 }
 
+/// Directive handler for `l402_indefinite_access on|off;`.
+///
+/// # Safety
+/// `cf` and `conf` are the valid, non-null pointers Nginx passes to
+/// directive-parsing callbacks; `conf` points to this location's
+/// `ModuleConfig`. `(*cf).args` holds exactly one argument because the
+/// directive is declared `NGX_CONF_TAKE1`.
 pub unsafe extern "C" fn ngx_http_l402_indefinite_access_set(
     cf: *mut ngx_conf_t,
     _cmd: *mut ngx_command_t,
@@ -2595,12 +2623,19 @@ pub unsafe extern "C" fn ngx_http_l402_indefinite_access_set(
                 "Invalid l402_indefinite_access value: '{}' (expected on/off)",
                 val
             );
-            return b"l402_indefinite_access: expected 'on' or 'off'\0".as_ptr() as *mut c_char;
+            return c"l402_indefinite_access: expected 'on' or 'off'".as_ptr() as *mut c_char;
         }
     }
     std::ptr::null_mut()
 }
 
+/// Directive handler for `l402_metrics;` (no args). Registers the metrics
+/// content handler for the location.
+///
+/// # Safety
+/// `cf` is the valid config pointer Nginx passes to directive-parsing
+/// callbacks; the core location config obtained through it is null-checked
+/// before its handler slot is written. The `conf` argument is unused.
 pub unsafe extern "C" fn ngx_http_l402_metrics_set(
     cf: *mut ngx_conf_t,
     _cmd: *mut ngx_command_t,
@@ -2615,15 +2650,15 @@ pub unsafe extern "C" fn ngx_http_l402_metrics_set(
                 .map(|r| r as *mut _)
                 .unwrap_or(std::ptr::null_mut());
         if clcf.is_null() {
-            return b"l402_metrics: missing core loc conf\0".as_ptr() as *mut c_char;
+            return c"l402_metrics: missing core loc conf".as_ptr() as *mut c_char;
         }
         // Refuse to silently clobber a content handler registered by another
         // directive (e.g. `proxy_pass`, `return`, `alias` + `try_files`, etc.).
         // Fail fast at `nginx -t` rather than surprise operators at runtime.
         if (*clcf).handler.is_some() {
             error!("l402_metrics: another content handler is already registered for this location");
-            return b"l402_metrics: conflicts with another content handler in this location\0"
-                .as_ptr() as *mut c_char;
+            return c"l402_metrics: conflicts with another content handler in this location".as_ptr()
+                as *mut c_char;
         }
         (*clcf).handler = Some(l402_metrics_content_handler);
     }
@@ -2631,6 +2666,13 @@ pub unsafe extern "C" fn ngx_http_l402_metrics_set(
     std::ptr::null_mut()
 }
 
+/// Directive handler for `l402_manifest;` (no args). Registers the manifest
+/// content handler for the location.
+///
+/// # Safety
+/// Same guarantees as `ngx_http_l402_metrics_set`: `cf` is the valid config
+/// pointer Nginx passes to directive-parsing callbacks, and the core
+/// location config obtained through it is null-checked before use.
 pub unsafe extern "C" fn ngx_http_l402_manifest_set(
     cf: *mut ngx_conf_t,
     _cmd: *mut ngx_command_t,
@@ -2643,13 +2685,13 @@ pub unsafe extern "C" fn ngx_http_l402_manifest_set(
                 .map(|r| r as *mut _)
                 .unwrap_or(std::ptr::null_mut());
         if clcf.is_null() {
-            return b"l402_manifest: missing core loc conf\0".as_ptr() as *mut c_char;
+            return c"l402_manifest: missing core loc conf".as_ptr() as *mut c_char;
         }
         if (*clcf).handler.is_some() {
             error!(
                 "l402_manifest: another content handler is already registered for this location"
             );
-            return b"l402_manifest: conflicts with another content handler in this location\0"
+            return c"l402_manifest: conflicts with another content handler in this location"
                 .as_ptr() as *mut c_char;
         }
         (*clcf).handler = Some(l402_manifest_content_handler);
@@ -2658,6 +2700,12 @@ pub unsafe extern "C" fn ngx_http_l402_manifest_set(
     std::ptr::null_mut()
 }
 
+/// Directive handler for `l402_manifest_hide;` (no args). Excludes the
+/// location from the `.well-known/l402-services` capability manifest.
+///
+/// # Safety
+/// `conf` must point to this location's `ModuleConfig`, which Nginx
+/// guarantees is valid and non-null during directive-parsing callbacks.
 pub unsafe extern "C" fn ngx_http_l402_manifest_hide_set(
     _cf: *mut ngx_conf_t,
     _cmd: *mut ngx_command_t,
@@ -2679,6 +2727,10 @@ pub unsafe extern "C" fn ngx_http_l402_manifest_hide_set(
 /// Only `GET` and `HEAD` are accepted; anything else returns `405`. The
 /// manifest is rebuilt on every request — cheap because the registry is
 /// in-process and small (one entry per l402-protected location).
+///
+/// # Safety
+/// `r` must be the non-null, valid request pointer Nginx passes to
+/// content-phase handlers; it stays valid for the handler's lifetime.
 pub unsafe extern "C" fn l402_manifest_content_handler(r: *mut ngx_http_request_t) -> ngx_int_t {
     let r_ref = unsafe { &mut *r };
 
@@ -2763,6 +2815,14 @@ fn collect_route_snapshots() -> Vec<manifest::RouteSnapshot> {
         .collect()
 }
 
+/// Directive handler for `l402 on|off;`. Enables L402 for the location and
+/// registers it in the manifest route registry.
+///
+/// # Safety
+/// `cf` and `conf` are the valid, non-null pointers Nginx passes to
+/// directive-parsing callbacks; `conf` points to this location's
+/// `ModuleConfig`. `(*cf).args` holds exactly one argument because the
+/// directive is declared `NGX_CONF_TAKE1`.
 pub unsafe extern "C" fn ngx_http_l402_set(
     cf: *mut ngx_conf_t,
     _cmd: *mut ngx_command_t,
@@ -2834,6 +2894,13 @@ unsafe fn location_name_str(cf: *mut ngx_conf_t) -> Option<String> {
     Some(String::from_utf8_lossy(slice).into_owned())
 }
 
+/// Directive handler for `l402_amount_msat_default <msat>;`.
+///
+/// # Safety
+/// `cf` and `conf` are the valid, non-null pointers Nginx passes to
+/// directive-parsing callbacks; `conf` points to this location's
+/// `ModuleConfig`. `(*cf).args` holds exactly one argument because the
+/// directive is declared `NGX_CONF_TAKE1`.
 pub unsafe extern "C" fn ngx_http_l402_amount_set(
     cf: *mut ngx_conf_t,
     _cmd: *mut ngx_command_t,
@@ -2863,6 +2930,13 @@ pub unsafe extern "C" fn ngx_http_l402_amount_set(
     std::ptr::null_mut()
 }
 
+/// Directive handler for `l402_macaroon_timeout <seconds>;`.
+///
+/// # Safety
+/// `cf` and `conf` are the valid, non-null pointers Nginx passes to
+/// directive-parsing callbacks; `conf` points to this location's
+/// `ModuleConfig`. `(*cf).args` holds exactly one argument because the
+/// directive is declared `NGX_CONF_TAKE1`.
 pub unsafe extern "C" fn ngx_http_l402_timeout_set(
     cf: *mut ngx_conf_t,
     _cmd: *mut ngx_command_t,
@@ -2897,6 +2971,14 @@ pub unsafe extern "C" fn ngx_http_l402_timeout_set(
     std::ptr::null_mut()
 }
 
+/// Directive handler for `l402_lnurl_addr <address>;`. Falls back to the
+/// `LNURL_ADDRESS` env var when the config value is empty.
+///
+/// # Safety
+/// `cf` and `conf` are the valid, non-null pointers Nginx passes to
+/// directive-parsing callbacks; `conf` points to this location's
+/// `ModuleConfig`. `(*cf).args` holds exactly one argument because the
+/// directive is declared `NGX_CONF_TAKE1`.
 pub unsafe extern "C" fn ngx_http_l402_lnurl_set(
     cf: *mut ngx_conf_t,
     _cmd: *mut ngx_command_t,
@@ -2919,7 +3001,7 @@ pub unsafe extern "C" fn ngx_http_l402_lnurl_set(
                 Ok(env_val) if !env_val.is_empty() => env_val,
                 _ => {
                     error!("❌ LNURL_ADDRESS environment variable is not set and no value provided in config");
-                    return b"LNURL_ADDRESS environment variable is not set\0".as_ptr()
+                    return c"LNURL_ADDRESS environment variable is not set".as_ptr()
                         as *mut c_char;
                 }
             }
@@ -2960,7 +3042,7 @@ pub unsafe extern "C" fn ngx_http_l402_realm_set(
             error!(
                 "❌ l402_realm requires a non-empty name with no whitespace or control characters"
             );
-            return b"l402_realm requires a non-empty name without whitespace\0".as_ptr()
+            return c"l402_realm requires a non-empty name without whitespace".as_ptr()
                 as *mut c_char;
         }
 
@@ -3082,6 +3164,12 @@ fn check_invoice_rate_limit(ip: &str, path: &str, max_requests: u32, window_secs
 ///   `l402_invoice_rate_limit 10r/h;`  - 10 per hour
 ///   `l402_invoice_rate_limit 2r/s;`   - 2 per second
 ///   `l402_invoice_rate_limit 5;`      - 5 per minute (shorthand)
+///
+/// # Safety
+/// `cf` and `conf` are the pointers Nginx passes to directive-parsing
+/// callbacks; both are null-checked defensively before use. When valid,
+/// `conf` points to this location's `ModuleConfig`, and `(*cf).args` holds
+/// exactly one argument because the directive is declared `NGX_CONF_TAKE1`.
 pub unsafe extern "C" fn ngx_http_l402_invoice_rate_limit_set(
     cf: *mut ngx_conf_t,
     _cmd: *mut ngx_command_t,
@@ -3093,8 +3181,7 @@ pub unsafe extern "C" fn ngx_http_l402_invoice_rate_limit_set(
     // single argument, guaranteed present by NGX_CONF_TAKE1.
     unsafe {
         if cf.is_null() || conf.is_null() {
-            return b"l402_invoice_rate_limit: null configuration pointer\0".as_ptr()
-                as *mut c_char;
+            return c"l402_invoice_rate_limit: null configuration pointer".as_ptr() as *mut c_char;
         }
         let conf = &mut *(conf as *mut ModuleConfig);
         let val = (*((*(*cf).args).elts as *mut ngx_str_t).add(1))
@@ -3110,13 +3197,20 @@ pub unsafe extern "C" fn ngx_http_l402_invoice_rate_limit_set(
             }
             None => {
                 error!("Invalid l402_invoice_rate_limit value: '{}'", val);
-                return b"l402_invoice_rate_limit: expected e.g. '5r/m', '10r/h', '2r/s', or '5'\0"
+                return c"l402_invoice_rate_limit: expected e.g. '5r/m', '10r/h', '2r/s', or '5'"
                     .as_ptr() as *mut c_char;
             }
         }
     }
     std::ptr::null_mut()
 }
+/// Directive handler for `l402_auto_detect_payment on|off;`.
+///
+/// # Safety
+/// `cf` and `conf` are the valid, non-null pointers Nginx passes to
+/// directive-parsing callbacks; `conf` points to this location's
+/// `ModuleConfig`. `(*cf).args` holds exactly one argument because the
+/// directive is declared `NGX_CONF_TAKE1`.
 pub unsafe extern "C" fn ngx_http_l402_auto_detect_payment_set(
     cf: *mut ngx_conf_t,
     _cmd: *mut ngx_command_t,

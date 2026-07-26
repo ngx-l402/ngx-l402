@@ -1,8 +1,6 @@
 use crate::cashu_redemption_logger;
 use crate::REDIS_POOL;
-use cdk;
 use cdk::mint_url::MintUrl;
-use hex;
 use l402_middleware::lnclient;
 use l402_middleware::lndrpc::lnrpc;
 use log::{debug, error, info, warn};
@@ -17,7 +15,7 @@ use url::Url;
 
 // Thread-local storage to track processed tokens
 thread_local! {
-    static PROCESSED_TOKENS: RefCell<Option<HashSet<String>>> = RefCell::new(None);
+    static PROCESSED_TOKENS: RefCell<Option<HashSet<String>>> = const { RefCell::new(None) };
 }
 
 const MSAT_PER_SAT: u64 = 1000;
@@ -377,7 +375,7 @@ fn verify_proof_dleq_offline(
 
 /// Check if multi-tenant LNURL mode is enabled (LN_CLIENT_TYPE=LNURL)
 pub fn is_multi_tenant_enabled() -> bool {
-    LN_CLIENT_TYPE.get().map_or(false, |t| t == "LNURL")
+    LN_CLIENT_TYPE.get().is_some_and(|t| t == "LNURL")
 }
 
 /// Initialize the LN client type for cashu redemption (called from lib.rs).
@@ -710,7 +708,7 @@ fn group_proofs_by_lnurl(
             continue;
         }
 
-        grouped.entry(lnurl).or_insert_with(Vec::new).push(proof);
+        grouped.entry(lnurl).or_default().push(proof);
     }
 
     Ok(grouped)
@@ -998,7 +996,7 @@ pub async fn verify_cashu_token_p2pk(
         tokens
             .borrow()
             .as_ref()
-            .map_or(false, |set| set.contains(token))
+            .is_some_and(|set| set.contains(token))
     });
 
     if token_seen {

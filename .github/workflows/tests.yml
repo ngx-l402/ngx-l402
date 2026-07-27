@@ -815,18 +815,25 @@ jobs:
           docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=$wallet_name generatetoaddress 6 "$address"
 
           # Confirmations alone don't make a channel usable — both nodes must see
-          # them and exchange channel_ready. Paying before that fails with "no route".
-          echo "Waiting for LND->CLN channel to become active..."
-          for i in $(seq 1 60); do
-            active=$(docker exec lndnode lncli -n regtest listchannels 2>/dev/null | jq -r '[.channels[]? | select(.active)] | length' || echo 0)
-            if [ "${active:-0}" -ge 1 ]; then
-              echo "  ✓ channel active after $((i*2))s"
+          # them and exchange channel_ready. Paying before that fails with NO_ROUTE.
+          # Check BOTH sides, and match on the CLN pubkey: LND also has a channel
+          # to lndnode-receiver, so an unfiltered count can pass on the wrong one.
+          # CLN's view matters too — it embeds the route hint in the invoice.
+          echo "Waiting for the LND<->CLN channel to become usable on both sides..."
+          for i in $(seq 1 90); do
+            lnd_ok=$(docker exec lndnode lncli -n regtest listchannels 2>/dev/null \
+              | jq -r --arg pk "$cln_pubkey" '[.channels[]? | select(.active and .remote_pubkey==$pk)] | length' 2>/dev/null || echo 0)
+            cln_ok=$(docker exec cln lightning-cli --network=regtest listpeerchannels 2>/dev/null \
+              | jq -r '[.channels[]? | select(.state=="CHANNELD_NORMAL")] | length' 2>/dev/null || echo 0)
+            if [ "${lnd_ok:-0}" -ge 1 ] && [ "${cln_ok:-0}" -ge 1 ]; then
+              echo "  ✓ channel usable on both sides after $((i*2))s"
               break
             fi
-            if [ "$i" -eq 60 ]; then
-              echo "  ✗ no active channel after 120s"
+            if [ "$i" -eq 90 ]; then
+              echo "  ✗ channel not usable after 180s (lnd=$lnd_ok cln=$cln_ok)"
               docker exec lndnode lncli -n regtest listchannels || true
               docker exec lndnode lncli -n regtest pendingchannels || true
+              docker exec cln lightning-cli --network=regtest listpeerchannels || true
               exit 1
             fi
             sleep 2

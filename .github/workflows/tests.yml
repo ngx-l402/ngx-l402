@@ -624,9 +624,10 @@ jobs:
         run: |
           source .github/scripts/ci-wait.sh
           echo "Testing with CLN configuration..."
-          wait_http http://0.0.0.0:8000/protected 402 90 || { docker logs nginx-cln; exit 1; }
-
+          # Free route first — a 402 needs the CLN socket the chmod unlocks.
+          wait_http http://0.0.0.0:8000/ 200 90 || { docker logs nginx-cln; exit 1; }
           docker exec nginx-cln chmod 777 /root /root/.lightning /root/.lightning/regtest
+          wait_http http://0.0.0.0:8000/protected 402 60 || { docker logs nginx-cln; exit 1; }
 
           # Test free route
           echo "Testing free route..."
@@ -705,9 +706,11 @@ jobs:
           export BOLT12_OFFER
           docker-compose -f docker-compose.yml up -d nginx-bolt12
           source .github/scripts/ci-wait.sh
-          wait_http http://0.0.0.0:8000/protected 402 90 || { docker logs nginx-bolt12; exit 1; }
+          # Free route first — a 402 needs the CLN socket the chmod unlocks.
+          wait_http http://0.0.0.0:8000/ 200 90 || { docker logs nginx-bolt12; exit 1; }
           # Set permissions on CLN socket (same as CLN tests)
           docker exec nginx-bolt12 chmod 777 /root /root/.lightning /root/.lightning/regtest
+          wait_http http://0.0.0.0:8000/protected 402 60 || { docker logs nginx-bolt12; exit 1; }
 
       - name: Run Integration Tests - BOLT12
         run: |
@@ -987,8 +990,10 @@ jobs:
           source .github/scripts/ci-wait.sh
           echo "Testing CLN Autodetect Payment..."
           docker-compose -f docker-compose.yml up -d nginx-cln
-          wait_http http://0.0.0.0:8000/protected 402 90 || { docker logs nginx-cln; exit 1; }
+          # Free route first — a 402 needs the CLN socket the chmod unlocks.
+          wait_http http://0.0.0.0:8000/ 200 90 || { docker logs nginx-cln; exit 1; }
           docker exec nginx-cln chmod 777 /root /root/.lightning /root/.lightning/regtest
+          wait_http http://0.0.0.0:8000/protected 402 60 || { docker logs nginx-cln; exit 1; }
 
           # Get invoice from CLN
           response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected-auto)
@@ -1513,11 +1518,10 @@ jobs:
           docker exec nginx-lnd rm -f /app/data/wallet.fingerprint /app/data/wallet.mnemonic
           # Start without CASHU_WALLET_MNEMONIC in the env so a mnemonic is generated
           CASHU_WALLET_MNEMONIC="" docker-compose -f docker-compose.yml up -d --no-deps nginx-lnd
-          # nginx only serves once module init has finished — which is also when
-          # the mnemonic has been generated and persisted. Poll for that rather
-          # than guessing, or the file check below races module startup.
+          # nginx serves only after module init, which is when the mnemonic is
+          # written — so this also gates the file check below.
           source .github/scripts/ci-wait.sh
-          wait_http http://0.0.0.0:8000/protected 402 90 || { docker logs nginx-lnd | tail -30; exit 1; }
+          wait_http http://0.0.0.0:8000/ 200 90 || { docker logs nginx-lnd | tail -30; exit 1; }
           # A wallet.mnemonic file must have been created
           MNEMONIC_FILE=$(docker run --rm -v ngx-l402_cashu-data:/data alpine \
             sh -c 'cat /data/wallet.mnemonic 2>/dev/null || echo ""')
@@ -1538,7 +1542,7 @@ jobs:
           # Restart — the generated mnemonic must be reloaded from wallet.mnemonic;
           # the same fingerprint must be re-recorded.
           docker-compose -f docker-compose.yml restart nginx-lnd
-          wait_http http://0.0.0.0:8000/protected 402 90 || { docker logs nginx-lnd | tail -30; exit 1; }
+          wait_http http://0.0.0.0:8000/ 200 90 || { docker logs nginx-lnd | tail -30; exit 1; }
           FP2=$(docker run --rm -v ngx-l402_cashu-data:/data alpine \
             sh -c 'cat /data/wallet.fingerprint 2>/dev/null | tr -d "[:space:]" || echo ""')
           if [ "$FP1" != "$FP2" ]; then

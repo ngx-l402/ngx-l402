@@ -82,7 +82,9 @@ jobs:
           echo "Testing with LNURL configuration..."
           # Poll until nginx answers instead of guessing at a sleep: module
           # startup does LN client + Redis + Cashu init and can exceed a fixed wait.
-          wait_http http://0.0.0.0:8000/protected 402 90 || { docker logs nginx-lnurl; exit 1; }
+          # Free route only: /protected resolves the LNURL address over the
+          # network, so polling it would hammer a third party once per second.
+          wait_http http://0.0.0.0:8000/ 200 90 || { docker logs nginx-lnurl; exit 1; }
           docker logs nginx-lnurl
 
           # Test free route
@@ -817,7 +819,9 @@ jobs:
         run: |
           source .github/scripts/ci-wait.sh
           echo "Testing with NWC configuration..."
-          wait_http http://0.0.0.0:8000/protected 402 120 || { docker logs nginx-nwc; exit 1; }
+          # Free route only: /protected mints an invoice over the external Nostr
+          # relay, so polling it would hammer a third party once per second.
+          wait_http http://0.0.0.0:8000/ 200 90 || { docker logs nginx-nwc; exit 1; }
 
           # Test free route
           echo "Testing free route..."

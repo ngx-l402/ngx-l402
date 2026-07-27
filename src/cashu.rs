@@ -21,9 +21,7 @@ thread_local! {
 const MSAT_PER_SAT: u64 = 1000;
 
 // Database singleton using cdk-sqlite
-// Opened per worker in `init_worker_db`, not in the master.
 static CASHU_DB: OnceLock<Arc<cdk_sqlite::WalletSqliteDatabase>> = OnceLock::new();
-static CASHU_DB_URL: OnceLock<String> = OnceLock::new();
 
 // Whitelisted mints singleton
 static WHITELISTED_MINTS: OnceLock<HashSet<String>> = OnceLock::new();
@@ -451,18 +449,16 @@ pub fn initialize_cashu(db_url: &str) -> Result<(), String> {
     // that owns this DB's funds (changed/typo'd mnemonic would orphan them).
     check_wallet_fingerprint(db_url)?;
 
-    let _ = CASHU_DB_URL.set(db_url.to_string());
-
     // Create runtime for async initialization
     let rt = Runtime::new().expect("Failed to create runtime");
 
-    // Open once to fail fast on a bad path, then drop: a SQLite connection
-    // can't cross fork(), so workers open their own in `init_worker_db`.
+    // Initialize SQLite database with WAL mode
     rt.block_on(async {
         match cdk_sqlite::WalletSqliteDatabase::new(db_url).await {
             Ok(db) => {
                 info!("✅ Cashu SQLite database initialized successfully with WAL mode");
-                drop(db);
+                let _ = CASHU_DB.set(Arc::new(db));
+
                 Ok(())
             }
             Err(e) => {
@@ -470,28 +466,6 @@ pub fn initialize_cashu(db_url: &str) -> Result<(), String> {
                 error!("❌ {}", error);
                 Err(error)
             }
-        }
-    })
-}
-
-/// Open this worker's own SQLite handle. Called from `init_process`, after fork.
-pub fn init_worker_db() -> Result<(), String> {
-    if CASHU_DB.get().is_some() {
-        return Ok(());
-    }
-    let db_url = match CASHU_DB_URL.get() {
-        Some(u) => u.clone(),
-        None => return Ok(()), // Cashu not configured
-    };
-
-    let rt = Runtime::new().map_err(|e| format!("Failed to create runtime: {}", e))?;
-    rt.block_on(async {
-        match cdk_sqlite::WalletSqliteDatabase::new(db_url.as_str()).await {
-            Ok(db) => {
-                let _ = CASHU_DB.set(Arc::new(db));
-                Ok(())
-            }
-            Err(e) => Err(format!("Failed to open Cashu database in worker: {:?}", e)),
         }
     })
 }

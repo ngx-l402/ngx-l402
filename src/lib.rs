@@ -1287,7 +1287,7 @@ pub static mut ngx_http_l402_module: ngx_module_t = ngx_module_t {
 
     init_master: None,
     init_module: Some(init_module as unsafe extern "C" fn(*mut ngx_cycle_s) -> isize),
-    init_process: Some(init_process as unsafe extern "C" fn(*mut ngx_cycle_s) -> isize),
+    init_process: None,
     init_thread: None,
     exit_thread: None,
     exit_process: None,
@@ -2073,23 +2073,6 @@ pub fn l402_access_handler(
 
 /// Nginx module init callback, invoked once at master-process startup.
 ///
-/// Per-worker init, run by nginx after it forks. The Cashu SQLite handle is
-/// opened here so each worker owns its own, as with `WORKER_LN_CLIENT`.
-///
-/// # Safety
-/// `cycle` must be the valid cycle pointer supplied by Nginx when it invokes the
-/// module's per-process init callback.
-pub unsafe extern "C" fn init_process(cycle: *mut ngx_cycle_s) -> isize {
-    if cycle.is_null() {
-        return -1;
-    }
-    if let Err(e) = cashu::init_worker_db() {
-        error!("❌ Failed to open Cashu database in worker: {}", e);
-        return -1;
-    }
-    0
-}
-
 /// # Safety
 /// `cycle` must be the valid cycle pointer supplied by Nginx when it invokes
 /// the module's init callback. It is null-checked defensively before any

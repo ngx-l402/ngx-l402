@@ -40,6 +40,12 @@ SET lnurl:/api/tenant1 alice@getalby.com
 SET lnurl:/api/tenant2 bob@getalby.com
 ```
 
+> [!NOTE]
+> These keys set the payout destination for a route — for Lightning invoices and
+> for Cashu redemption, where a token accepted on a route is melted to the LNURL
+> that route maps to. Redis is a trusted component here: bind it to a private
+> interface, set `requirepass`, and limit write access to tenant configuration.
+
 ---
 
 ## Replay Attack Prevention

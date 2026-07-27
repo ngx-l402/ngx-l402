@@ -108,7 +108,12 @@ Environment=CASHU_MAX_PROOFS_PER_MELT=1000
 # One-time setup — persists across restarts
 sudo mkdir -p /var/lib/nginx
 sudo chown nginx:nginx /var/lib/nginx
-sudo chmod 755 /var/lib/nginx
+sudo chmod 750 /var/lib/nginx
 ```
 
 The `cdk-sqlite` crate automatically creates the database file and tables. Database location: `/var/lib/nginx/cashu_tokens.db`
+
+> [!NOTE]
+> This directory holds the token database and, when the mnemonic is
+> auto-generated, `wallet.mnemonic` (mode `0600`). Keep it owned by the nginx
+> user, and include both files in your encrypted backups.

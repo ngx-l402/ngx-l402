@@ -78,9 +78,12 @@ jobs:
 
       - name: Run Integration Tests - LNURL
         run: |
-          docker logs nginx-lnurl
+          source .github/scripts/ci-wait.sh
           echo "Testing with LNURL configuration..."
-          sleep 15
+          # Poll until nginx answers instead of guessing at a sleep: module
+          # startup does LN client + Redis + Cashu init and can exceed a fixed wait.
+          wait_http http://0.0.0.0:8000/protected 402 90 || { docker logs nginx-lnurl; exit 1; }
+          docker logs nginx-lnurl
 
           # Test free route
           echo "Testing free route..."
@@ -619,8 +622,9 @@ jobs:
 
       - name: Run Integration Tests - CLN
         run: |
+          source .github/scripts/ci-wait.sh
           echo "Testing with CLN configuration..."
-          sleep 15
+          wait_http http://0.0.0.0:8000/protected 402 90 || { docker logs nginx-cln; exit 1; }
 
           docker exec nginx-cln chmod 777 /root /root/.lightning /root/.lightning/regtest
 
@@ -700,7 +704,8 @@ jobs:
           echo "Starting nginx-bolt12 with BOLT12_OFFER..."
           export BOLT12_OFFER
           docker-compose -f docker-compose.yml up -d nginx-bolt12
-          sleep 10
+          source .github/scripts/ci-wait.sh
+          wait_http http://0.0.0.0:8000/protected 402 90 || { docker logs nginx-bolt12; exit 1; }
           # Set permissions on CLN socket (same as CLN tests)
           docker exec nginx-bolt12 chmod 777 /root /root/.lightning /root/.lightning/regtest
 
@@ -807,8 +812,9 @@ jobs:
 
       - name: Run Integration Tests - NWC
         run: |
+          source .github/scripts/ci-wait.sh
           echo "Testing with NWC configuration..."
-          sleep 20
+          wait_http http://0.0.0.0:8000/protected 402 120 || { docker logs nginx-nwc; exit 1; }
 
           # Test free route
           echo "Testing free route..."
@@ -978,9 +984,10 @@ jobs:
 
       - name: Run Integration Tests - CLN Autodetect
         run: |
+          source .github/scripts/ci-wait.sh
           echo "Testing CLN Autodetect Payment..."
           docker-compose -f docker-compose.yml up -d nginx-cln
-          sleep 10
+          wait_http http://0.0.0.0:8000/protected 402 90 || { docker logs nginx-cln; exit 1; }
           docker exec nginx-cln chmod 777 /root /root/.lightning /root/.lightning/regtest
 
           # Get invoice from CLN
@@ -1029,9 +1036,10 @@ jobs:
 
       - name: Run Integration Tests - LND
         run: |
+          source .github/scripts/ci-wait.sh
           docker ps -a
           echo "Testing with LND configuration..."
-          sleep 15
+          wait_http http://0.0.0.0:8000/protected 402 90 || { docker logs nginx-lnd; exit 1; }
 
           # Test free route
           echo "Testing free route..."
@@ -1505,7 +1513,11 @@ jobs:
           docker exec nginx-lnd rm -f /app/data/wallet.fingerprint /app/data/wallet.mnemonic
           # Start without CASHU_WALLET_MNEMONIC in the env so a mnemonic is generated
           CASHU_WALLET_MNEMONIC="" docker-compose -f docker-compose.yml up -d --no-deps nginx-lnd
-          sleep 15
+          # nginx only serves once module init has finished — which is also when
+          # the mnemonic has been generated and persisted. Poll for that rather
+          # than guessing, or the file check below races module startup.
+          source .github/scripts/ci-wait.sh
+          wait_http http://0.0.0.0:8000/protected 402 90 || { docker logs nginx-lnd | tail -30; exit 1; }
           # A wallet.mnemonic file must have been created
           MNEMONIC_FILE=$(docker run --rm -v ngx-l402_cashu-data:/data alpine \
             sh -c 'cat /data/wallet.mnemonic 2>/dev/null || echo ""')
@@ -1526,7 +1538,7 @@ jobs:
           # Restart — the generated mnemonic must be reloaded from wallet.mnemonic;
           # the same fingerprint must be re-recorded.
           docker-compose -f docker-compose.yml restart nginx-lnd
-          sleep 10
+          wait_http http://0.0.0.0:8000/protected 402 90 || { docker logs nginx-lnd | tail -30; exit 1; }
           FP2=$(docker run --rm -v ngx-l402_cashu-data:/data alpine \
             sh -c 'cat /data/wallet.fingerprint 2>/dev/null | tr -d "[:space:]" || echo ""')
           if [ "$FP1" != "$FP2" ]; then

@@ -1881,24 +1881,32 @@ pub fn l402_access_handler(
 
             let rt = get_handler_runtime();
 
-            let verify_result = rt.block_on(async {
-                module
-                    .verify_cashu_token(&token, amount_msat, lnurl_addr.clone())
-                    .await
-            });
+            // A panic must not unwind across the FFI boundary — undefined
+            // behaviour in a cdylib. Same guard the LNURL invoice path uses.
+            let verify_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                rt.block_on(async {
+                    module
+                        .verify_cashu_token(&token, amount_msat, lnurl_addr.clone())
+                        .await
+                })
+            }));
 
             match verify_result {
-                Ok(true) => {
+                Ok(Ok(true)) => {
                     LAST_PAYMENT_METHOD.with(|m| m.set(Some(PaymentMethod::Cashu)));
                     return NGX_DECLINED as isize;
                 }
-                Ok(false) => {
+                Ok(Ok(false)) => {
                     info!("⚠️ Cashu token verification failed");
                     return 401;
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     error!("❌ Error verifying Cashu token: {:?}", e);
                     return 401;
+                }
+                Err(_) => {
+                    error!("❌ Panic while verifying Cashu token; returning 500");
+                    return 500;
                 }
             }
         } else {
@@ -2269,8 +2277,20 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
                     cashu_redemption_logger::log_redemption(&msg);
                     info!("🔄 Cashu redemption iteration #{} starting...", iteration);
 
-                    // Run async redemption in the tokio runtime
-                    let result = thread_rt.block_on(async { cashu::redeem_to_lightning().await });
+                    // Guarded so a panic here doesn't end the thread and stop all
+                    // later redemption cycles.
+                    let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                        || thread_rt.block_on(async { cashu::redeem_to_lightning().await }),
+                    )) {
+                        Ok(r) => r,
+                        Err(_) => {
+                            cashu_redemption_logger::log_redemption(
+                                "❌ Panic during redemption — thread kept alive, retrying next cycle",
+                            );
+                            error!("❌ Panic during Cashu redemption; retrying next cycle");
+                            Ok(false)
+                        }
+                    };
 
                     match result {
                         Ok(true) => {

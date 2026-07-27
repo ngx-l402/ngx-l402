@@ -70,6 +70,23 @@ wait_container() {
     return 1
 }
 
+# Fail if any nginx worker exited on a signal. nginx restarts the worker, so
+# without this the only symptom is an empty response.
+#   assert_no_crash <container>
+assert_no_crash() {
+    local container=$1
+    local crashes
+    crashes=$(docker logs "$container" 2>&1 | grep -E "worker process [0-9]+ exited on signal" || true)
+    if [ -n "$crashes" ]; then
+        echo "  ✗ worker exited on a signal in $container:"
+        echo "$crashes" | sed 's/^/      /'
+        echo "  --- last 40 log lines ---"
+        docker logs "$container" 2>&1 | tail -40 | sed 's/^/      /'
+        return 1
+    fi
+    return 0
+}
+
 # Retry a command until it succeeds. For inherently racy operations.
 #   retry <attempts> <delay_secs> <command...>
 retry() {

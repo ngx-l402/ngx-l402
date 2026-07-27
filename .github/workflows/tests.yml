@@ -1949,6 +1949,8 @@ jobs:
 
           if [ "$(echo "$response" | tail -n1)" -ne 200 ]; then
             echo "Error: unable to access protected route with Cashu token with response $(echo "$response" | tail -n1)"
+            source .github/scripts/ci-wait.sh
+            assert_no_crash nginx-lnd || true
             docker logs nginx-lnd
             exit 1
           fi
@@ -2630,6 +2632,23 @@ jobs:
       - name: Stop nginx-eclair
         run: |
           docker-compose -f docker-compose.yml stop nginx-eclair eclair
+
+      # nginx restarts workers, so a worker exiting on a signal leaves no other
+      # trace. Runs on failure too, to surface it alongside the failing step.
+      - name: Check for worker crashes
+        if: always()
+        run: |
+          source .github/scripts/ci-wait.sh
+          failed=0
+          for c in nginx-lnd nginx-lnurl nginx-cln nginx-nwc nginx-bolt12 nginx-lnc nginx-eclair; do
+            docker inspect "$c" >/dev/null 2>&1 || continue
+            assert_no_crash "$c" || failed=1
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::An nginx worker crashed — see the signal lines above."
+            exit 1
+          fi
+          echo "✅ No worker crashes detected"
 
   publish:
     name: Publish .so for Nginx ${{ matrix.nginx_version }}

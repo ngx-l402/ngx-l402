@@ -89,8 +89,8 @@ jobs:
 
           # Test free route
           echo "Testing free route..."
-          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 200 ]; then
             echo "Error: Free route returned status $status_code, expected 200"
             docker logs nginx-lnurl
@@ -99,8 +99,8 @@ jobs:
 
           # Test protected route without header
           echo "Testing protected route without header..."
-          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 402 ]; then
             echo "Error: Protected route without header returned status $status_code, expected 402"
             docker logs nginx-lnurl
@@ -133,8 +133,8 @@ jobs:
 
           # Test with malformed / wrong-key credentials - must always reject
           echo "Testing with invalid preimage..."
-          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 MDAxMmxvY2F0aW9uIEw0MDIKMDAzMGlkZW50aWZpZXIgM460twjJAuVrQN-u5JPUZ0aKNWevybkbveRc2DeF2ZAKMDAyMWNpZCBSZXF1ZXN0UGF0aCA9IC9wcm90ZWN0ZWQKMDAyZnNpZ25hdHVyZSCwR6G2lDj1thda81BPwQuo73_shURzPf1XOwuejNLwVwo=:fbe9ac25c04e14b10177514e2d57b0e39224e70277ac1a2cd23c28e58cd4ea35" http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 MDAxMmxvY2F0aW9uIEw0MDIKMDAzMGlkZW50aWZpZXIgM460twjJAuVrQN-u5JPUZ0aKNWevybkbveRc2DeF2ZAKMDAyMWNpZCBSZXF1ZXN0UGF0aCA9IC9wcm90ZWN0ZWQKMDAyZnNpZ25hdHVyZSCwR6G2lDj1thda81BPwQuo73_shURzPf1XOwuejNLwVwo=:fbe9ac25c04e14b10177514e2d57b0e39224e70277ac1a2cd23c28e58cd4ea35" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 401 ]; then
             echo "Error: Protected route with invalid preimage returned status $status_code, expected 401"
             docker logs nginx-lnurl
@@ -143,8 +143,8 @@ jobs:
 
           # Test with macaroon without caveats
           echo "Testing with macaroon without caveats..."
-          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 AgEETFNBVALmAUr/gQMBARJNYWNhcm9vbklkZW50aWZpZXIB/4IAAQMBB1ZlcnNpb24BBgABC1BheW1lbnRIYXNoAf+EAAEHVG9rZW5JZAH/hgAAABT/gwEBAQRIYXNoAf+EAAEGAUAAABn/hQEBAQlbMzJddWludDgB/4YAAQYBQAAAa/+CAiD/pv/jOjY1/9oC/4z/tHb/qf/2Jf+d/4H/u/+YGHj/+/+O/8D/v/+P/8X/qRL/5v/x/4r/tkIBIA1Y/8j/pR3/0P+b/7cwWP+W/87/sD18GP//Hf/f/9Aj//NcBFs2/9VhNEUF/70AAAAGIDlR1jVm5IfEJgvuSQoJLqLg4FcW4Ib1vW8sbkRHdUWX:651505fae9ea341c770c6ebef207d8560d546eb3aee26985e584c15d1c987875" http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 AgEETFNBVALmAUr/gQMBARJNYWNhcm9vbklkZW50aWZpZXIB/4IAAQMBB1ZlcnNpb24BBgABC1BheW1lbnRIYXNoAf+EAAEHVG9rZW5JZAH/hgAAABT/gwEBAQRIYXNoAf+EAAEGAUAAABn/hQEBAQlbMzJddWludDgB/4YAAQYBQAAAa/+CAiD/pv/jOjY1/9oC/4z/tHb/qf/2Jf+d/4H/u/+YGHj/+/+O/8D/v/+P/8X/qRL/5v/x/4r/tkIBIA1Y/8j/pR3/0P+b/7cwWP+W/87/sD18GP//Hf/f/9Aj//NcBFs2/9VhNEUF/70AAAAGIDlR1jVm5IfEJgvuSQoJLqLg4FcW4Ib1vW8sbkRHdUWX:651505fae9ea341c770c6ebef207d8560d546eb3aee26985e584c15d1c987875" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 401 ]; then
             echo "Error: Protected route with macaroon without caveats returned status $status_code, expected 401"
             docker logs nginx-lnurl
@@ -155,8 +155,8 @@ jobs:
 
           # Test tenant1 route - should generate invoice to hello@getalby.com
           echo "Testing tenant1 route..."
-          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/tenant1)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/tenant1) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 402 ]; then
             echo "Error: Tenant1 route returned status $status_code, expected 402"
             docker logs nginx-lnurl
@@ -199,7 +199,7 @@ jobs:
           # Shadow mode must always pass through — same request that returns
           # 402 on /protected must return 200 on /shadow.
           echo "Request to /shadow without Authorization (expect 200, no 402)..."
-          shadow_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 -H "Connection: close" http://0.0.0.0:8000/shadow)
+          shadow_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 -H "Connection: close" http://0.0.0.0:8000/shadow) || true
           shadow_code=$(echo "$shadow_resp" | tail -n1)
           if [ "$shadow_code" -ne 200 ]; then
             echo "FAIL: /shadow returned $shadow_code, expected 200 (dry-run must not block)"
@@ -239,7 +239,7 @@ jobs:
           metrics_resp=""
           dry_run_total=""
           for i in {1..10}; do
-            metrics_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 -H "Connection: close" http://0.0.0.0:8000/metrics)
+            metrics_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 -H "Connection: close" http://0.0.0.0:8000/metrics) || true
             metrics_code=$(echo "$metrics_resp" | tail -n1)
             if [ "$metrics_code" -eq 200 ]; then
               dry_run_total=$(echo "$metrics_resp" | awk '/^l402_dry_run_requests_total / {print $2}')
@@ -341,8 +341,8 @@ jobs:
           
           # First test without L402 header - should get 402
           echo "Testing gRPC endpoint without L402 header..."
-          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -H "Content-Type: application/grpc" -H "grpc-timeout: 60S" -X POST http://0.0.0.0:8000/content.ContentService/GetProtectedContent)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -H "Content-Type: application/grpc" -H "grpc-timeout: 60S" -X POST http://0.0.0.0:8000/content.ContentService/GetProtectedContent) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 402 ]; then
             echo "Error: gRPC endpoint without L402 returned status $status_code, expected 402"
             echo "$response"
@@ -620,6 +620,11 @@ jobs:
 
       - name: Start cln services
         run: |
+          source .github/scripts/ci-wait.sh
+          # nostr-relay is listed explicitly: --no-deps skips depends_on, and
+          # CLN's nip47 plugin needs the relay up to announce the NWC URI.
+          docker-compose -f docker-compose.yml up -d --no-deps nostr-relay
+          wait_http http://0.0.0.0:7000/ 200 60 || { docker logs nostr-relay; exit 1; }
           docker-compose -f docker-compose.yml up -d --no-deps cln nginx-cln
 
       - name: Run Integration Tests - CLN
@@ -633,8 +638,8 @@ jobs:
 
           # Test free route
           echo "Testing free route..."
-          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 200 ]; then
             echo "Error: Free route returned status $status_code, expected 200"
             docker logs nginx-cln
@@ -651,8 +656,8 @@ jobs:
 
           # Test with invalid preimage
           echo "Testing with invalid preimage..."
-          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 MDAxMmxvY2F0aW9uIEw0MDIKMDAzMGlkZW50aWZpZXIgM460twjJAuVrQN-u5JPUZ0aKNWevybkbveRc2DeF2ZAKMDAyMWNpZCBSZXF1ZXN0UGF0aCA9IC9wcm90ZWN0ZWQKMDAyZnNpZ25hdHVyZSCwR6G2lDj1thda81BPwQuo73_shURzPf1XOwuejNLwVwo=:fbe9ac25c04e14b10177514e2d57b0e39224e70277ac1a2cd23c28e58cd4ea35" http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 MDAxMmxvY2F0aW9uIEw0MDIKMDAzMGlkZW50aWZpZXIgM460twjJAuVrQN-u5JPUZ0aKNWevybkbveRc2DeF2ZAKMDAyMWNpZCBSZXF1ZXN0UGF0aCA9IC9wcm90ZWN0ZWQKMDAyZnNpZ25hdHVyZSCwR6G2lDj1thda81BPwQuo73_shURzPf1XOwuejNLwVwo=:fbe9ac25c04e14b10177514e2d57b0e39224e70277ac1a2cd23c28e58cd4ea35" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 401 ]; then
             echo "Error: Protected route with invalid preimage returned status $status_code, expected 401"
             docker logs nginx-cln
@@ -661,8 +666,8 @@ jobs:
 
           # Test with macaroon without caveats
           echo "Testing with macaroon without caveats..."
-          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 AgEETFNBVALmAUr/gQMBARJNYWNhcm9vbklkZW50aWZpZXIB/4IAAQMBB1ZlcnNpb24BBgABC1BheW1lbnRIYXNoAf+EAAEHVG9rZW5JZAH/hgAAABT/gwEBAQRIYXNoAf+EAAEGAUAAABn/hQEBAQlbMzJddWludDgB/4YAAQYBQAAAa/+CAiD/pv/jOjY1/9oC/4z/tHb/qf/2Jf+d/4H/u/+YGHj/+/+O/8D/v/+P/8X/qRL/5v/x/4r/tkIBIA1Y/8j/pR3/0P+b/7cwWP+W/87/sD18GP//Hf/f/9Aj//NcBFs2/9VhNEUF/70AAAAGIDlR1jVm5IfEJgvuSQoJLqLg4FcW4Ib1vW8sbkRHdUWX:651505fae9ea341c770c6ebef207d8560d546eb3aee26985e584c15d1c987875" http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 AgEETFNBVALmAUr/gQMBARJNYWNhcm9vbklkZW50aWZpZXIB/4IAAQMBB1ZlcnNpb24BBgABC1BheW1lbnRIYXNoAf+EAAEHVG9rZW5JZAH/hgAAABT/gwEBAQRIYXNoAf+EAAEGAUAAABn/hQEBAQlbMzJddWludDgB/4YAAQYBQAAAa/+CAiD/pv/jOjY1/9oC/4z/tHb/qf/2Jf+d/4H/u/+YGHj/+/+O/8D/v/+P/8X/qRL/5v/x/4r/tkIBIA1Y/8j/pR3/0P+b/7cwWP+W/87/sD18GP//Hf/f/9Aj//NcBFs2/9VhNEUF/70AAAAGIDlR1jVm5IfEJgvuSQoJLqLg4FcW4Ib1vW8sbkRHdUWX:651505fae9ea341c770c6ebef207d8560d546eb3aee26985e584c15d1c987875" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 401 ]; then
             echo "Error: Protected route with macaroon without caveats returned status $status_code, expected 401"
             docker logs nginx-cln
@@ -671,8 +676,8 @@ jobs:
 
           # Test protected route without header
           echo "Testing protected route without header..."
-          response=$(curl -s -i -w "\n%{http_code}" --max-time 60 -L http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 60 -L http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 402 ]; then
             echo "Error: Protected route without header returned status $status_code, expected 402"
             docker logs nginx-cln
@@ -720,8 +725,8 @@ jobs:
           
           # Test protected route without header
           echo "Testing protected route without header..."
-          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://127.0.0.1:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://127.0.0.1:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 402 ]; then
             echo "Error: Protected route without header returned status $status_code, expected 402"
             docker logs nginx-bolt12
@@ -825,8 +830,8 @@ jobs:
 
           # Test free route
           echo "Testing free route..."
-          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 200 ]; then
             echo "Error: Free route returned status $status_code, expected 200"
             docker logs nginx-nwc
@@ -835,8 +840,8 @@ jobs:
 
           # Test protected route with timeout without header
           echo "Testing protected route with timeout without header..."
-          response=$(curl -s -i -w "\n%{http_code}" --max-time 60 -L http://0.0.0.0:8000/protected-timeout)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 60 -L http://0.0.0.0:8000/protected-timeout) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           echo "status_code: $status_code"
           if [ "$status_code" -ne 402 ]; then
             echo "Error: Protected route without header returned status $status_code, expected 402"
@@ -893,8 +898,8 @@ jobs:
 
           # Test with obtained preimage
           echo "Testing protected route with valid preimage..."
-          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 $macaroon:$preimage" http://0.0.0.0:8000/protected-timeout)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 $macaroon:$preimage" http://0.0.0.0:8000/protected-timeout) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 200 ]; then
             echo "Error: Protected route with valid preimage returned status $status_code, expected 200"
             docker logs nginx-nwc
@@ -907,8 +912,8 @@ jobs:
 
           # Test with expired macaroon
           echo "Testing protected route with expired macaroon..."
-          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 $macaroon:$preimage" http://0.0.0.0:8000/protected-timeout)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 $macaroon:$preimage" http://0.0.0.0:8000/protected-timeout) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 401 ]; then
             echo "Error: Protected route with expired macaroon returned status $status_code, expected 401"
             docker logs nginx-nwc
@@ -917,8 +922,8 @@ jobs:
 
           # Test indefinite-access: same preimage can be reused for the macaroon lifetime
           echo "Testing indefinite-access route..."
-          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected-indefinite)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected-indefinite) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 402 ]; then
             echo "Error: Indefinite-access route without header returned status $status_code, expected 402"
             docker logs nginx-nwc
@@ -949,8 +954,8 @@ jobs:
           preimage_indef=$(echo "$payment_result" | jq -r '.payment_preimage')
 
           echo "Testing indefinite-access route with valid preimage (first reuse)..."
-          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 $macaroon_indef:$preimage_indef" http://0.0.0.0:8000/protected-indefinite)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 $macaroon_indef:$preimage_indef" http://0.0.0.0:8000/protected-indefinite) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 200 ]; then
             echo "Error: Indefinite-access route first reuse returned status $status_code, expected 200"
             docker logs nginx-nwc
@@ -958,8 +963,8 @@ jobs:
           fi
 
           echo "Testing indefinite-access route with same preimage (second reuse - should still pass)..."
-          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 $macaroon_indef:$preimage_indef" http://0.0.0.0:8000/protected-indefinite)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 $macaroon_indef:$preimage_indef" http://0.0.0.0:8000/protected-indefinite) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 200 ]; then
             echo "Error: Indefinite-access route second reuse returned status $status_code, expected 200"
             docker logs nginx-nwc
@@ -968,8 +973,8 @@ jobs:
 
           # Test with invalid preimage
           echo "Testing with invalid preimage..."
-          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 MDAxMmxvY2F0aW9uIEw0MDIKMDAzMGlkZW50aWZpZXIgM460twjJAuVrQN-u5JPUZ0aKNWevybkbveRc2DeF2ZAKMDAyMWNpZCBSZXF1ZXN0UGF0aCA9IC9wcm90ZWN0ZWQKMDAyZnNpZ25hdHVyZSCwR6G2lDj1thda81BPwQuo73_shURzPf1XOwuejNLwVwo=:fbe9ac25c04e14b10177514e2d57b0e39224e70277ac1a2cd23c28e58cd4ea35" http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 MDAxMmxvY2F0aW9uIEw0MDIKMDAzMGlkZW50aWZpZXIgM460twjJAuVrQN-u5JPUZ0aKNWevybkbveRc2DeF2ZAKMDAyMWNpZCBSZXF1ZXN0UGF0aCA9IC9wcm90ZWN0ZWQKMDAyZnNpZ25hdHVyZSCwR6G2lDj1thda81BPwQuo73_shURzPf1XOwuejNLwVwo=:fbe9ac25c04e14b10177514e2d57b0e39224e70277ac1a2cd23c28e58cd4ea35" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 401 ]; then
             echo "Error: Protected route with invalid preimage returned status $status_code, expected 401"
             docker logs nginx-nwc
@@ -978,8 +983,8 @@ jobs:
 
           # Test with macaroon without caveats
           echo "Testing with macaroon without caveats..."
-          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 AgEETFNBVALmAUr/gQMBARJNYWNhcm9vbklkZW50aWZpZXIB/4IAAQMBB1ZlcnNpb24BBgABC1BheW1lbnRIYXNoAf+EAAEHVG9rZW5JZAH/hgAAABT/gwEBAQRIYXNoAf+EAAEGAUAAABn/hQEBAQlbMzJddWludDgB/4YAAQYBQAAAa/+CAiD/pv/jOjY1/9oC/4z/tHb/qf/2Jf+d/4H/u/+YGHj/+/+O/8D/v/+P/8X/qRL/5v/x/4r/tkIBIA1Y/8j/pR3/0P+b/7cwWP+W/87/sD18GP//Hf/f/9Aj//NcBFs2/9VhNEUF/70AAAAGIDlR1jVm5IfEJgvuSQoJLqLg4FcW4Ib1vW8sbkRHdUWX:651505fae9ea341c770c6ebef207d8560d546eb3aee26985e584c15d1c987875" http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 AgEETFNBVALmAUr/gQMBARJNYWNhcm9vbklkZW50aWZpZXIB/4IAAQMBB1ZlcnNpb24BBgABC1BheW1lbnRIYXNoAf+EAAEHVG9rZW5JZAH/hgAAABT/gwEBAQRIYXNoAf+EAAEGAUAAABn/hQEBAQlbMzJddWludDgB/4YAAQYBQAAAa/+CAiD/pv/jOjY1/9oC/4z/tHb/qf/2Jf+d/4H/u/+YGHj/+/+O/8D/v/+P/8X/qRL/5v/x/4r/tkIBIA1Y/8j/pR3/0P+b/7cwWP+W/87/sD18GP//Hf/f/9Aj//NcBFs2/9VhNEUF/70AAAAGIDlR1jVm5IfEJgvuSQoJLqLg4FcW4Ib1vW8sbkRHdUWX:651505fae9ea341c770c6ebef207d8560d546eb3aee26985e584c15d1c987875" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 401 ]; then
             echo "Error: Protected route with macaroon without caveats returned status $status_code, expected 401"
             docker logs nginx-nwc
@@ -1000,7 +1005,7 @@ jobs:
           wait_http http://0.0.0.0:8000/protected 402 60 || { docker logs nginx-cln; exit 1; }
 
           # Get invoice from CLN
-          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected-auto)
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected-auto) || true
           invoice=$(echo "$response" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
           macaroon=$(echo "$response" | grep -i "WWW-Authenticate: L402" | grep -o 'macaroon="[^"]*"' | cut -d'"' -f2)
           
@@ -1014,8 +1019,8 @@ jobs:
           sleep 5
           
           echo "Testing protected route with ONLY macaroon (expecting autodetect)..."
-          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 $macaroon" http://0.0.0.0:8000/protected-auto)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 $macaroon" http://0.0.0.0:8000/protected-auto) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 200 ]; then
             echo "Error: CLN Autodetect failed with status $status_code, expected 200"
             docker logs nginx-cln
@@ -1052,8 +1057,8 @@ jobs:
 
           # Test free route
           echo "Testing free route..."
-          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 200 ]; then
             echo "Error: Free route returned status $status_code, expected 200"
             docker logs nginx-lnd
@@ -1062,7 +1067,7 @@ jobs:
 
           # Test /.well-known/l402-services capability manifest
           echo "Testing /.well-known/l402-services manifest endpoint..."
-          manifest_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/.well-known/l402-services)
+          manifest_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/.well-known/l402-services) || true
           manifest_code=$(echo "$manifest_resp" | tail -n1)
           if [ "$manifest_code" -ne 200 ]; then
             echo "Error: /.well-known/l402-services returned $manifest_code, expected 200"
@@ -1083,8 +1088,8 @@ jobs:
 
           # Test protected route without header
           echo "Testing protected route without header..."
-          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 402 ]; then
             echo "Error: Protected route without header returned status $status_code, expected 402"
             docker logs nginx-lnd
@@ -1123,8 +1128,8 @@ jobs:
 
           # Test protected route to get new invoice with dynamic price
           echo "Testing protected route with dynamic price..."
-          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 402 ]; then
             echo "Error: Protected route with dynamic price returned status $status_code, expected 402"
             docker logs nginx-lnd
@@ -1155,8 +1160,8 @@ jobs:
 
           # Test protected route to verify reset price
           echo "Testing protected route with reset price..."
-          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 402 ]; then
             echo "Error: Protected route with reset price returned status $status_code, expected 402"
             docker logs nginx-lnd
@@ -1187,7 +1192,7 @@ jobs:
           
           # Test with valid L402 credentials — real payment flow
           echo "Getting fresh invoice for valid-credentials test..."
-          cred_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/protected)
+          cred_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/protected) || true
           cred_invoice=$(echo "$cred_resp" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
           cred_macaroon=$(echo "$cred_resp" | grep -i "WWW-Authenticate: L402" | grep -o 'macaroon="[^"]*"' | cut -d'"' -f2)
           echo "Paying invoice via lndnode..."
@@ -1200,7 +1205,7 @@ jobs:
           response=$(curl -s -w "\n%{http_code}" --max-time 30 \
             -H "Authorization: L402 $cred_macaroon:$cred_preimage" \
             http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 200 ]; then
             echo "Error: Protected route with valid L402 returned status $status_code, expected 200"
             docker logs nginx-lnd
@@ -1212,7 +1217,7 @@ jobs:
           response=$(curl -s -w "\n%{http_code}" --max-time 30 \
             -H "Authorization: L402 $cred_macaroon:$cred_preimage" \
             http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 401 ]; then
             echo "Error: Reused preimage returned status $status_code, expected 401"
             docker logs nginx-lnd
@@ -1224,7 +1229,7 @@ jobs:
           response=$(curl -s -w "\n%{http_code}" --max-time 30 \
             -H "Authorization: L402 $cred_macaroon:fbe9ac25c04e14b10177514e2d57b0e39224e70277ac1a2cd23c28e58cd4ea35" \
             http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 401 ]; then
             echo "Error: Protected route with invalid preimage returned status $status_code, expected 401"
             docker logs nginx-lnd
@@ -1233,8 +1238,8 @@ jobs:
 
           # Test with macaroon without caveats
           echo "Testing with macaroon without caveats..."
-          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 AgEETFNBVALmAUr/gQMBARJNYWNhcm9vbklkZW50aWZpZXIB/4IAAQMBB1ZlcnNpb24BBgABC1BheW1lbnRIYXNoAf+EAAEHVG9rZW5JZAH/hgAAABT/gwEBAQRIYXNoAf+EAAEGAUAAABn/hQEBAQlbMzJddWludDgB/4YAAQYBQAAAa/+CAiD/pv/jOjY1/9oC/4z/tHb/qf/2Jf+d/4H/u/+YGHj/+/+O/8D/v/+P/8X/qRL/5v/x/4r/tkIBIA1Y/8j/pR3/0P+b/7cwWP+W/87/sD18GP//Hf/f/9Aj//NcBFs2/9VhNEUF/70AAAAGIDlR1jVm5IfEJgvuSQoJLqLg4FcW4Ib1vW8sbkRHdUWX:651505fae9ea341c770c6ebef207d8560d546eb3aee26985e584c15d1c987875" http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 AgEETFNBVALmAUr/gQMBARJNYWNhcm9vbklkZW50aWZpZXIB/4IAAQMBB1ZlcnNpb24BBgABC1BheW1lbnRIYXNoAf+EAAEHVG9rZW5JZAH/hgAAABT/gwEBAQRIYXNoAf+EAAEGAUAAABn/hQEBAQlbMzJddWludDgB/4YAAQYBQAAAa/+CAiD/pv/jOjY1/9oC/4z/tHb/qf/2Jf+d/4H/u/+YGHj/+/+O/8D/v/+P/8X/qRL/5v/x/4r/tkIBIA1Y/8j/pR3/0P+b/7cwWP+W/87/sD18GP//Hf/f/9Aj//NcBFs2/9VhNEUF/70AAAAGIDlR1jVm5IfEJgvuSQoJLqLg4FcW4Ib1vW8sbkRHdUWX:651505fae9ea341c770c6ebef207d8560d546eb3aee26985e584c15d1c987875" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 401 ]; then
             echo "Error: Protected route with macaroon without caveats returned status $status_code, expected 401"
             docker logs nginx-lnd
@@ -1248,7 +1253,7 @@ jobs:
           echo "Testing L402 method binding (RequestMethod caveat)..."
           docker exec redis redis-cli flushall
 
-          method_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 -X GET http://0.0.0.0:8000/protected)
+          method_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 -X GET http://0.0.0.0:8000/protected) || true
           method_status=$(echo "$method_resp" | tail -n1)
           if [ "$method_status" -ne 402 ]; then
             echo "Error: GET /protected (no auth) returned $method_status, expected 402"
@@ -1286,7 +1291,7 @@ jobs:
           # by replay protection — we want to confirm the rejection comes from
           # the method caveat, not from preimage reuse.
           echo "HEAD /protected with GET-bound token (expect 401)..."
-          cross_method_status=$(curl -o /dev/null -s -w "%{http_code}" --max-time 30 -I -H "Authorization: L402 $method_macaroon:$method_preimage" http://0.0.0.0:8000/protected)
+          cross_method_status=$(curl -o /dev/null -s -w "%{http_code}" --max-time 30 -I -H "Authorization: L402 $method_macaroon:$method_preimage" http://0.0.0.0:8000/protected) || true
           cross_method_resp="(status only: $cross_method_status)"
           if [ "$cross_method_status" -ne 401 ]; then
             echo "Error: HEAD /protected with GET-bound token returned $cross_method_status, expected 401 (cross-method replay must be rejected)"
@@ -1298,7 +1303,7 @@ jobs:
 
           # Same token on the original method must still succeed.
           echo "GET /protected with GET-bound token (expect 200)..."
-          get_resp=$(curl -s -w "\n%{http_code}" --max-time 30 -X GET -H "Authorization: L402 $method_macaroon:$method_preimage" http://0.0.0.0:8000/protected)
+          get_resp=$(curl -s -w "\n%{http_code}" --max-time 30 -X GET -H "Authorization: L402 $method_macaroon:$method_preimage" http://0.0.0.0:8000/protected) || true
           get_status=$(echo "$get_resp" | tail -n1)
           if [ "$get_status" -ne 200 ]; then
             echo "Error: GET /protected with GET-bound token returned $get_status, expected 200"
@@ -1310,7 +1315,7 @@ jobs:
 
           # Test LND Autodetect Payment
           echo "Testing LND Autodetect Payment..."
-          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected-auto)
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected-auto) || true
           invoice=$(echo "$response" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
           macaroon=$(echo "$response" | grep -i "WWW-Authenticate: L402" | grep -o 'macaroon="[^"]*"' | cut -d'"' -f2)
           
@@ -1319,8 +1324,8 @@ jobs:
           sleep 5
           
           echo "Testing protected route with ONLY macaroon (expecting autodetect)..."
-          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 $macaroon" http://0.0.0.0:8000/protected-auto)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 $macaroon" http://0.0.0.0:8000/protected-auto) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 200 ]; then
             echo "Error: LND Autodetect failed with status $status_code, expected 200"
             docker logs nginx-lnd
@@ -1371,8 +1376,8 @@ jobs:
           
           while [ $retry_count -lt $max_retries ] && [ "$status_code" -ne 200 ]; do
             echo "Attempt $(($retry_count + 1)) of $max_retries..."
-            response=$(curl -v -s -i -w "\n%{http_code}" --max-time 60 -L -H "Authorization: Cashu $CASHU_TOKEN" http://0.0.0.0:8000/protected)
-            status_code=$(echo "$response" | tail -n1)
+            response=$(curl -v -s -i -w "\n%{http_code}" --max-time 60 -L -H "Authorization: Cashu $CASHU_TOKEN" http://0.0.0.0:8000/protected) || true
+            status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
             
             if [ "$status_code" -ne 200 ]; then
               if echo "$response" | grep -q "401 Unauthorized"; then
@@ -1401,8 +1406,8 @@ jobs:
           sleep 5
           
           # Test with the invalid token
-          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L -H "Authorization: Cashu $INVALID_CASHU_TOKEN" http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L -H "Authorization: Cashu $INVALID_CASHU_TOKEN" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           
           # This should fail verification due to insufficient amount
           if [ "$status_code" -ne 401 ]; then
@@ -1431,8 +1436,8 @@ jobs:
           sleep 5
           
           # Test with the malformed token
-          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L -H "Authorization: Cashu $ENCODED_MALFORMED_TOKEN" http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L -H "Authorization: Cashu $ENCODED_MALFORMED_TOKEN" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           
           # This should fail verification due to empty proofs
           if [ "$status_code" -ne 401 ]; then
@@ -1471,8 +1476,8 @@ jobs:
           sleep 5
           
           # Test with the non-whitelisted token
-          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L -H "Authorization: Cashu $ENCODED_NON_WHITELISTED_TOKEN" http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L -H "Authorization: Cashu $ENCODED_NON_WHITELISTED_TOKEN" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           
           # This should fail verification due to non-whitelisted mint
           if [ "$status_code" -ne 401 ]; then
@@ -1502,8 +1507,8 @@ jobs:
           NEW_CASHU_TOKEN=$(docker exec cashu-mint poetry run cashu send 15)
 
           echo "Testing protected route with new Cashu token after DB deletion..."
-          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L -H "Authorization: Cashu $NEW_CASHU_TOKEN" http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L -H "Authorization: Cashu $NEW_CASHU_TOKEN" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
 
           if [ "$status_code" -ne 200 ]; then
             echo "Error: Protected route with Cashu token after DB deletion returned status $status_code, expected 200"
@@ -1618,7 +1623,7 @@ jobs:
 
           # 1. 402 response must carry an X-Cashu NUT-24 payment request header
           echo "Checking X-Cashu header on 402 response..."
-          p2pk_resp=$(curl -s -i --max-time 30 http://0.0.0.0:8000/protected)
+          p2pk_resp=$(curl -s -i --max-time 30 http://0.0.0.0:8000/protected) || true
           p2pk_code=$(echo "$p2pk_resp" | grep "^HTTP" | tail -1 | awk '{print $2}')
           if [ "$p2pk_code" -ne 402 ]; then
             echo "❌ Expected 402 in P2PK mode, got $p2pk_code"
@@ -1710,7 +1715,7 @@ jobs:
 
           # Get fresh credentials via real payment (nginx-lnd is active on port 8000)
           echo "Getting fresh invoice for replay test..."
-          replay_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/protected)
+          replay_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/protected) || true
           replay_invoice=$(echo "$replay_resp" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
           replay_macaroon=$(echo "$replay_resp" | grep -i "WWW-Authenticate: L402" | grep -o 'macaroon="[^"]*"' | cut -d'"' -f2)
           replay_payment_hash=$(docker exec lndnode lncli -n regtest decodepayreq "$replay_invoice" | jq -r '.payment_hash')
@@ -1722,7 +1727,7 @@ jobs:
           response=$(curl -s -w "\n%{http_code}" --max-time 30 \
             -H "Authorization: L402 $replay_macaroon:$replay_preimage" \
             http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 200 ]; then
             echo "❌ Error: First request with valid L402 preimage returned status $status_code, expected 200"
             docker logs nginx-lnd
@@ -1746,7 +1751,7 @@ jobs:
           response=$(curl -s -w "\n%{http_code}" --max-time 30 \
             -H "Authorization: L402 $replay_macaroon:$replay_preimage" \
             http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 401 ]; then
             echo "❌ Error: Replay attack with same L402 preimage returned status $status_code, expected 401"
             docker logs nginx-lnd
@@ -1762,8 +1767,8 @@ jobs:
           echo "Created Cashu token: ${CASHU_TOKEN:0:50}..."
           
           # First request with Cashu token should succeed
-          response=$(curl -s -w "\n%{http_code}" --max-time 60 -L -H "Authorization: Cashu $CASHU_TOKEN" http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -w "\n%{http_code}" --max-time 60 -L -H "Authorization: Cashu $CASHU_TOKEN" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 200 ]; then
             echo "❌ Error: First request with Cashu token returned status $status_code, expected 200"
             docker logs nginx-lnd
@@ -1784,8 +1789,8 @@ jobs:
           echo "✅ Cashu token stored in Redis successfully"
           
           # Second request with SAME Cashu token should fail (replay attack)
-          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L -H "Authorization: Cashu $CASHU_TOKEN" http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L -H "Authorization: Cashu $CASHU_TOKEN" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 401 ]; then
             echo "❌ Error: Replay attack with same Cashu token returned status $status_code, expected 401"
             docker logs nginx-lnd
@@ -1816,7 +1821,7 @@ jobs:
 
           # Request 1: within limit - must return 402
           echo "Request 1 (expect 402 - within limit)..."
-          r1=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/rate-limited)
+          r1=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/rate-limited) || true
           sc1=$(echo "$r1" | tail -n1)
           if [ "$sc1" -ne 402 ]; then
             echo "FAIL: Request 1 returned $sc1, expected 402"
@@ -1827,7 +1832,7 @@ jobs:
 
           # Request 2: still within limit - must return 402
           echo "Request 2 (expect 402 - at limit)..."
-          r2=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/rate-limited)
+          r2=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/rate-limited) || true
           sc2=$(echo "$r2" | tail -n1)
           if [ "$sc2" -ne 402 ]; then
             echo "FAIL: Request 2 returned $sc2, expected 402"
@@ -1838,7 +1843,7 @@ jobs:
 
           # Request 3: over the limit - must return 429
           echo "Request 3 (expect 429 - limit exceeded)..."
-          r3=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/rate-limited)
+          r3=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/rate-limited) || true
           sc3=$(echo "$r3" | tail -n1)
           if [ "$sc3" -ne 429 ]; then
             echo "FAIL: Request 3 returned $sc3, expected 429"
@@ -1915,7 +1920,7 @@ jobs:
           echo "Cashu Token of amount 100: $cashu_token"
 
           # access protected nginx-lnd route with cashu token
-          response=$(curl -s -w "\n%{http_code}" --max-time 60 -L -H "Authorization: Cashu $cashu_token" http://0.0.0.0:8000/protected)
+          response=$(curl -s -w "\n%{http_code}" --max-time 60 -L -H "Authorization: Cashu $cashu_token" http://0.0.0.0:8000/protected) || true
 
           if [ "$(echo "$response" | tail -n1)" -ne 200 ]; then
             echo "Error: unable to access protected route with Cashu token with response $(echo "$response" | tail -n1)"
@@ -2094,7 +2099,7 @@ jobs:
 
           # Access tenant1 route - should map to hello@getalby.com (from nginx.conf)
           echo "Accessing tenant1 route (hello@getalby.com)..."
-          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L -H "Authorization: Cashu $TOKEN1" http://0.0.0.0:8000/tenant1)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L -H "Authorization: Cashu $TOKEN1" http://0.0.0.0:8000/tenant1) || true
           if [ "$(echo "$response" | tail -n1)" -ne 200 ]; then
             echo "Error: Failed to access tenant1 route with Token1"
             docker logs nginx-lnurl | tail -50
@@ -2104,7 +2109,7 @@ jobs:
 
           # Access tenant2 route - should map to test@walletofsatoshi.com (from nginx.conf)
           echo "Accessing tenant2 route (test@walletofsatoshi.com)..."
-          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L -H "Authorization: Cashu $TOKEN2" http://0.0.0.0:8000/tenant2)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L -H "Authorization: Cashu $TOKEN2" http://0.0.0.0:8000/tenant2) || true
           if [ "$(echo "$response" | tail -n1)" -ne 200 ]; then
             echo "Error: Failed to access tenant2 route with Token2"
             docker logs nginx-lnurl | tail -50
@@ -2243,8 +2248,8 @@ jobs:
           
           # Test free route
           echo "Testing free route..."
-          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 200 ]; then
             echo "Error: Free route returned status $status_code, expected 200"
             docker logs nginx-lnc
@@ -2254,8 +2259,8 @@ jobs:
 
           # Test protected route without header - should return 402 with invoice
           echo "Testing protected route without header (LNC invoice generation)..."
-          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 402 ]; then
             echo "Error: Protected route without header returned status $status_code, expected 402"
             docker logs nginx-lnc
@@ -2326,7 +2331,7 @@ jobs:
 
           echo "Waiting for Eclair to be ready and synced..."
           for i in {1..30}; do
-            ECLAIR_HEIGHT=$(curl -s -u :eclairpass -X POST http://localhost:8282/getinfo | jq -r .blockHeight 2>/dev/null || echo "0")
+            ECLAIR_HEIGHT=$(curl -s -u :eclairpass -X POST http://localhost:8282/getinfo | jq -r .blockHeight 2>/dev/null || echo "0") || true
             BITCOIND_HEIGHT=$(docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass getblockcount 2>/dev/null || echo "0")
             echo "Eclair height: $ECLAIR_HEIGHT, Bitcoind height: $BITCOIND_HEIGHT"
             if [ "$ECLAIR_HEIGHT" -ge "$BITCOIND_HEIGHT" ] && [ "$ECLAIR_HEIGHT" -gt 0 ]; then
@@ -2339,7 +2344,7 @@ jobs:
           # ── Pre-open LND→Eclair channel NOW so it accumulates confirmations
           #    while the basic Eclair tests run, giving autodetect a head start.
           echo "Pre-opening LND→Eclair channel..."
-          ECLAIR_NODE_ID=$(curl -s -u :eclairpass -X POST http://localhost:8282/getinfo | jq -r .nodeId)
+          ECLAIR_NODE_ID=$(curl -s -u :eclairpass -X POST http://localhost:8282/getinfo | jq -r .nodeId) || true
           echo "Eclair Node ID: $ECLAIR_NODE_ID"
           echo "ECLAIR_NODE_ID=${ECLAIR_NODE_ID}" >> $GITHUB_ENV
 
@@ -2457,8 +2462,8 @@ jobs:
           
           # Test free route
           echo "Testing free route..."
-          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 200 ]; then
             echo "Error: Free route returned status $status_code, expected 200"
             docker logs nginx-eclair
@@ -2468,8 +2473,8 @@ jobs:
 
           # Test protected route without header - should return 402 with invoice
           echo "Testing protected route without header (Eclair invoice generation)..."
-          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 402 ]; then
             echo "Error: Protected route without header returned status $status_code, expected 402"
             docker logs nginx-eclair
@@ -2577,7 +2582,7 @@ jobs:
           fi
 
           echo "Getting new invoice for Eclair Autodetect..."
-          response_auto=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected-auto)
+          response_auto=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected-auto) || true
           invoice_auto=$(echo "$response_auto" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
           macaroon_auto=$(echo "$response_auto" | grep -i "WWW-Authenticate: L402" | grep -o 'macaroon="[^"]*"' | cut -d'"' -f2)
 
@@ -2586,8 +2591,8 @@ jobs:
           sleep 5
 
           echo "Testing Eclair Autodetect (macaroon only)..."
-          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 $macaroon_auto" http://0.0.0.0:8000/protected-auto)
-          status_code=$(echo "$response" | tail -n1)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 $macaroon_auto" http://0.0.0.0:8000/protected-auto) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
           if [ "$status_code" -ne 200 ]; then
             echo "Error: Eclair Autodetect failed with status $status_code"
             docker logs nginx-eclair

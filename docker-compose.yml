@@ -35,6 +35,15 @@ services:
       tor -f /etc/tor/torrc
       "
 
+  # Local Nostr relay for the NWC tests.
+  nostr-relay:
+    image: scsibug/nostr-rs-relay:latest
+    container_name: nostr-relay
+    ports:
+      - "7000:8080"
+    volumes:
+      - nostr-relay-data:/usr/src/app/db
+
   cln:
     image: elementsproject/lightningd:v25.05
     container_name: cln
@@ -61,7 +70,7 @@ services:
           --addr=cln:9835 \
           --grpc-port=9996 \
           --plugin=/usr/local/libexec/c-lightning/plugins/cln-nip47 \
-          --nip47-relays=wss://relay.damus.io \
+          --nip47-relays=ws://nostr-relay:8080 \
           --rpc-file-mode=0666
     ports:
       - "9835:9835"
@@ -70,6 +79,7 @@ services:
       - cln-data:/root/.lightning/regtest:rw
     depends_on:
       - bitcoind
+      - nostr-relay
 
   lndnode:
     image: lightninglabs/lndinit:v0.1.33-beta-lnd-v0.20.0-beta
@@ -433,4 +443,5 @@ volumes:
   cln-data:
   redis_data:
   tor-data:
+  nostr-relay-data:
   eclair-data:

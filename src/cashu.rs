@@ -154,21 +154,34 @@ fn resolve_wallet_mnemonic(db_url: &str) -> Result<(), String> {
     let generated = ngx_l402_core::generate_mnemonic(GENERATED_MNEMONIC_WORDS)
         .map_err(|e| format!("Failed to generate wallet mnemonic: {}", e))?;
 
+    // The phrase goes to the 0600 file when there is one, otherwise to stderr:
+    // the operator still sees it at startup, and it stays out of error_log.
     match &file_path {
         Some(path) => match persist_mnemonic(path, &generated) {
             Ok(()) => warn!(
                 "⚠️ CASHU_WALLET_MNEMONIC not set — generated a new wallet mnemonic and saved it to {}. BACK IT UP; it controls all Cashu funds.",
                 path
             ),
-            Err(e) => warn!(
-                "⚠️ CASHU_WALLET_MNEMONIC not set — generated a new wallet mnemonic but could NOT persist it ({}). It will change on restart and orphan funds. Save this phrase and set CASHU_WALLET_MNEMONIC: {}",
-                e, generated
-            ),
+            Err(e) => {
+                warn!(
+                    "⚠️ CASHU_WALLET_MNEMONIC not set — generated a new wallet mnemonic but could NOT persist it ({}). It will change on restart and orphan funds. The phrase has been written to stderr; save it and set CASHU_WALLET_MNEMONIC.",
+                    e
+                );
+                eprintln!(
+                    "ngx_l402: save this Cashu wallet mnemonic and set CASHU_WALLET_MNEMONIC:\n{}",
+                    generated
+                );
+            }
         },
-        None => warn!(
-            "⚠️ CASHU_WALLET_MNEMONIC not set and no persist path available — using an EPHEMERAL mnemonic that changes on restart. Save this phrase and set CASHU_WALLET_MNEMONIC: {}",
-            generated
-        ),
+        None => {
+            warn!(
+                "⚠️ CASHU_WALLET_MNEMONIC not set and no persist path available — using an EPHEMERAL mnemonic that changes on restart. The phrase has been written to stderr; save it and set CASHU_WALLET_MNEMONIC."
+            );
+            eprintln!(
+                "ngx_l402: save this Cashu wallet mnemonic and set CASHU_WALLET_MNEMONIC:\n{}",
+                generated
+            );
+        }
     }
 
     let _ = WALLET_MNEMONIC.set(generated);
@@ -199,13 +212,32 @@ fn wallet_mnemonic_file_path(db_url: &str) -> Option<String> {
 }
 
 /// Persist the mnemonic to `path` with owner-only permissions where supported.
+///
+/// On unix the file is created with mode 0600 up front, so it is never visible
+/// at the umask's default permissions.
 fn persist_mnemonic(path: &str, mnemonic: &str) -> Result<(), String> {
-    std::fs::write(path, format!("{}\n", mnemonic))
-        .map_err(|e| format!("write {}: {}", path, e))?;
     #[cfg(unix)]
     {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| format!("open {}: {}", path, e))?;
+        f.write_all(format!("{}\n", mnemonic).as_bytes())
+            .map_err(|e| format!("write {}: {}", path, e))?;
+        // An existing file keeps its own mode on open, so set it explicitly too.
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, format!("{}\n", mnemonic))
+            .map_err(|e| format!("write {}: {}", path, e))?;
     }
     Ok(())
 }

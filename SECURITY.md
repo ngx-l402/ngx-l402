@@ -63,6 +63,8 @@ The following are generally considered in scope:
   forgery, replay, signature or caveat confusion, token reuse across tenants).
 - Leakage or misuse of `ROOT_KEY`, macaroon secrets, node credentials, Redis
   credentials, or any other secret material the module touches.
+- Exposure of the Cashu wallet seed (`CASHU_WALLET_MNEMONIC`, the persisted
+  `wallet.mnemonic`) or of the token database, which holds bearer eCash proofs.
 - Memory-safety bugs in the Rust code, especially around the Nginx FFI
   boundary (`unsafe` blocks, pointer/null handling, lifetime issues) that
   could lead to crashes, undefined behavior, or RCE in an Nginx worker.

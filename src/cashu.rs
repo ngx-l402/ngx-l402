@@ -256,6 +256,17 @@ fn set_db_ownership(db_url: &str) {
     let _ = db_url;
 }
 
+/// Re-apply ownership once the master has finished its start-up writes.
+///
+/// Wallet restore and proof reconciliation run as root after the database is
+/// created, and SQLite writes -wal/-shm on the first write rather than at open,
+/// so they can appear after `initialize_cashu` has already set ownership.
+pub fn reapply_db_ownership() {
+    if let Some(url) = CASHU_DB_URL.get() {
+        set_db_ownership(url);
+    }
+}
+
 /// Decide where to persist a generated mnemonic. Prefers
 /// `CASHU_WALLET_MNEMONIC_FILE`; otherwise derives a sibling `wallet.mnemonic`
 /// next to the SQLite database file. Returns `None` if no path can be derived.

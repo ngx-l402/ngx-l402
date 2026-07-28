@@ -2179,6 +2179,8 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
             if cashu_ecash_support {
                 cashu::restore_wallets_state().await;
                 cashu::reconcile_pending_proofs().await;
+                // Those ran as root; workers run as nginx.
+                cashu::reapply_db_ownership();
             }
 
             // Pre-warm the LNURL client cache in the master process so workers

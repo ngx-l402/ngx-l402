@@ -218,16 +218,39 @@ fn resolve_wallet_mnemonic(db_url: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Allow the nginx group to write the database file.
-fn set_db_group_writable(db_url: &str) {
+/// Give the database files the same owner as their directory.
+///
+/// The master creates them as root; the workers that use them run as nginx.
+/// The data directory already names that user, so follow it.
+fn set_db_ownership(db_url: &str) {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let path = db_url
-            .trim()
-            .trim_start_matches("sqlite://")
-            .trim_start_matches("sqlite:");
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660));
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let path = std::path::Path::new(
+            db_url
+                .trim()
+                .trim_start_matches("sqlite://")
+                .trim_start_matches("sqlite:"),
+        );
+        let owner = path
+            .parent()
+            .and_then(|dir| std::fs::metadata(dir).ok())
+            .map(|m| (m.uid(), m.gid()));
+
+        // -wal and -shm hold live data too.
+        for suffix in ["", "-wal", "-shm"] {
+            let mut name = path.as_os_str().to_owned();
+            name.push(suffix);
+            let file = std::path::PathBuf::from(name);
+            if !file.exists() {
+                continue;
+            }
+            if let Some((uid, gid)) = owner {
+                let _ = std::os::unix::fs::chown(&file, Some(uid), Some(gid));
+            }
+            let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o660));
+        }
     }
     #[cfg(not(unix))]
     let _ = db_url;
@@ -506,9 +529,7 @@ pub fn initialize_cashu(db_url: &str) -> Result<(), String> {
                 info!("✅ Cashu SQLite database initialized successfully with WAL mode");
                 let _ = CASHU_DB.set(Arc::new(db));
                 let _ = CASHU_DB_PID.set(std::process::id());
-                // The master creates the file as root; workers run as nginx and
-                // share its group. SQLite gives -wal/-shm the same mode.
-                set_db_group_writable(db_url);
+                set_db_ownership(db_url);
 
                 Ok(())
             }

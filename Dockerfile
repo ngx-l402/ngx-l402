@@ -39,15 +39,12 @@ COPY index.html /usr/share/nginx/html/shadow/index.html
 COPY index.html /usr/share/nginx/html/tenant1/index.html
 COPY index.html /usr/share/nginx/html/tenant2/index.html
 
-# Cashu data dir: the master runs as root and workers as nginx, and both write
-# the database. A mounted volume masks image-time ownership, so set it at
-# container start instead — nginx runs /docker-entrypoint.d/*.sh before serving.
+# Cashu data dir, owned by nginx as in the manual install. A mounted volume
+# hides the ownership set at build time, so the entrypoint sets it again.
 COPY <<'EOF' /docker-entrypoint.d/05-cashu-data-perms.sh
 #!/bin/sh
 d=$(dirname "${CASHU_DB_PATH:-/app/data/cashu_tokens.db}")
-mkdir -p "$d"
-chown -R nginx:nginx "$d" 2>/dev/null || true
-chmod 2770 "$d" 2>/dev/null || true
+mkdir -p "$d" && chown -R nginx:nginx "$d" && chmod 750 "$d"
 EOF
 RUN chmod +x /docker-entrypoint.d/05-cashu-data-perms.sh
 

@@ -104,3 +104,22 @@ retry() {
     echo "  ✗ still failing after $attempts attempts: $*"
     return 1
 }
+
+# Request a route until it returns <expected-status>, for routes that mint an
+# invoice from a third-party provider. Sets `response` and `status_code` so the
+# caller asserts on them exactly as it would after a plain curl.
+#   curl_until <expected-status> <curl args...>
+curl_until() {
+    local want=$1
+    shift
+    local i=1
+    while [ "$i" -le 3 ]; do
+        response=$(curl -s -i -w "\n%{http_code}" --max-time 45 "$@") || true
+        status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+        [ "$status_code" = "$want" ] && return 0
+        [ "$i" -lt 3 ] && echo "  attempt $i: got $status_code, want $want; retrying..."
+        sleep 5
+        i=$((i + 1))
+    done
+    return 0
+}

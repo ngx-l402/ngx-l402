@@ -287,6 +287,7 @@ jobs:
 
       - name: Run Integration Tests - gRPC
         run: |
+          source .github/scripts/ci-wait.sh
           docker logs grpc-content-server
           echo "Testing gRPC server..."
           sleep 5
@@ -1334,6 +1335,69 @@ jobs:
             exit 1
           fi
           echo "PASS: same-method redemption accepted"
+
+          # Realm binding: /realm-a and /realm-b name the same protection space,
+          # so one payment authorizes both. A realm token must NOT open a
+          # path-bound location — that would be an auth bypass.
+          echo "Testing L402 realm binding (Realm caveat)..."
+          docker exec redis redis-cli flushall
+
+          realm_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/realm-a) || true
+          realm_status=$(echo "$realm_resp" | tail -n1); realm_status=${realm_status:-000}
+          if [ "$realm_status" -ne 402 ]; then
+            echo "Error: GET /realm-a (no auth) returned $realm_status, expected 402"
+            echo "$realm_resp"
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          realm_invoice=$(echo "$realm_resp" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
+          realm_macaroon=$(echo "$realm_resp" | grep -i "WWW-Authenticate: L402" | grep -o 'macaroon="[^"]*"' | cut -d'"' -f2)
+          if [ -z "$realm_invoice" ] || [ -z "$realm_macaroon" ]; then
+            echo "Error: missing invoice or macaroon in 402 response for realm test"
+            echo "$realm_resp"
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          echo "Paying realm invoice from lndnode..."
+          docker exec lndnode lncli -n regtest payinvoice -f "$realm_invoice"
+          sleep 5
+          realm_preimage=$(docker exec lndnode lncli -n regtest listpayments | jq -r '.payments[-1].payment_preimage')
+          if [ -z "$realm_preimage" ] || [ "$realm_preimage" = "null" ]; then
+            echo "Error: could not extract preimage from lndnode for realm test"
+            docker exec lndnode lncli -n regtest listpayments
+            exit 1
+          fi
+
+          echo "GET /realm-a with realm token (expect 200)..."
+          realm_a_status=$(curl -o /dev/null -s -w "%{http_code}" --max-time 30 -H "Authorization: L402 $realm_macaroon:$realm_preimage" http://0.0.0.0:8000/realm-a) || true
+          if [ "$realm_a_status" -ne 200 ]; then
+            echo "Error: GET /realm-a with realm token returned $realm_a_status, expected 200"
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          # The point of the feature: a different path in the same realm, paid once.
+          echo "GET /realm-b with the SAME token (expect 200)..."
+          realm_b_status=$(curl -o /dev/null -s -w "%{http_code}" --max-time 30 -H "Authorization: L402 $realm_macaroon:$realm_preimage" http://0.0.0.0:8000/realm-b) || true
+          if [ "$realm_b_status" -ne 200 ]; then
+            echo "Error: GET /realm-b with realm token returned $realm_b_status, expected 200 (one payment must cover the realm)"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "PASS: one payment authorized both paths in the realm"
+
+          # A realm token carries `Realm = …` and no `RequestPath`; a path-bound
+          # location must reject it rather than let the caveat fall through.
+          echo "GET /protected with realm token (expect 401)..."
+          realm_escape_status=$(curl -o /dev/null -s -w "%{http_code}" --max-time 30 -H "Authorization: L402 $realm_macaroon:$realm_preimage" http://0.0.0.0:8000/protected) || true
+          if [ "$realm_escape_status" -ne 401 ]; then
+            echo "Error: GET /protected with realm token returned $realm_escape_status, expected 401 (realm token must not open a path-bound location)"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "PASS: realm token rejected outside its realm"
 
           # Test LND Autodetect Payment
           echo "Testing LND Autodetect Payment..."
@@ -2642,9 +2706,8 @@ jobs:
             assert_no_crash "$c" || failed=1
           done
           if [ "$failed" -ne 0 ]; then
-            # Reported, not gated for now. Switch to `exit 1` once runs are
-            # consistently clean, so a regression fails the build.
-            echo "::warning::An nginx worker exited on a signal — see the lines above."
+            echo "❌ An nginx worker exited on a signal — see the lines above."
+            exit 1
           else
             echo "✅ No worker crashes detected"
           fi

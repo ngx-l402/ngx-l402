@@ -280,8 +280,52 @@ These are set inside `location {}` blocks in `nginx.conf` (not environment varia
 | `l402_invoice_rate_limit` | `<N>r/m` or `<N>r/s` | disabled | Max invoice generation rate per IP per route |
 | `l402_auto_detect_payment` | boolean¹ | `off` | Server-side payment detection — queries the Lightning node instead of requiring the client to supply the preimage |
 | `l402_indefinite_access` | boolean¹ | `off` | Skip the single-use preimage replay check — a single payment stays valid for the macaroon lifetime |
+| `l402_realm` | string | — | Bind the macaroon to a named protection space instead of the exact request path, so one payment authorizes every location sharing the name |
 
 > ¹ **Boolean directives** accept: `on` / `off` / `true` / `false` / `1` / `0` / `yes` / `no` (case-insensitive).
+
+### Realm-scoped access
+
+By default a macaroon is bound to the exact path it was minted for: paying for
+`/a` gives you `/a` and nothing else. `l402_realm` replaces that binding with a
+named protection space, so one payment covers every location that names it.
+
+```nginx
+location /library/preview {
+    l402                      on;
+    l402_amount_msat_default  10000;
+    l402_macaroon_timeout     300;
+    l402_realm                "library";
+    l402_indefinite_access    on;
+
+    try_files $uri $uri/index.html =404;
+}
+
+location /library/full {
+    l402                      on;
+    l402_amount_msat_default  10000;
+    l402_macaroon_timeout     300;
+    l402_realm                "library";
+    l402_indefinite_access    on;
+
+    try_files $uri $uri/index.html =404;
+}
+```
+
+Three things to know before using it:
+
+- **`l402_indefinite_access on` is effectively required.** The client presents the
+  same preimage on every path in the realm, and the single-use replay check would
+  reject the second request. Without it a realm token works exactly once.
+- **The realm is not bound to a price.** Two locations sharing a name with
+  different `l402_amount_msat_default` means a token bought at the cheaper one
+  opens the dearer one. Give differently-priced content different realm names.
+- **The name is the whole boundary.** Anything naming that realm is reachable
+  with one payment, so prefer specific names (`library-2026`) over generic ones
+  (`api`), and set `l402_macaroon_timeout` to bound how long access lasts.
+
+The HTTP method is still bound in realm mode: a `GET` token will not satisfy a
+`POST`.
 
 ### Example: auto-detect enabled location
 

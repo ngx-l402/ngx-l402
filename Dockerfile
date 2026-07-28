@@ -34,6 +34,8 @@ COPY index.html /usr/share/nginx/html/protected/index.html
 COPY index.html /usr/share/nginx/html/protected-timeout/index.html
 COPY index.html /usr/share/nginx/html/protected-indefinite/index.html
 COPY index.html /usr/share/nginx/html/rate-limited/index.html
+COPY index.html /usr/share/nginx/html/realm-a/index.html
+COPY index.html /usr/share/nginx/html/realm-b/index.html
 COPY index.html /usr/share/nginx/html/shadow/index.html
 COPY index.html /usr/share/nginx/html/tenant1/index.html
 COPY index.html /usr/share/nginx/html/tenant2/index.html

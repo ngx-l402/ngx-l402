@@ -784,8 +784,8 @@ impl L402Module {
     /// Auto-detect settlement: ask the worker's LN client whether the invoice
     /// for `payment_hash` is settled and, if so, return its preimage. Uses the
     /// same per-worker client (and runtime) as invoice generation, so there is
-    /// no cross-runtime tonic channel. Backends that can't query their own node
-    /// (LNURL / NWC / BOLT12 / LNC) return an error via the LNClient default.
+    /// no cross-runtime tonic channel. LNURL and LND over the LNC mailbox can't
+    /// answer and return an error.
     pub async fn lookup_invoice(&self, payment_hash: Vec<u8>) -> Result<Option<Vec<u8>>, String> {
         let ln_client = match WORKER_LN_CLIENT
             .get_or_try_init(|| async {

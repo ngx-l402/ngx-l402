@@ -93,8 +93,8 @@ When Redis is configured (`REDIS_URL`), settled preimages are cached under the k
 | `LND` | ✅ | Uses `LookupInvoice` gRPC |
 | `CLN` / `BOLT12` | ✅ | Uses `listinvoices` JSON-RPC over unix socket |
 | `ECLAIR` | ✅ | Uses `POST /getreceivedinfo` REST API |
+| `NWC` | ⚠️ | Uses NIP-47 `lookup_invoice`, which wallets may not implement |
 | `LNC` | ❌ | LNC mailbox does not expose `LookupInvoice` |
-| `NWC` | ❌ | `lookup_invoice` is optional in NIP-47 |
 | `LNURL` | ❌ | Remote wallet — no server-side query API |
 
 > [!NOTE]

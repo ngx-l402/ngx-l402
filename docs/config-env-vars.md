@@ -313,5 +313,6 @@ location /subscriber-only {
 > `l402_macaroon_timeout`. Without an expiry, the macaroon never expires and the
 > same preimage grants access forever.
 
-> **Backends that support auto-detect**: `LND`, `CLN`, `BOLT12`, `ECLAIR`.
-> `LNC`, `NWC`, and `LNURL` do **not** support server-side lookup.
+> **Backends that support auto-detect**: `LND`, `CLN`, `BOLT12`, `ECLAIR`, and
+> `NWC` where the wallet implements the optional NIP-47 `lookup_invoice`.
+> `LNC` and `LNURL` do **not** support server-side lookup.

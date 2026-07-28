@@ -1,0 +1,40 @@
+# Integration slice 7 — Eclair backend
+#
+# Invoice generation and autodetect over an LND -> Eclair channel.
+#
+# One workflow per slice, so a failure names an area and each slice publishes
+# its own kind-9841/9842 result. The coordinator runs one job at a time, so
+# the slices queue rather than compete for port 8000.
+#
+# Requires the coordinator to pass --act-container-options "--privileged":
+# the suite reaches services over published ports and with `docker exec`, which
+# only behaves like a GitHub runner when the daemon lives inside the job
+# container. See .ngit/act/lib/docker-in-job.sh.
+
+name: integration-eclair
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  eclair:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start a docker daemon inside the job
+        run: bash .ngit/act/lib/docker-in-job.sh
+
+      - name: Eclair integration tests
+        run: bash .ngit/act/slices/eclair.sh
+
+      - name: Collect diagnostics
+        if: failure()
+        run: bash .ngit/act/lib/diagnose.sh
+
+      - name: Tear down the stack
+        if: always()
+        run: bash .ngit/act/lib/teardown.sh

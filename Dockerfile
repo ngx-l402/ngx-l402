@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 ARG NGX_VERSION=1.28.0
 
 # Build stage
@@ -41,12 +40,12 @@ COPY index.html /usr/share/nginx/html/tenant2/index.html
 
 # Cashu data dir, owned by nginx as in the manual install. A mounted volume
 # hides the ownership set at build time, so the entrypoint sets it again.
-COPY <<'EOF' /docker-entrypoint.d/05-cashu-data-perms.sh
-#!/bin/sh
-d=$(dirname "${CASHU_DB_PATH:-/app/data/cashu_tokens.db}")
-mkdir -p "$d" && chown -R nginx:nginx "$d" && chmod 750 "$d"
-EOF
-RUN chmod +x /docker-entrypoint.d/05-cashu-data-perms.sh
+RUN printf '%s\n' \
+    '#!/bin/sh' \
+    'd=$(dirname "${CASHU_DB_PATH:-/app/data/cashu_tokens.db}")' \
+    'mkdir -p "$d" && chown -R nginx:nginx "$d" && chmod 750 "$d"' \
+    > /docker-entrypoint.d/05-cashu-data-perms.sh \
+    && chmod +x /docker-entrypoint.d/05-cashu-data-perms.sh
 
 USER root
 

@@ -38,6 +38,12 @@ COPY index.html /usr/share/nginx/html/shadow/index.html
 COPY index.html /usr/share/nginx/html/tenant1/index.html
 COPY index.html /usr/share/nginx/html/tenant2/index.html
 
+# Cashu data dir. The master runs as root and workers as nginx, so both need to
+# write here: group nginx, and setgid so files created inside inherit it.
+RUN mkdir -p /app/data \
+    && chown root:nginx /app/data \
+    && chmod 2770 /app/data
+
 USER root
 
 ENTRYPOINT ["/docker-entrypoint.sh"]

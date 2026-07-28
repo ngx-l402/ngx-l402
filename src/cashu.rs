@@ -20,8 +20,41 @@ thread_local! {
 
 const MSAT_PER_SAT: u64 = 1000;
 
-// Database singleton using cdk-sqlite
+// Database singleton using cdk-sqlite. Opened in the master; `CASHU_DB_PID`
+// records who opened it so a forked worker knows to open its own instead of
+// reusing a connection that belongs to another process.
 static CASHU_DB: OnceLock<Arc<cdk_sqlite::WalletSqliteDatabase>> = OnceLock::new();
+static CASHU_DB_PID: OnceLock<u32> = OnceLock::new();
+static CASHU_DB_URL: OnceLock<String> = OnceLock::new();
+// This worker's own handle, opened lazily on first use after fork.
+static WORKER_DB: tokio::sync::OnceCell<Arc<cdk_sqlite::WalletSqliteDatabase>> =
+    tokio::sync::OnceCell::const_new();
+
+/// The database handle for the current process.
+///
+/// A SQLite connection belongs to the process that opened it, so a worker never
+/// reuses the master's — it opens its own on first use.
+async fn get_db() -> Result<Arc<cdk_sqlite::WalletSqliteDatabase>, String> {
+    if CASHU_DB_PID.get().copied() == Some(std::process::id()) {
+        return CASHU_DB
+            .get()
+            .cloned()
+            .ok_or_else(|| "Cashu database not initialized".to_string());
+    }
+
+    WORKER_DB
+        .get_or_try_init(|| async {
+            let url = CASHU_DB_URL
+                .get()
+                .ok_or_else(|| "Cashu database not configured".to_string())?;
+            cdk_sqlite::WalletSqliteDatabase::new(url.as_str())
+                .await
+                .map(Arc::new)
+                .map_err(|e| format!("Failed to open Cashu database: {:?}", e))
+        })
+        .await
+        .cloned()
+}
 
 // Whitelisted mints singleton
 static WHITELISTED_MINTS: OnceLock<HashSet<String>> = OnceLock::new();
@@ -78,10 +111,7 @@ async fn get_or_create_wallet(
         }
     }
 
-    let db = CASHU_DB
-        .get()
-        .ok_or_else(|| "Cashu database not initialized".to_string())?
-        .clone();
+    let db = get_db().await?;
     let seed = get_cached_seed();
     let wallet = Arc::new(
         cdk::wallet::Wallet::new(mint_url, unit.clone(), db, seed, None)
@@ -186,6 +216,21 @@ fn resolve_wallet_mnemonic(db_url: &str) -> Result<(), String> {
 
     let _ = WALLET_MNEMONIC.set(generated);
     Ok(())
+}
+
+/// Allow the nginx group to write the database file.
+fn set_db_group_writable(db_url: &str) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = db_url
+            .trim()
+            .trim_start_matches("sqlite://")
+            .trim_start_matches("sqlite:");
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660));
+    }
+    #[cfg(not(unix))]
+    let _ = db_url;
 }
 
 /// Decide where to persist a generated mnemonic. Prefers
@@ -449,6 +494,8 @@ pub fn initialize_cashu(db_url: &str) -> Result<(), String> {
     // that owns this DB's funds (changed/typo'd mnemonic would orphan them).
     check_wallet_fingerprint(db_url)?;
 
+    let _ = CASHU_DB_URL.set(db_url.to_string());
+
     // Create runtime for async initialization
     let rt = Runtime::new().expect("Failed to create runtime");
 
@@ -458,6 +505,10 @@ pub fn initialize_cashu(db_url: &str) -> Result<(), String> {
             Ok(db) => {
                 info!("✅ Cashu SQLite database initialized successfully with WAL mode");
                 let _ = CASHU_DB.set(Arc::new(db));
+                let _ = CASHU_DB_PID.set(std::process::id());
+                // The master creates the file as root; workers run as nginx and
+                // share its group. SQLite gives -wal/-shm the same mode.
+                set_db_group_writable(db_url);
 
                 Ok(())
             }
@@ -524,10 +575,10 @@ pub async fn restore_wallets_state() {
         }
     };
 
-    let db = match CASHU_DB.get() {
-        Some(db) => db.clone(),
-        None => {
-            warn!("⚠️ Cashu database not initialized before restore");
+    let db = match get_db().await {
+        Ok(db) => db,
+        Err(e) => {
+            warn!("⚠️ Cashu database unavailable before restore: {}", e);
             return;
         }
     };
@@ -583,10 +634,13 @@ pub async fn reconcile_pending_proofs() {
         None => return,
     };
 
-    let db = match CASHU_DB.get() {
-        Some(db) => db.clone(),
-        None => {
-            warn!("⚠️ Cashu database not initialized before pending-proof reconciliation");
+    let db = match get_db().await {
+        Ok(db) => db,
+        Err(e) => {
+            warn!(
+                "⚠️ Cashu database unavailable before pending-proof reconciliation: {}",
+                e
+            );
             return;
         }
     };
@@ -1340,10 +1394,7 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
     info!("🚀 Starting smart Cashu token redemption process...");
 
     // Get database
-    let db = CASHU_DB
-        .get()
-        .ok_or_else(|| "Cashu database not initialized".to_string())?
-        .clone();
+    let db = get_db().await?;
 
     // Use whitelisted mints for redemption check
     // If no whitelisted mints are configured, we can't redeem

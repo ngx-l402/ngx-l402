@@ -2092,6 +2092,13 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
     info!("🚀 Starting L402 module initialization");
     ngx_log_error!(NGX_LOG_INFO, log, "Starting module initialization");
 
+    // libsodium's RNG is only thread-safe once initialised, and every 402 mints
+    // a macaroon from multiple workers at once. Done here, before nginx forks.
+    if let Err(e) = macaroon::initialize() {
+        error!("❌ Failed to initialize macaroon crypto: {:?}", e);
+        return -1;
+    }
+
     manifest::init_env_snapshot();
 
     // Cache the LN backend type string for structured log lines. We can't

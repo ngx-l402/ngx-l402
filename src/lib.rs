@@ -114,6 +114,142 @@ static PERF_LOG_ENABLED: OnceLock<bool> = OnceLock::new();
 /// A single-threaded runtime has no blocking thread pool, causing those calls to panic.
 static HANDLER_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
+/// This module's load address, resolved at install time.
+static MODULE_BASE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Report where a worker died when it takes a fatal signal.
+///
+/// nginx logs only "worker process N exited on signal 11", which does not say
+/// where. This prints the faulting instruction as a module offset, so
+/// `addr2line -f -C -e libngx_l402_lib.so <offset>` names the function.
+///
+/// The handler allocates nothing — a fault inside the allocator leaves its lock
+/// held, so allocating here would hang the worker rather than let it die. Hence
+/// the hand-rolled number formatting and the base resolved up front.
+///
+/// Dispositions survive `fork()`, so installing in the master covers every worker.
+#[cfg(unix)]
+fn install_crash_handler() {
+    use std::sync::atomic::Ordering;
+
+    /// Write `value` as hex into `buf` at `pos`, advancing it.
+    fn put_hex(buf: &mut [u8; 160], pos: &mut usize, value: usize) {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let mut started = false;
+        for shift in (0..16).rev() {
+            let nibble = (value >> (shift * 4)) & 0xf;
+            if nibble != 0 || started || shift == 0 {
+                started = true;
+                if *pos < buf.len() {
+                    buf[*pos] = DIGITS[nibble];
+                    *pos += 1;
+                }
+            }
+        }
+    }
+
+    /// Decimal, so the signal number matches what nginx reports.
+    fn put_dec(buf: &mut [u8; 160], pos: &mut usize, mut value: usize) {
+        let mut digits = [0u8; 20];
+        let mut n = 0;
+        loop {
+            digits[n] = b'0' + (value % 10) as u8;
+            n += 1;
+            value /= 10;
+            if value == 0 {
+                break;
+            }
+        }
+        while n > 0 {
+            n -= 1;
+            if *pos < buf.len() {
+                buf[*pos] = digits[n];
+                *pos += 1;
+            }
+        }
+    }
+
+    fn put_str(buf: &mut [u8; 160], pos: &mut usize, s: &str) {
+        for &b in s.as_bytes() {
+            if *pos < buf.len() {
+                buf[*pos] = b;
+                *pos += 1;
+            }
+        }
+    }
+
+    extern "C" fn on_fatal_signal(
+        sig: libc::c_int,
+        info: *mut libc::siginfo_t,
+        ctx: *mut std::ffi::c_void,
+    ) {
+        let fault_addr = if info.is_null() {
+            0usize
+        } else {
+            (unsafe { (*info).si_addr() }) as usize
+        };
+
+        #[cfg(target_arch = "x86_64")]
+        let pc = if ctx.is_null() {
+            0usize
+        } else {
+            unsafe {
+                let uc = ctx as *const libc::ucontext_t;
+                (*uc).uc_mcontext.gregs[libc::REG_RIP as usize] as usize
+            }
+        };
+        #[cfg(not(target_arch = "x86_64"))]
+        let pc = {
+            let _ = ctx;
+            0usize
+        };
+
+        let offset = pc.saturating_sub(MODULE_BASE.load(Ordering::Relaxed));
+
+        let mut buf = [0u8; 160];
+        let mut pos = 0usize;
+        put_str(&mut buf, &mut pos, "ngx_l402: worker died on signal ");
+        put_dec(&mut buf, &mut pos, sig as usize);
+        put_str(&mut buf, &mut pos, " at fault addr 0x");
+        put_hex(&mut buf, &mut pos, fault_addr);
+        put_str(&mut buf, &mut pos, ", module offset 0x");
+        put_hex(&mut buf, &mut pos, offset);
+        put_str(
+            &mut buf,
+            &mut pos,
+            " (addr2line -f -C -e libngx_l402_lib.so <offset>)\n",
+        );
+        unsafe { libc::write(2, buf.as_ptr() as *const std::ffi::c_void, pos) };
+
+        // SA_RESETHAND already restored the default disposition; re-raise so the
+        // exit status and any core dump are unchanged.
+        unsafe { libc::raise(sig) };
+    }
+
+    unsafe {
+        // dladdr on our own code gives this module's load base.
+        let mut dl_info: libc::Dl_info = std::mem::zeroed();
+        if libc::dladdr(
+            install_crash_handler as *const std::ffi::c_void,
+            &mut dl_info,
+        ) != 0
+        {
+            MODULE_BASE.store(dl_info.dli_fbase as usize, Ordering::Relaxed);
+        }
+
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_sigaction = on_fatal_signal as *const () as libc::sighandler_t;
+        sa.sa_flags = libc::SA_SIGINFO | libc::SA_RESETHAND;
+        libc::sigemptyset(&mut sa.sa_mask);
+        for sig in [libc::SIGSEGV, libc::SIGBUS, libc::SIGILL, libc::SIGABRT] {
+            libc::sigaction(sig, &sa, std::ptr::null_mut());
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn install_crash_handler() {}
+
 fn get_handler_runtime() -> &'static Runtime {
     HANDLER_RUNTIME.get_or_init(|| {
         match tokio::runtime::Builder::new_multi_thread()
@@ -1765,20 +1901,32 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         // l402_middleware's lnurl.rs can panic on network errors). Without this
         // guard a panic would unwind through nginx's C stack — undefined
         // behaviour in a cdylib that crashes the worker process (curl exit 52).
+        // Backends bound connecting, not the call, so an unanswered invoice
+        // request would hold this worker until the client gave up.
+        const CHALLENGE_TIMEOUT: Duration = Duration::from_secs(10);
         let header_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             rt.block_on(async {
-                module
-                    .get_l402_header(
+                tokio::time::timeout(
+                    CHALLENGE_TIMEOUT,
+                    module.get_l402_header(
                         challenge_caveats,
                         final_amount,
                         macaroon_timeout,
                         final_lnurl_addr.clone(),
-                    )
-                    .await
+                    ),
+                )
+                .await
             })
         }))
         .unwrap_or_else(|_| {
             error!("❌ Panic in get_l402_header (LNURL resolution failure); returning 500");
+            Ok(None)
+        })
+        .unwrap_or_else(|_| {
+            error!(
+                "❌ Invoice generation timed out after {}s",
+                CHALLENGE_TIMEOUT.as_secs()
+            );
             None
         });
 
@@ -2100,6 +2248,8 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
 
     // Initialize logger - this is critical for RUST_LOG to work
     let _ = env_logger::try_init();
+
+    install_crash_handler();
 
     info!("🚀 Starting L402 module initialization");
     ngx_log_error!(NGX_LOG_INFO, log, "Starting module initialization");

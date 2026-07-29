@@ -369,8 +369,34 @@ jobs:
       - name: Start LND node, LND node receiver, cashu-mint and Tor
         run: |
           docker-compose -f docker-compose.yml up -d --no-deps bitcoind tor lndnode lndnode-receiver cashu-mint
-          echo "waiting for 30 seconds..."
-          sleep 30
+          # The next step drives bitcoin-cli straight away, so wait for it.
+          for i in $(seq 1 90); do
+            docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass getblockchaininfo >/dev/null 2>&1 && break
+            if [ "$i" -eq 90 ]; then
+              echo "❌ bitcoind did not answer RPC after 90s"
+              docker logs bitcoind 2>&1 | tail -30
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "✅ bitcoind answering RPC after ${i}s"
+
+          # The same step funds both LND nodes, and the first check that they
+          # are up is far below that.
+          for node in "lndnode" "lndnode-receiver --rpcserver=127.0.0.1:10010"; do
+            set -- $node
+            name=$1; shift
+            for i in $(seq 1 120); do
+              docker exec "$name" lncli "$@" -n regtest getinfo >/dev/null 2>&1 && break
+              if [ "$i" -eq 120 ]; then
+                echo "❌ $name did not answer after 120s"
+                docker logs "$name" 2>&1 | tail -30
+                exit 1
+              fi
+              sleep 1
+            done
+            echo "✅ $name answering after ${i}s"
+          done
 
       - name: Verify Bitcoin daemon Service, create wallet and fund lndnode and lndnode-receiver
         run: |
@@ -485,8 +511,23 @@ jobs:
           echo "Pushing liquidity from lndnode to lndnode-receiver..."
           INVOICE=$(docker exec lndnode lncli -n regtest addinvoice --amt=8000 | jq -r '.payment_request')
           docker exec lndnode-receiver lncli -n regtest --rpcserver=127.0.0.1:10010 payinvoice --force "$INVOICE"
-          sleep 3
-          echo "✅ Liquidity pushed successfully!"
+          # This push is lndnode's only outbound, and every later test spends
+          # from it. Unsettled, they all fail with insufficient balance far from
+          # here — so confirm it landed rather than sleeping on it.
+          bal=0
+          for i in $(seq 1 60); do
+            bal=$(docker exec lndnode lncli -n regtest channelbalance 2>/dev/null \
+              | jq -r '(.local_balance.sat // .balance // 0) | tonumber' 2>/dev/null || echo 0)
+            [ "${bal:-0}" -ge 7000 ] && break
+            if [ "$i" -eq 60 ]; then
+              echo "❌ lndnode outbound is ${bal:-0} sat after 60s — tests cannot pay"
+              docker exec lndnode lncli -n regtest listchannels || true
+              docker exec lndnode-receiver lncli -n regtest --rpcserver=127.0.0.1:10010 listchannels || true
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "✅ Liquidity pushed successfully (lndnode outbound: ${bal} sat)"
 
       - name: Extract Macaroon and Cert Paths
         run: |
@@ -709,7 +750,8 @@ jobs:
           
           echo "Starting nginx-bolt12 with BOLT12_OFFER..."
           export BOLT12_OFFER
-          docker-compose -f docker-compose.yml up -d nginx-bolt12
+          # --no-deps, or compose recreates the cln that just made this offer.
+          docker-compose -f docker-compose.yml up -d --no-deps nginx-bolt12
           source .github/scripts/ci-wait.sh
           # Free route first — a 402 needs the CLN socket the chmod unlocks.
           wait_http http://0.0.0.0:8000/ 200 90 || { docker logs nginx-bolt12; exit 1; }
@@ -1021,7 +1063,7 @@ jobs:
         run: |
           source .github/scripts/ci-wait.sh
           echo "Testing CLN Autodetect Payment..."
-          docker-compose -f docker-compose.yml up -d nginx-cln
+          docker-compose -f docker-compose.yml up -d --no-deps nginx-cln
           # Free route first — a 402 needs the CLN socket the chmod unlocks.
           wait_http http://0.0.0.0:8000/ 200 90 || { docker logs nginx-cln; exit 1; }
           docker exec nginx-cln chmod 777 /root /root/.lightning /root/.lightning/regtest
@@ -2191,7 +2233,8 @@ jobs:
           # before stopping, so nginx-lnurl can start fresh with its own mnemonic.
           docker exec nginx-lnd rm -f /app/data/wallet.fingerprint /app/data/wallet.mnemonic
           docker-compose -f docker-compose.yml stop nginx-lnd
-          docker-compose -f docker-compose.yml up -d nginx-lnurl
+          # --no-deps, or redis loses its replay and pricing state.
+          docker-compose -f docker-compose.yml up -d --no-deps nginx-lnurl
           sleep 15
 
       - name: Run Integration Tests - Multi-tenant LNURL Cashu Redemption
@@ -2360,7 +2403,7 @@ jobs:
       - name: Start nginx-lnc
         run: |
           echo "Starting nginx-lnc with LNC configuration..."
-          docker-compose -f docker-compose.yml up -d nginx-lnc
+          docker-compose -f docker-compose.yml up -d --no-deps nginx-lnc
           sleep 15
 
       - name: Run Integration Tests - LNC

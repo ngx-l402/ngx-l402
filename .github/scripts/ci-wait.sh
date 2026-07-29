@@ -88,9 +88,8 @@ assert_no_crash() {
     return 0
 }
 
-# Turn the module offsets the crash handler printed into function names. The
-# offset only means anything against the .so that produced it, so resolve it
-# here rather than leaving it for someone to match up by hand later.
+# Name the crash sites the handler printed. An offset only means anything
+# against the .so that produced it, so resolve it here.
 #   resolve_crash_offsets <container>
 resolve_crash_offsets() {
     local container=$1 so=/tmp/${1}-l402.so offsets

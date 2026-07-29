@@ -2297,9 +2297,9 @@ dependencies = [
 
 [[package]]
 name = "l402_middleware"
-version = "2.3.2"
+version = "2.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dfe594ed4741b457e4ed53660f25c13d773835019e18296e3030aaf37ce0910c"
+checksum = "29c32e8df1850149c6697f95b16a4f64151275e2298406cb59c67e9f434be6d9"
 dependencies = [
  "base64 0.21.7",
  "bitcoin 0.32.100",

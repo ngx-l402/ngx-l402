@@ -17,7 +17,7 @@ exclude = ["grpc-server", "stress-test"]
 
 [dependencies]
 ngx = { version = "0.5.1" }
-l402_middleware = "2.3.2"
+l402_middleware = "2.3.3"
 ngx_l402_core = { path = "ngx_l402_core" }
 tokio = { version = "1.33.0", features = ["full"] }
 futures = "0.3"

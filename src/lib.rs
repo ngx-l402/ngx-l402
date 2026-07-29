@@ -1901,9 +1901,11 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         // l402_middleware's lnurl.rs can panic on network errors). Without this
         // guard a panic would unwind through nginx's C stack — undefined
         // behaviour in a cdylib that crashes the worker process (curl exit 52).
-        // Backends bound connecting, not the call, so an unanswered invoice
-        // request would hold this worker until the client gave up.
-        const CHALLENGE_TIMEOUT: Duration = Duration::from_secs(10);
+        // Backends bound connecting, not the call, so an unanswered request
+        // would hold this worker until the client gave up. Generous because a
+        // worker's first request builds its own channel: this catches a request
+        // that will never finish, it is not a latency budget.
+        const CHALLENGE_TIMEOUT: Duration = Duration::from_secs(25);
         let header_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             rt.block_on(async {
                 tokio::time::timeout(

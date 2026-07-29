@@ -1,0 +1,35 @@
+# Security audit — the ngit equivalent of .github/workflows/audit.yml.
+#
+# No docker and no sandbox services: this only reads the dependency tree, so it
+# is the cheapest workflow here and worth running on every proposal.
+#
+# One thing the GitHub original has that this does not: a weekly `schedule:`
+# trigger, so newly-disclosed advisories are caught without a push. ngit-ci
+# reacts to repo events, not to a clock, so that half stays on the mirror —
+# or wants a timer outside CI pointing at the same command.
+
+name: security-audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        # --locked so the audit tool itself cannot drift between runs.
+        run: cargo install cargo-audit --locked
+
+      - name: Run cargo audit
+        # Audit the dependency tree against the RustSec advisory database.
+        # Same bare invocation as the mirror: if the two disagree, a proposal
+        # goes green here and red on GitHub.
+        run: cargo audit

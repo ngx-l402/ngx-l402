@@ -54,6 +54,13 @@ jobs:
         # Deliberately not --release or --features, for the same reason.
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Run unit tests (ngx_l402_core)
+        # Fast, nginx-free pure-logic tests (wallet-seed derivation, etc.).
+        # Ahead of the integration slices, which each cost a lease: a
+        # wallet-seed regression that would strand funds fails here in seconds
+        # instead of after a sandbox has been bought.
+        run: cargo test -p ngx_l402_core --verbose
+
       - name: Build module
         run: cargo build --release --features export-modules
 

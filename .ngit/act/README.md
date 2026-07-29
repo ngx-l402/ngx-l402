@@ -25,15 +25,28 @@ or a lease.
 
 | workflow | needs | notes |
 | -------- | ----- | ----- |
-| `build` | nothing | fmt, clippy, release build, `.so` check |
+| `build` | nothing | fmt, clippy, unit tests, release build, `.so` check |
+| `security-audit` | nothing | `cargo audit`; no docker at all |
 | `integration-lnurl` | redis, nginx-lnurl, gRPC backend | cheapest; run this first |
 | `integration-lnd` | full regtest backbone | pricing, pay-and-redeem, method binding, Cashu |
 | `integration-cln` | backbone + CLN | CLN, BOLT12, autodetect |
 | `integration-nwc` | backbone + CLN | reaches a public Nostr relay |
 | `integration-cashu-redis` | backbone | replay, rate limiting, redemption, multi-tenant |
+| `integration-cashu-p2pk` | backbone | NUT-11/NUT-24 pay-to-public-key |
 | `integration-lnc` | backbone + litd | reaches Lightning Labs' mailbox server |
 | `integration-eclair` | backbone + Eclair | channel confirmation is order-sensitive |
 | `nginx-compat-*` | nothing | one file per nginx version |
+
+Between them these cover every gating step of `.github/workflows/tests.yml`,
+`nginx-compat.yml` and `audit.yml`. Two things are deliberately not here:
+
+- **The Tor / SOCKS5 steps.** On the mirror they end in `|| echo`, so they
+  cannot fail a build — they print whether an onion address appeared and move
+  on. Porting them would buy log output and a Tor container per run. Worth
+  adding only alongside a decision to make them actually assert something.
+- **`docs.yml` and `ghcr-workflow.yml`**, plus the release upload at the end of
+  `tests.yml`. Those publish to GitHub Pages, GHCR and GitHub Releases; they
+  are deploy steps aimed at GitHub-specific targets, not gates on a proposal.
 
 Three slices depend on a third party being reachable — getalby.com for LNURL,
 a Nostr relay for NWC, the mailbox server for LNC. When one of those fails on

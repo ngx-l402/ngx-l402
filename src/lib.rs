@@ -1471,7 +1471,7 @@ pub static mut ngx_http_l402_module: ngx_module_t = ngx_module_t {
 
     init_master: None,
     init_module: Some(init_module as unsafe extern "C" fn(*mut ngx_cycle_s) -> isize),
-    init_process: None,
+    init_process: Some(init_process as unsafe extern "C" fn(*mut ngx_cycle_s) -> isize),
     init_thread: None,
     exit_thread: None,
     exit_process: None,
@@ -2463,19 +2463,116 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
         == "true";
 
     if redeem_on_lightning && cashu_ecash_support {
-        ngx_log_error!(NGX_LOG_INFO, log, "Automatic Cashu redemption enabled");
+        // Started later, in a worker. A thread running here would still be
+        // running when nginx forks, and the child inherits its locks without
+        // the threads that hold them — the worker then wedges or dies on a
+        // signal inside parking_lot.
+        ngx_log_error!(
+            NGX_LOG_INFO,
+            log,
+            "Automatic Cashu redemption enabled (starts in a worker)"
+        );
+    }
 
-        // Get redemption interval
-        let interval_secs = std::env::var("CASHU_REDEMPTION_INTERVAL_SECS")
-            .unwrap_or_else(|_| "3600".to_string()) // Default 1 hour
-            .parse::<u64>()
-            .unwrap_or(3600);
+    0
+}
 
-        let Some(_module) = MODULE.get() else {
-            error!("Module not initialized — skipping Cashu redemption");
-            return 0;
-        };
+/// Per-worker init, after `fork()`.
+///
+/// Deliberately does almost nothing: work here runs in every worker, and a
+/// failure must not stop one starting. Always returns NGX_OK — returning an
+/// error marks the worker unrespawnable and takes the server down with it.
+///
+/// # Safety
+/// Called by nginx once per worker with a valid cycle pointer.
+pub unsafe extern "C" fn init_process(_cycle: *mut ngx_cycle_s) -> isize {
+    start_cashu_redemption_in_worker();
+    0
+}
 
+/// Start the Cashu redemption loop in this worker, if it wins the lease.
+///
+/// Exactly one worker should redeem. The lease is an exclusive `flock` on a
+/// file beside the wallet database, held for the winner's lifetime and released
+/// by the kernel when that worker exits — a crash included.
+///
+/// Every worker waits on it rather than asking once, because the holder does not
+/// always die: on reload the new workers start while the old one is still
+/// draining, and it releases the lock only after they would have given up.
+fn start_cashu_redemption_in_worker() {
+    let redeem_on_lightning = std::env::var("CASHU_REDEEM_ON_LIGHTNING")
+        .unwrap_or_else(|_| "false".to_string())
+        .trim()
+        .to_lowercase()
+        == "true";
+    let cashu_ecash_support = std::env::var("CASHU_ECASH_SUPPORT")
+        .unwrap_or_else(|_| "false".to_string())
+        .trim()
+        .to_lowercase()
+        == "true";
+
+    if !(redeem_on_lightning && cashu_ecash_support) {
+        return;
+    }
+
+    let interval_secs = std::env::var("CASHU_REDEMPTION_INTERVAL_SECS")
+        .unwrap_or_else(|_| "3600".to_string())
+        .parse::<u64>()
+        .unwrap_or(3600);
+
+    #[cfg(unix)]
+    {
+        let db_path = std::env::var("CASHU_DB_PATH")
+            .unwrap_or_else(|_| "/var/lib/nginx/cashu_tokens.db".to_string());
+        let lock_path = format!("{}.redeem.lock", db_path);
+
+        let _ = std::thread::Builder::new()
+            .name("cashu_redeem_lease".into())
+            .spawn(move || {
+                use std::os::unix::io::AsRawFd;
+
+                let file = match std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .write(true)
+                    .open(&lock_path)
+                {
+                    Ok(f) => f,
+                    Err(e) => {
+                        error!("❌ Cannot open the redemption lease {}: {}", lock_path, e);
+                        return;
+                    }
+                };
+
+                // Blocking: the kernel parks this thread and wakes exactly one
+                // waiter when the holder releases. No polling, and handover is
+                // immediate rather than up to an interval late. Only a signal
+                // can interrupt it, so retry on EINTR.
+                loop {
+                    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                        break;
+                    }
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() != std::io::ErrorKind::Interrupted {
+                        error!("❌ Waiting for the Cashu redemption lease failed: {}", err);
+                        return;
+                    }
+                }
+
+                // Held until this worker exits, when the kernel closes the fd
+                // and hands the lease to the next waiter.
+                std::mem::forget(file);
+                info!("🔄 This worker took the Cashu redemption lease");
+                spawn_cashu_redemption_thread(interval_secs);
+            });
+    }
+
+    #[cfg(not(unix))]
+    spawn_cashu_redemption_thread(interval_secs);
+}
+
+fn spawn_cashu_redemption_thread(interval_secs: u64) {
+    {
         // Spawn redemption task in a separate thread to avoid blocking nginx
         let _ = std::thread::Builder::new()
             .name("cashu_redemption".into())
@@ -2558,7 +2655,6 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
                 }
             });
     }
-    0
 }
 
 /// Handle dry-run (shadow) mode: evaluate everything, log + increment metrics,

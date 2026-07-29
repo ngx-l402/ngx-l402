@@ -84,6 +84,9 @@ pub struct RouteSnapshot {
     pub price_msat: i64,
     pub macaroon_timeout: i64,
     pub lnurl_addr: Option<String>,
+    /// `l402_realm` name, when the route is realm-scoped. Decides whether the
+    /// macaroon carries `Realm = <name>` or `RequestPath = <path>`.
+    pub realm: Option<String>,
     /// `(max_requests, window_secs)` from `l402_invoice_rate_limit`.
     pub rate_limit: Option<(u32, u64)>,
     pub auto_detect_payment: bool,
@@ -173,12 +176,16 @@ fn route_block(r: &RouteSnapshot) -> Value {
     price.insert("amount_msat".to_string(), json!(r.price_msat));
     block.insert("price".to_string(), Value::Object(price));
 
-    // Caveats the macaroon will carry. Today the access handler binds
-    // `RequestPath = <path>` on every challenge; surfacing it here lets
-    // agents pre-validate their L402 client logic.
+    // Caveats the macaroon will carry, so agents can pre-validate their L402
+    // client logic. The scope is either the exact path or the realm name; the
+    // method is bound to whatever the request used, so it is a placeholder.
+    let scope = match &r.realm {
+        Some(realm) => format!("Realm = {}", realm),
+        None => format!("RequestPath = {}", r.path),
+    };
     block.insert(
         "caveats_required".to_string(),
-        json!([format!("RequestPath = {}", r.path)]),
+        json!([scope, "RequestMethod = <METHOD>"]),
     );
 
     if r.macaroon_timeout > 0 {

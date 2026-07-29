@@ -1337,6 +1337,18 @@ impl Merge for ModuleConfig {
         if prev.indefinite_access {
             self.indefinite_access = true;
         }
+        // A realm token carries one preimage to every path in the realm. The
+        // first request claims it and the replay check rejects the rest, so
+        // without indefinite access the operator has sold exactly one request.
+        // env_logger is not up during config parse — stderr is what nginx shows.
+        if self.enable && self.realm.is_some() && !self.indefinite_access {
+            eprintln!(
+                "ngx_l402: l402_realm requires l402_indefinite_access on. Without it the \
+                 realm token is accepted once and every later request in the realm is \
+                 rejected as a replay."
+            );
+            return Err(MergeConfigError::NoValue);
+        }
         Ok(())
     }
 }
@@ -2836,6 +2848,7 @@ fn collect_route_snapshots() -> Vec<manifest::RouteSnapshot> {
                 price_msat: conf.amount_msat,
                 macaroon_timeout: conf.macaroon_timeout,
                 lnurl_addr: conf.lnurl_addr.clone(),
+                realm: conf.realm.clone(),
                 rate_limit: conf.invoice_rate_limit,
                 auto_detect_payment: conf.auto_detect_payment,
                 hidden: conf.manifest_hidden,

@@ -1399,6 +1399,39 @@ jobs:
           fi
           echo "PASS: realm token rejected outside its realm"
 
+          # The manifest must describe the caveats each route actually mints.
+          # Advertising RequestPath on a realm route would send agents off to
+          # pre-validate a scope the token never carries.
+          echo "Checking the manifest matches what each route mints..."
+          manifest_json=$(curl -s --max-time 30 http://0.0.0.0:8000/.well-known/l402-services) || true
+          realm_caveats=$(echo "$manifest_json" | jq -c '.routes[] | select(.path == "/realm-a") | .caveats_required')
+          path_caveats=$(echo "$manifest_json" | jq -c '.routes[] | select(.path == "/protected") | .caveats_required')
+          echo "  /realm-a   -> ${realm_caveats:-<missing>}"
+          echo "  /protected -> ${path_caveats:-<missing>}"
+
+          if ! echo "$realm_caveats" | grep -q 'Realm = demo-realm'; then
+            echo "Error: /realm-a does not advertise 'Realm = demo-realm': ${realm_caveats:-<missing>}"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          if echo "$realm_caveats" | grep -q 'RequestPath'; then
+            echo "Error: /realm-a advertises RequestPath, which a realm token never carries: $realm_caveats"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          if ! echo "$realm_caveats" | grep -q 'RequestMethod'; then
+            echo "Error: /realm-a does not advertise RequestMethod: ${realm_caveats:-<missing>}"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          # The path-bound route must still advertise its exact path.
+          if ! echo "$path_caveats" | grep -q 'RequestPath = /protected'; then
+            echo "Error: /protected does not advertise 'RequestPath = /protected': ${path_caveats:-<missing>}"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "PASS: manifest matches the caveats each route mints"
+
           # Test LND Autodetect Payment
           echo "Testing LND Autodetect Payment..."
           response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected-auto) || true

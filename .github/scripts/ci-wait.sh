@@ -80,11 +80,35 @@ assert_no_crash() {
     if [ -n "$crashes" ]; then
         echo "  ✗ worker exited on a signal in $container:"
         echo "$crashes" | sed 's/^/      /'
+        resolve_crash_offsets "$container"
         echo "  --- last 40 log lines ---"
         docker logs "$container" 2>&1 | tail -40 | sed 's/^/      /'
         return 1
     fi
     return 0
+}
+
+# Turn the module offsets the crash handler printed into function names. The
+# offset only means anything against the .so that produced it, so resolve it
+# here rather than leaving it for someone to match up by hand later.
+#   resolve_crash_offsets <container>
+resolve_crash_offsets() {
+    local container=$1 so=/tmp/${1}-l402.so offsets
+
+    offsets=$(docker logs "$container" 2>&1 \
+        | sed -n 's/.*module offset \(0x[0-9a-f]*\).*/\1/p' | sort -u)
+    [ -n "$offsets" ] || return 0
+
+    if ! docker cp "$container":/etc/nginx/modules/libngx_l402_lib.so "$so" 2>/dev/null; then
+        echo "  (could not copy the module out of $container to resolve offsets)"
+        return 0
+    fi
+
+    echo "  --- crash site ---"
+    for off in $offsets; do
+        echo "      $off  ->  $(addr2line -f -C -e "$so" "$off" 2>/dev/null | head -1)"
+    done
+    rm -f "$so"
 }
 
 # Retry a command until it succeeds. For inherently racy operations.

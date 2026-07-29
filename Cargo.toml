@@ -39,6 +39,7 @@ hex = "0.4"
 qrcode-generator = "4"
 lightning = "0.2.2"
 openssl-probe = "0.1.5"
+libc = "0.2.189"
 
 [features]
 default = []

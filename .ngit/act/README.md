@@ -66,6 +66,22 @@ Privileged is host root, which on a shared ngit-ci runner would be
 unacceptable. It is acceptable here only because the job runs on a rented
 sandbox that is destroyed when the lease expires.
 
+## Running a slice on an arm64 machine
+
+The sandbox is x86. Two of the images are not portable to it: CLN's compose
+entrypoint downloads an `x86_64-linux-gnu` nip47 plugin, and
+`acinq/eclair:release-0.8.0` publishes no arm64 build. To run the CLN, NWC or
+Eclair slices on a Mac, register qemu and pin those two services:
+
+    docker run --privileged --rm tonistiigi/binfmt --install amd64
+    printf 'services:\n  cln:\n    platform: linux/amd64\n  eclair:\n    platform: linux/amd64\n' > /tmp/arm64.yml
+    COMPOSE_FILE=docker-compose.yml:/tmp/arm64.yml .ngit/act/slices/cln.sh
+
+binfmt on its own is not enough. qemu will dispatch the x86 plugin, but an
+arm64 CLN container has no x86 loader to run it with, and the plugin then dies
+in a way that surfaces as `lightningd: --nip47-relays: unknown option` and
+takes the node down with it. The service has to be x86 end to end.
+
 ## Adding a slice
 
 1. Write `slices/<name>.sh`. Source `lib/env.sh`, `lib/l402.sh`, and

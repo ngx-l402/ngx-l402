@@ -1785,7 +1785,7 @@ jobs:
           # 1. 402 response must carry an X-Cashu NUT-24 payment request header
           echo "Checking X-Cashu header on 402 response..."
           p2pk_resp=$(curl -s -i --max-time 30 http://0.0.0.0:8000/protected) || true
-          p2pk_code=$(echo "$p2pk_resp" | grep "^HTTP" | tail -1 | awk '{print $2}')
+          p2pk_code=$(echo "$p2pk_resp" | grep "^HTTP" | tail -1 | awk '{print $2}'); p2pk_code=${p2pk_code:-000}
           if [ "$p2pk_code" -ne 402 ]; then
             echo "❌ Expected 402 in P2PK mode, got $p2pk_code"
             docker logs nginx-lnd | tail -30
@@ -1838,7 +1838,7 @@ jobs:
           else
             p2pk_auth_resp=$(curl -s -w "\n%{http_code}" --max-time 60 -L \
               -H "Authorization: Cashu $P2PK_TOKEN" http://0.0.0.0:8000/protected) || true
-            p2pk_auth_code=$(echo "$p2pk_auth_resp" | tail -n1)
+            p2pk_auth_code=$(echo "$p2pk_auth_resp" | tail -n1); p2pk_auth_code=${p2pk_auth_code:-000}
             if [ "$p2pk_auth_code" -ne 200 ]; then
               echo "❌ P2PK-locked token rejected (got $p2pk_auth_code), expected 200"
               docker logs nginx-lnd | tail -30

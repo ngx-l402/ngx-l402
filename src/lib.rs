@@ -100,6 +100,49 @@ fn manifest_registry() -> &'static std::sync::Mutex<Vec<RouteRegistration>> {
 /// Connection pool for Redis. Checked out connections are returned automatically on drop.
 /// Pool size is configurable via REDIS_POOL_SIZE (default: cpu_count * 3, min 5, max 50).
 static REDIS_POOL: OnceLock<Pool<RedisClient>> = OnceLock::new();
+/// Which process built `REDIS_POOL`, and what it would take to build another.
+static REDIS_POOL_PID: OnceLock<u32> = OnceLock::new();
+static REDIS_URL: OnceLock<String> = OnceLock::new();
+static REDIS_POOL_SIZE: OnceLock<u32> = OnceLock::new();
+/// This worker's own pool, built on first use after fork.
+static WORKER_REDIS_POOL: OnceLock<Pool<RedisClient>> = OnceLock::new();
+
+/// The Redis pool for the current process.
+///
+/// r2d2 blocks on a `parking_lot` condvar while waiting for a connection, and
+/// replenishes the pool from background threads. `fork()` clones only the
+/// calling thread, so a worker inheriting the master's pool waits on a condvar
+/// nothing will ever signal — it faults inside `Condvar::wait_until`. Each
+/// process therefore builds its own.
+fn redis_pool() -> Option<&'static Pool<RedisClient>> {
+    if REDIS_POOL_PID.get().copied() == Some(std::process::id()) {
+        return REDIS_POOL.get();
+    }
+    if let Some(pool) = WORKER_REDIS_POOL.get() {
+        return Some(pool);
+    }
+
+    let url = REDIS_URL.get()?;
+    let size = REDIS_POOL_SIZE.get().copied().unwrap_or(5);
+    let manager = match RedisClient::open(url.as_str()) {
+        Ok(manager) => manager,
+        Err(e) => {
+            error!("❌ Worker failed to create its Redis client: {}", e);
+            return None;
+        }
+    };
+    match Pool::builder().max_size(size).build(manager) {
+        Ok(pool) => {
+            // A racing thread may have won; either way `get` returns the winner.
+            let _ = WORKER_REDIS_POOL.set(pool);
+            WORKER_REDIS_POOL.get()
+        }
+        Err(e) => {
+            error!("❌ Worker failed to build its Redis pool: {}", e);
+            None
+        }
+    }
+}
 
 // Cached environment variables — read once at startup, fixed for process lifetime.
 // Changing these requires a full restart (SIGHUP will not reload them).
@@ -372,7 +415,7 @@ pub async fn get_or_create_lnurl_client(
 /// the true gate and closes the TOCTOU window between concurrent workers.
 /// Fails open (returns false) if Redis is unavailable.
 fn is_preimage_used(preimage: &[u8]) -> bool {
-    let Some(pool) = REDIS_POOL.get() else {
+    let Some(pool) = redis_pool() else {
         return false;
     };
     let mut conn = match pool.get() {
@@ -440,7 +483,7 @@ fn handle_preimage_claim(result: Result<bool, ReplayClaimError>) -> isize {
 /// Returns Ok(true) if stored successfully (first use), Ok(false) if already existed (race with another worker).
 /// Called ONLY after successful verification to avoid burning preimages on transient failures.
 fn store_preimage_as_used(preimage: &[u8]) -> Result<bool, ReplayClaimError> {
-    let pool = REDIS_POOL.get().ok_or(ReplayClaimError::NotConfigured)?;
+    let pool = redis_pool().ok_or(ReplayClaimError::NotConfigured)?;
 
     let mut conn = pool
         .get()
@@ -481,7 +524,7 @@ fn preimage_redis_key(preimage: &[u8]) -> String {
 /// Returns true if token is already used, false if it's new.
 /// Fails open (returns false) if Redis is unavailable.
 pub fn is_cashu_token_used(token: &str) -> bool {
-    let Some(pool) = REDIS_POOL.get() else {
+    let Some(pool) = redis_pool() else {
         warn!("⚠️ Redis not configured - Cashu token replay protection limited to memory");
         return false;
     };
@@ -516,7 +559,7 @@ pub fn is_cashu_token_used(token: &str) -> bool {
 /// Atomically store a Cashu token as used via SET NX EX (single round-trip).
 /// Called ONLY after successful verification to avoid burning tokens on transient failures.
 pub fn store_cashu_token_as_used(token: &str) -> Result<bool, ReplayClaimError> {
-    let pool = REDIS_POOL.get().ok_or(ReplayClaimError::NotConfigured)?;
+    let pool = redis_pool().ok_or(ReplayClaimError::NotConfigured)?;
 
     let mut conn = pool
         .get()
@@ -549,7 +592,7 @@ pub fn store_cashu_token_as_used(token: &str) -> Result<bool, ReplayClaimError> 
 /// retry would be rejected until the TTL expired even though the proofs were
 /// never persisted. Best-effort — failures are logged, not propagated.
 pub fn release_cashu_token(token: &str) {
-    let Some(pool) = REDIS_POOL.get() else {
+    let Some(pool) = redis_pool() else {
         return;
     };
     let mut conn = match pool.get() {
@@ -581,7 +624,7 @@ fn cashu_token_redis_key(token: &str) -> String {
 /// Look up a previously-cached preimage for a settled invoice.
 /// Key: `l402:settled:<payment_hash_hex>` → `<preimage_hex>`
 pub fn get_cached_settled_preimage(payment_hash: &[u8]) -> Option<Vec<u8>> {
-    let pool = REDIS_POOL.get()?;
+    let pool = redis_pool()?;
     let mut conn = pool.get().ok()?;
     let hash_hex = hex::encode(payment_hash);
     let redis_key = format!("l402:settled:{}", hash_hex);
@@ -591,7 +634,7 @@ pub fn get_cached_settled_preimage(payment_hash: &[u8]) -> Option<Vec<u8>> {
 
 /// Cache a preimage for a settled invoice with TTL (same as preimage TTL).
 pub fn cache_settled_preimage(payment_hash: &[u8], preimage: &[u8]) -> Result<(), String> {
-    let pool = REDIS_POOL.get().ok_or("Redis not configured")?;
+    let pool = redis_pool().ok_or("Redis not configured")?;
     let mut conn = pool
         .get()
         .map_err(|e| format!("Failed to get Redis connection: {}", e))?;
@@ -690,6 +733,11 @@ impl L402Module {
                 Ok(manager) => match Pool::builder().max_size(pool_size).build(manager) {
                     Ok(pool) => {
                         if REDIS_POOL.set(pool).is_ok() {
+                            // Recorded so a forked worker can tell this pool is
+                            // not its own, and so it can build one that is.
+                            let _ = REDIS_POOL_PID.set(std::process::id());
+                            let _ = REDIS_URL.set(redis_url.clone());
+                            let _ = REDIS_POOL_SIZE.set(pool_size);
                             info!(
                                 "✅ Redis connection pool ready (max_size={}) at {}",
                                 pool_size,
@@ -1090,7 +1138,7 @@ impl L402Module {
     /// in a single Redis pipeline. Two GETs become one round-trip.
     /// Returns `(0, None)` if Redis is unavailable or the keys are missing.
     pub fn get_dynamic_config(&self, path: &str) -> (i64, Option<String>) {
-        let Some(pool) = REDIS_POOL.get() else {
+        let Some(pool) = redis_pool() else {
             return (0, None);
         };
         let Ok(mut conn) = pool.get() else {
@@ -3303,7 +3351,7 @@ fn get_client_ip(request: *mut ngx_http_request_t) -> String {
 
 /// Fixed-window INCR+EXPIRE counter. Fails open if Redis is unavailable.
 fn check_invoice_rate_limit(ip: &str, path: &str, max_requests: u32, window_secs: u64) -> bool {
-    let Some(pool) = REDIS_POOL.get() else {
+    let Some(pool) = redis_pool() else {
         warn!("Redis not configured - invoice rate limiting disabled");
         return true;
     };

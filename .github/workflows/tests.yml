@@ -438,11 +438,19 @@ jobs:
           new_addr=$(docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=$wallet_name getnewaddress)
           docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=$wallet_name generatetoaddress 6 "$new_addr"
 
-          # Print final LND node balance
-          final_balance=$(docker exec lndnode lncli -n regtest walletbalance | jq -r '.confirmed_balance')
-          echo "Final LND node balance: $final_balance sats"
-
-          echo "✅ LND node funded successfully!"
+          # The blocks are mined, but LND credits the funding only once it has
+          # caught up with them. Reporting success at zero hides that.
+          for i in $(seq 1 120); do
+            final_balance=$(docker exec lndnode lncli -n regtest walletbalance 2>/dev/null | jq -r '.confirmed_balance // 0')
+            [ "${final_balance:-0}" -gt 0 ] && break
+            if [ "$i" -eq 120 ]; then
+              echo "❌ LND node still shows 0 sats after 120s"
+              docker exec lndnode lncli -n regtest getinfo || true
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "✅ LND node funded successfully: ${final_balance} sats"
 
           # ------- FUND LND-receiver NODE -------
           echo "Funding LND-receiver node..."
@@ -473,7 +481,24 @@ jobs:
           echo "Connecting LND-receiver to LND node..."
           docker exec lndnode-receiver lncli --network=regtest --rpcserver=127.0.0.1:10010 connect "$LNDNODE_PUBKEY"@lndnode:9735 || true
 
-          # Step 3: Open channel from receiver to LND node
+          # Step 3: Open channel from receiver to LND node.
+          # openchannel refuses until the wallet has caught up with the chain
+          # and the funding is confirmed — answering RPC is not the same thing.
+          for i in $(seq 1 120); do
+            synced=$(docker exec lndnode-receiver lncli --network=regtest --rpcserver=127.0.0.1:10010 getinfo 2>/dev/null | jq -r '.synced_to_chain // false')
+            bal=$(docker exec lndnode-receiver lncli --network=regtest --rpcserver=127.0.0.1:10010 walletbalance 2>/dev/null | jq -r '.confirmed_balance // 0')
+            if [ "$synced" = "true" ] && [ "${bal:-0}" -gt 0 ]; then
+              echo "✅ lndnode-receiver synced with ${bal} sat confirmed (after ${i}s)"
+              break
+            fi
+            if [ "$i" -eq 120 ]; then
+              echo "❌ lndnode-receiver not ready after 120s (synced=$synced balance=${bal:-0})"
+              docker exec lndnode-receiver lncli --network=regtest --rpcserver=127.0.0.1:10010 getinfo || true
+              exit 1
+            fi
+            sleep 1
+          done
+
           echo "Opening channel from LND-receiver to LND node..."
           docker exec lndnode-receiver lncli --network=regtest --rpcserver=127.0.0.1:10010 openchannel --node_key="$LNDNODE_PUBKEY" --local_amt=1000000
 

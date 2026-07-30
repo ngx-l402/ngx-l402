@@ -55,6 +55,38 @@ docker exec lndnode-receiver chmod a+rx \
 docker exec lndnode-receiver chmod a+r \
   /root/.lnd/data/chain/bitcoin/regtest/admin.macaroon /root/.lnd/tls.cert
 
+# The module derives its wallet once and remembers it in wallet.fingerprint /
+# wallet.mnemonic. This slice pins CASHU_WALLET_MNEMONIC to a fixed phrase, so a
+# wallet left behind by an earlier slice in the same lease no longer matches
+# what the environment now says it should be, and redemption fails while the
+# advertised pubkey — which comes from CASHU_P2PK_PRIVATE_KEY, not the wallet —
+# still looks correct. That combination is very hard to read as a wallet
+# problem, so clear the wallet rather than debug it.
+#
+# Only the wallet identity is cleared. The token database is deliberately left
+# alone: the module opens it at startup and cannot recreate it once it is gone,
+# so deleting it here produces "Cashu database not initialized" on every
+# verification — which looks like a P2PK bug and is not one.
+#
+# The GitHub original does delete that database, but only on the way *out* of
+# P2PK mode, because P2PK-locked proofs are stored straight as Unspent and the
+# redemption thread cannot produce a witness for them. Nothing runs after this
+# slice, so there is nothing to protect from them.
+# Done through a throwaway container rather than `docker exec nginx-lnd`,
+# because the slice before this one leaves nginx-lnd stopped: an exec would fail
+# and, being tolerated, would silently skip the clearing. The failure then
+# surfaces much later as "Cashu database not initialized", because the module
+# refuses to start with a mismatched wallet:
+#
+#   CASHU_WALLET_MNEMONIC does not match the wallet that owns this database
+#   ... Refusing to start to avoid orphaning funds.
+#
+# `compose run` resolves the image and the cashu-data volume from the compose
+# file, so this works whether or not anything is currently running.
+docker compose run --rm --no-deps --entrypoint sh nginx-lnd \
+  -c 'rm -f /app/data/wallet.fingerprint /app/data/wallet.mnemonic' \
+  >/dev/null 2>&1 || l402_log "WARNING: could not clear the persisted wallet"
+
 release_serving_port
 docker compose up -d --build --no-deps nginx-lnd redis
 wait_for_container_running nginx-lnd

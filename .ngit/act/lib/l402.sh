@@ -47,18 +47,34 @@ fail() {
 
 pass() { printf 'PASS: %s\n' "$*"; }
 
+# curl reports 000 when it got no answer at all — connection refused, or the
+# timeout expired. No assertion in this suite ever wants that: every check is
+# about *which* status came back. So a 000 is retried rather than reported,
+# which matters most on the LNURL routes, where synthesising the challenge
+# means an outbound call to a third-party lightning address that occasionally
+# takes longer than the timeout.
+_http_attempt() {
+  local attempt
+  for attempt in 1 2 3; do
+    HTTP_RESPONSE="$(curl "$@" || true)"
+    HTTP_STATUS="$(tail -n1 <<< "$HTTP_RESPONSE")"
+    [ "$HTTP_STATUS" != "000" ] && return 0
+    [ "$attempt" -lt 3 ] || break
+    l402_log "no response (attempt ${attempt}/3); retrying"
+    sleep 5
+  done
+}
+
 # Issue a request, keeping headers so the L402 challenge can be inspected.
 # Usage: http_request <curl args...>
 http_request() {
-  HTTP_RESPONSE="$(curl -s -i -w '\n%{http_code}' --max-time "$HTTP_TIMEOUT" "$@" || true)"
-  HTTP_STATUS="$(printf '%s' "$HTTP_RESPONSE" | tail -n1)"
+  _http_attempt -s -i -w '\n%{http_code}' --max-time "$HTTP_TIMEOUT" "$@"
 }
 
 # curl -I, for the cross-method replay checks. `-X HEAD` makes curl wait for a
 # body that never arrives and hang until the timeout instead.
 http_head() {
-  HTTP_RESPONSE="$(curl -s -i -I -w '\n%{http_code}' --max-time "$HTTP_TIMEOUT" "$@" || true)"
-  HTTP_STATUS="$(printf '%s' "$HTTP_RESPONSE" | tail -n1)"
+  _http_attempt -s -i -I -w '\n%{http_code}' --max-time "$HTTP_TIMEOUT" "$@"
 }
 
 assert_status() {

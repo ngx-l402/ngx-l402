@@ -97,28 +97,21 @@ fn manifest_registry() -> &'static std::sync::Mutex<Vec<RouteRegistration>> {
     MANIFEST_REGISTRY.get_or_init(|| std::sync::Mutex::new(Vec::new()))
 }
 
-/// Connection pool for Redis. Checked out connections are returned automatically on drop.
-/// Pool size is configurable via REDIS_POOL_SIZE (default: cpu_count * 3, min 5, max 50).
-static REDIS_POOL: OnceLock<Pool<RedisClient>> = OnceLock::new();
-/// Which process built `REDIS_POOL`, and what it would take to build another.
-static REDIS_POOL_PID: OnceLock<u32> = OnceLock::new();
+/// How to reach Redis, recorded at startup. Pool size is configurable via
+/// REDIS_POOL_SIZE (default: cpu_count * 3, min 5, max 50).
 static REDIS_URL: OnceLock<String> = OnceLock::new();
 static REDIS_POOL_SIZE: OnceLock<u32> = OnceLock::new();
-/// This worker's own pool, built on first use after fork.
-static WORKER_REDIS_POOL: OnceLock<Pool<RedisClient>> = OnceLock::new();
+/// This process's pool, opened on first use. Checked out connections are
+/// returned automatically on drop.
+static REDIS_POOL: OnceLock<Pool<RedisClient>> = OnceLock::new();
 
-/// The Redis pool for the current process.
+/// The Redis pool for this process, opened on first use.
 ///
-/// r2d2 blocks on a `parking_lot` condvar while waiting for a connection, and
-/// replenishes the pool from background threads. `fork()` clones only the
-/// calling thread, so a worker inheriting the master's pool waits on a condvar
-/// nothing will ever signal — it faults inside `Condvar::wait_until`. Each
-/// process therefore builds its own.
+/// Never built before nginx forks: r2d2 keeps three background threads for the
+/// life of a pool, and a worker inheriting them gets their locks without the
+/// threads that release them — it then dies in `parking_lot` on first checkout.
 fn redis_pool() -> Option<&'static Pool<RedisClient>> {
-    if REDIS_POOL_PID.get().copied() == Some(std::process::id()) {
-        return REDIS_POOL.get();
-    }
-    if let Some(pool) = WORKER_REDIS_POOL.get() {
+    if let Some(pool) = REDIS_POOL.get() {
         return Some(pool);
     }
 
@@ -127,18 +120,18 @@ fn redis_pool() -> Option<&'static Pool<RedisClient>> {
     let manager = match RedisClient::open(url.as_str()) {
         Ok(manager) => manager,
         Err(e) => {
-            error!("❌ Worker failed to create its Redis client: {}", e);
+            error!("❌ Failed to create the Redis client: {}", e);
             return None;
         }
     };
     match Pool::builder().max_size(size).build(manager) {
         Ok(pool) => {
             // A racing thread may have won; either way `get` returns the winner.
-            let _ = WORKER_REDIS_POOL.set(pool);
-            WORKER_REDIS_POOL.get()
+            let _ = REDIS_POOL.set(pool);
+            REDIS_POOL.get()
         }
         Err(e) => {
-            error!("❌ Worker failed to build its Redis pool: {}", e);
+            error!("❌ Failed to build the Redis pool: {}", e);
             None
         }
     }
@@ -715,7 +708,13 @@ impl L402Module {
     pub async fn new() -> Self {
         info!("🚀 Creating new L402Module");
 
-        // Initialize Redis client if URL is configured
+        // Record how to reach Redis; do not build the pool here.
+        //
+        // r2d2 keeps three background threads for the life of a pool, and this
+        // runs in the master before nginx forks. Workers would inherit those
+        // threads' locks without the threads, then die in parking_lot on their
+        // first checkout. The master never reads Redis anyway — each worker
+        // builds its own pool on first use, in `redis_pool`.
         if let Ok(redis_url) = std::env::var("REDIS_URL") {
             // Pool size: configurable via REDIS_POOL_SIZE.
             // Default heuristic: nginx workers are CPU-bound, Redis ops are fast,
@@ -729,26 +728,18 @@ impl L402Module {
                 .and_then(|v| v.parse::<u32>().ok())
                 .unwrap_or(default_pool_size);
 
+            // Validate the URL now, so a typo is a startup error rather than a
+            // surprise on the first request in every worker.
             match RedisClient::open(redis_url.clone()) {
-                Ok(manager) => match Pool::builder().max_size(pool_size).build(manager) {
-                    Ok(pool) => {
-                        if REDIS_POOL.set(pool).is_ok() {
-                            // Recorded so a forked worker can tell this pool is
-                            // not its own, and so it can build one that is.
-                            let _ = REDIS_POOL_PID.set(std::process::id());
-                            let _ = REDIS_URL.set(redis_url.clone());
-                            let _ = REDIS_POOL_SIZE.set(pool_size);
-                            info!(
-                                "✅ Redis connection pool ready (max_size={}) at {}",
-                                pool_size,
-                                ngx_l402_core::redact_redis_url(&redis_url)
-                            );
-                        } else {
-                            error!("❌ Failed to register Redis pool in OnceLock");
-                        }
-                    }
-                    Err(e) => error!("❌ Failed to build Redis connection pool: {}", e),
-                },
+                Ok(_) => {
+                    let _ = REDIS_URL.set(redis_url.clone());
+                    let _ = REDIS_POOL_SIZE.set(pool_size);
+                    info!(
+                        "✅ Redis configured (max_size={}) at {} — pool opens per worker",
+                        pool_size,
+                        ngx_l402_core::redact_redis_url(&redis_url)
+                    );
+                }
                 Err(e) => error!("❌ Failed to create Redis client: {}", e),
             }
         } else {

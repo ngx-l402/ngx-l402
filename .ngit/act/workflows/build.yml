@@ -66,3 +66,17 @@ jobs:
 
       - name: Verify the module was produced
         run: test -f target/release/libngx_l402_lib.so
+
+      - name: Install cargo-audit
+        # --locked so the audit tool itself cannot drift between runs.
+        run: cargo install cargo-audit --locked
+
+      - name: Run cargo audit
+        # The mirror keeps this in its own workflow because parallel runners are
+        # free there. Here a workflow file is a leased sandbox, so a separate
+        # one would buy provisioning and an image pull for a dependency scan
+        # that needs nothing this job has not already installed.
+        #
+        # Same bare invocation as audit.yml: if the two disagree, a proposal
+        # goes green here and red on GitHub.
+        run: cargo audit

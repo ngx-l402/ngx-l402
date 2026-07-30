@@ -33,7 +33,7 @@ jobs:
         run: bash .ngit/act/lib/docker-in-job.sh
 
       - name: Build and smoke-test every supported nginx version
-        run: bash .ngit/act/slices/compat-all.sh
+        run: bash .ngit/act/slices/nginx-compat.sh
 
       - name: Collect diagnostics
         if: failure()

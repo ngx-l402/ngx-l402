@@ -2515,8 +2515,11 @@ pub unsafe extern "C" fn init_process(cycle: *mut ngx_cycle_s) -> isize {
 fn start_cashu_redemption_in_worker(interval_secs: u64) {
     #[cfg(unix)]
     {
-        let db_path = std::env::var("CASHU_DB_PATH")
-            .unwrap_or_else(|_| "/var/lib/nginx/cashu_tokens.db".to_string());
+        // From the master: CASHU_DB_PATH is not readable in a worker.
+        let Some(db_path) = cashu::db_path() else {
+            error!("❌ Cashu database path unknown in this worker — not redeeming");
+            return;
+        };
         let lock_path = format!("{}.redeem.lock", db_path);
 
         let _ = std::thread::Builder::new()

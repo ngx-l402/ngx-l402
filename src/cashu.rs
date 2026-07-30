@@ -26,6 +26,59 @@ const MSAT_PER_SAT: u64 = 1000;
 static CASHU_DB: OnceLock<Arc<cdk_sqlite::WalletSqliteDatabase>> = OnceLock::new();
 static CASHU_DB_PID: OnceLock<u32> = OnceLock::new();
 static CASHU_DB_URL: OnceLock<String> = OnceLock::new();
+
+// nginx strips the environment in workers, so `std::env::var` after the fork
+// quietly returns the default. Anything an operator can set is read in
+// `initialize_cashu`, which runs in the master, and passed on through statics.
+
+/// The Cashu database path, as the master saw it.
+pub fn db_path() -> Option<&'static str> {
+    CASHU_DB_URL.get().map(|s| s.as_str())
+}
+
+/// Melt tuning, as the master saw it.
+#[derive(Clone, Copy)]
+pub struct MeltConfig {
+    pub min_balance_sats: u64,
+    pub fee_reserve_percent: f64,
+    pub min_fee_reserve_sats: u64,
+    /// 0 = no limit.
+    pub max_proofs_per_melt: usize,
+}
+
+static MELT_CONFIG: OnceLock<MeltConfig> = OnceLock::new();
+
+/// Read the melt settings, while there is still an environment to read.
+fn capture_melt_config() {
+    let _ = MELT_CONFIG.set(MeltConfig {
+        min_balance_sats: std::env::var("CASHU_MELT_MIN_BALANCE_SATS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10),
+        fee_reserve_percent: std::env::var("CASHU_MELT_FEE_RESERVE_PERCENT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1.0),
+        min_fee_reserve_sats: std::env::var("CASHU_MELT_MIN_FEE_RESERVE_SATS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4),
+        max_proofs_per_melt: std::env::var("CASHU_MAX_PROOFS_PER_MELT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+    });
+}
+
+/// The captured settings, or the defaults if init never ran.
+fn melt_config() -> MeltConfig {
+    MELT_CONFIG.get().copied().unwrap_or(MeltConfig {
+        min_balance_sats: 10,
+        fee_reserve_percent: 1.0,
+        min_fee_reserve_sats: 4,
+        max_proofs_per_melt: 0,
+    })
+}
 // This worker's own handle, opened lazily on first use after fork.
 static WORKER_DB: tokio::sync::OnceCell<Arc<cdk_sqlite::WalletSqliteDatabase>> =
     tokio::sync::OnceCell::const_new();
@@ -529,6 +582,7 @@ pub fn initialize_cashu(db_url: &str) -> Result<(), String> {
     check_wallet_fingerprint(db_url)?;
 
     let _ = CASHU_DB_URL.set(db_url.to_string());
+    capture_melt_config();
 
     // Create runtime for async initialization
     let rt = Runtime::new().expect("Failed to create runtime");
@@ -1445,28 +1499,14 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
     // Use cached seed (must match token verification)
     let seed = get_cached_seed();
 
-    // Get configurable parameters from environment
-    let min_balance_sats = std::env::var("CASHU_MELT_MIN_BALANCE_SATS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(10); // Default to 10 sats if not configured
+    // Captured at init: this runs in a worker, with no environment to read.
+    let melt = melt_config();
+    let min_balance_sats = melt.min_balance_sats;
     let minimum_for_redemption_msat = min_balance_sats * MSAT_PER_SAT;
-
-    let fee_reserve_percent = std::env::var("CASHU_MELT_FEE_RESERVE_PERCENT")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .unwrap_or(1.0); // Default to 1% fee reserve
-
-    let min_fee_reserve_sats = std::env::var("CASHU_MELT_MIN_FEE_RESERVE_SATS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(4); // Default to 4 sats minimum fee reserve
+    let fee_reserve_percent = melt.fee_reserve_percent;
+    let min_fee_reserve_sats = melt.min_fee_reserve_sats;
     let min_fee_reserve_msat = min_fee_reserve_sats * MSAT_PER_SAT;
-
-    let max_proofs_per_melt = std::env::var("CASHU_MAX_PROOFS_PER_MELT")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or(0); // Default to 0 (no limit)
+    let max_proofs_per_melt = melt.max_proofs_per_melt;
 
     let msg = if max_proofs_per_melt > 0 {
         format!("⚙️ Melt config: min_balance={} sats, fee_reserve={}%, min_fee_reserve={} sats, max_proofs_per_melt={}", 

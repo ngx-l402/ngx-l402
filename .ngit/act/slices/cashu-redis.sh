@@ -40,6 +40,7 @@ wait_for_container_running nginx-lnd
 docker exec nginx-lnd chmod 755 /root
 docker exec nginx-lnd chmod 770 /app/data
 wait_for_http_status "${BASE_URL}/" 200 180 "nginx-lnd"
+wait_for_l402_ready "${BASE_URL}/protected"
 
 # ------------------------------------------------------ L402 replay ---------
 

@@ -85,6 +85,7 @@ wait_for_container_running nginx-lnc
 # Pairing goes out to the mailbox server before the module can serve anything,
 # so this waits longer than the other slices.
 wait_for_http_status "${BASE_URL}/" 200 300 "nginx-lnc"
+wait_for_l402_ready "${BASE_URL}/protected"
 
 http_request -L "${BASE_URL}/"
 assert_status 200 "free route"

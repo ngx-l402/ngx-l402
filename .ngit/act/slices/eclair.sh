@@ -126,6 +126,7 @@ l402_log "== Eclair-backed routes"
 
 wait_for_container_running nginx-eclair
 wait_for_http_status "${BASE_URL}/" 200 180 "nginx-eclair"
+wait_for_l402_ready "${BASE_URL}/protected"
 
 http_request -L "${BASE_URL}/"
 assert_status 200 "free route"

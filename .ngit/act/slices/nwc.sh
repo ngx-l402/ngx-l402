@@ -64,6 +64,7 @@ release_serving_port
 docker compose up -d --build --no-deps nginx-nwc redis
 wait_for_container_running nginx-nwc
 wait_for_http_status "${BASE_URL}/" 200 240 "nginx-nwc"
+wait_for_l402_ready "${BASE_URL}/protected-timeout"
 
 # ------------------------------------------------------------ NWC routes ----
 

@@ -212,6 +212,20 @@ wait_for_http_status() {
   fail "${what} never returned ${expected} within ${timeout}s"
 }
 
+# The free route serving 200 proves nginx is up. It does not prove the L402
+# module can reach its lightning backend — that first happens when a protected
+# route has to mint an invoice, and on a loaded box the node's gRPC handshake
+# can take longer than a request timeout.
+#
+# Waiting for the protected route to answer 402 closes that gap without
+# weakening anything: it is the same condition the first assertion makes, so the
+# waiting happens in a readiness poll, where a slow backend is expected, instead
+# of inside an assertion, where it reads as the module returning nothing.
+wait_for_l402_ready() {
+  local url="$1" timeout="${2:-180}"
+  wait_for_http_status "$url" 402 "$timeout" "L402 backend behind ${url}"
+}
+
 wait_for_container_running() {
   local name="$1" timeout="${2:-60}"
   wait_for "$timeout" "container ${name}" \

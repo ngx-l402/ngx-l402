@@ -34,6 +34,7 @@ wait_for_container_running grpc-content-server
 # nginx opens 8000 before the L402 module has its backend wired up, so the free
 # route serving 200 is the first honest sign the service is up.
 wait_for_http_status "${BASE_URL}/" 200 120 "nginx-lnurl"
+wait_for_l402_ready "${BASE_URL}/protected"
 
 # ------------------------------------------------------------------ LNURL --
 

@@ -55,6 +55,7 @@ docker exec lndnode-receiver chmod a+rx \
 docker exec lndnode-receiver chmod a+r \
   /root/.lnd/data/chain/bitcoin/regtest/admin.macaroon /root/.lnd/tls.cert
 
+release_serving_port
 docker compose up -d --build --no-deps nginx-lnd redis
 wait_for_container_running nginx-lnd
 # Recreating the container resets the writable layer, so this has to come after

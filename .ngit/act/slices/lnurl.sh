@@ -24,6 +24,7 @@ write_env_file
 
 # ------------------------------------------------------------------ setup --
 
+release_serving_port
 l402_log "== bringing up redis, nginx-lnurl and the gRPC backend"
 docker compose up -d --build redis nginx-lnurl grpc-content-server
 

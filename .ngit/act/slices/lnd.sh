@@ -36,6 +36,7 @@ docker exec lndnode-receiver chmod a+rx \
 docker exec lndnode-receiver chmod a+r \
   /root/.lnd/data/chain/bitcoin/regtest/admin.macaroon /root/.lnd/tls.cert
 
+release_serving_port
 docker compose up -d --build --no-deps nginx-lnd redis
 wait_for_container_running nginx-lnd
 docker exec nginx-lnd chmod 755 /root

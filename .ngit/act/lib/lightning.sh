@@ -139,6 +139,16 @@ wait_for_channel_active() {
 # bitcoind + two LND nodes + a funded channel + a funded Cashu mint. Everything
 # after this point can pay an invoice.
 setup_lightning_backbone() {
+  # When several slices share one lease the backbone is already funded and
+  # channelled by the time the second one runs. Mining another 101 blocks and
+  # re-funding would be harmless but costs a couple of minutes per slice, which
+  # on a paid lease is the whole reason for sharing it in the first place.
+  if lnd_receiver_cli listchannels 2>/dev/null \
+    | jq -e '[.channels[] | select(.active == true)] | length > 0' >/dev/null 2>&1; then
+    pass "lightning backbone already up (reusing it)"
+    return 0
+  fi
+
   l402_log "== bringing up bitcoind, tor, LND nodes and the Cashu mint"
   docker compose up -d --no-deps bitcoind tor lndnode lndnode-receiver cashu-mint
 

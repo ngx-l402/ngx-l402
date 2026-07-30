@@ -50,6 +50,7 @@ l402_log "== starting Eclair"
 docker compose rm -fsv eclair >/dev/null 2>&1 || true
 docker volume rm "${COMPOSE_PROJECT_NAME}_eclair-data" >/dev/null 2>&1 || true
 
+release_serving_port
 docker compose up -d --build --no-deps eclair nginx-eclair redis
 wait_for_container_running eclair
 

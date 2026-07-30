@@ -32,6 +32,7 @@ l402_log "== starting CLN and nginx-cln"
 docker compose up -d --build --no-deps cln
 wait_for_cln
 
+release_serving_port
 docker compose up -d --build --no-deps nginx-cln redis
 wait_for_container_running nginx-cln
 open_cln_socket_permissions nginx-cln
@@ -62,6 +63,7 @@ BOLT12_OFFER="$(cln_cli offer any "L402 Access" | jq -r '.bolt12')"
 export BOLT12_OFFER
 write_env_file
 
+release_serving_port
 docker compose up -d --build --no-deps nginx-bolt12
 wait_for_container_running nginx-bolt12
 open_cln_socket_permissions nginx-bolt12
@@ -111,6 +113,7 @@ wait_for_channel_active lnd_cli "$cln_pubkey" "lndnode -> cln"
 
 l402_log "== CLN autodetect"
 
+release_serving_port
 docker compose up -d --no-deps nginx-cln
 wait_for_container_running nginx-cln
 open_cln_socket_permissions nginx-cln

@@ -209,3 +209,16 @@ wait_for_container_running() {
 flush_redis() {
   docker exec redis redis-cli flushall >/dev/null 2>&1 || true
 }
+
+# Exactly one nginx flavour may hold port 8000, which is why the GitHub suite
+# stops the previous one before starting the next. A slice run on its own has
+# nothing to stop; a slice run after another in the same lease does, and
+# without this the second one dies on "port is already allocated".
+#
+# Named for what it guarantees rather than what it stops, so adding an nginx
+# service later means adding it to one list.
+release_serving_port() {
+  docker compose stop \
+    nginx-lnurl nginx-lnd nginx-cln nginx-bolt12 nginx-nwc nginx-lnc nginx-eclair \
+    >/dev/null 2>&1 || true
+}

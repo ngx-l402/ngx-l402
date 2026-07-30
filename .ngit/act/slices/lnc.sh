@@ -78,6 +78,7 @@ write_env_file
 # ------------------------------------------------------------- nginx-lnc ---
 
 l402_log "== starting nginx-lnc"
+release_serving_port
 docker compose up -d --build --no-deps nginx-lnc redis
 wait_for_container_running nginx-lnc
 

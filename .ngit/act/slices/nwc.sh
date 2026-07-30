@@ -60,6 +60,7 @@ NWC_URI="$(cln_cli nip47-create label=nwc-for-l402 budget_msat=0 | jq -r '.uri')
 export NWC_URI
 write_env_file
 
+release_serving_port
 docker compose up -d --build --no-deps nginx-nwc redis
 wait_for_container_running nginx-nwc
 wait_for_http_status "${BASE_URL}/" 200 240 "nginx-nwc"

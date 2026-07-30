@@ -2467,6 +2467,10 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
             .parse::<u64>()
             .unwrap_or(3600);
         let _ = CASHU_REDEEM_INTERVAL.set(interval_secs);
+        // Here, while still root: the log directory is root-owned and the
+        // redemption loop writes from a worker.
+        #[cfg(unix)]
+        cashu_redemption_logger::prepare_log_file(cashu::data_dir_owner());
         ngx_log_error!(
             NGX_LOG_INFO,
             log,

@@ -36,6 +36,21 @@ pub fn db_path() -> Option<&'static str> {
     CASHU_DB_URL.get().map(|s| s.as_str())
 }
 
+/// Owner of the Cashu data directory — the user the operator has already
+/// nominated to hold this module's files.
+#[cfg(unix)]
+pub fn data_dir_owner() -> Option<(u32, u32)> {
+    use std::os::unix::fs::MetadataExt;
+    let path = std::path::Path::new(
+        db_path()?
+            .trim()
+            .trim_start_matches("sqlite://")
+            .trim_start_matches("sqlite:"),
+    );
+    let meta = std::fs::metadata(path.parent()?).ok()?;
+    Some((meta.uid(), meta.gid()))
+}
+
 /// Melt tuning, as the master saw it.
 #[derive(Clone, Copy)]
 pub struct MeltConfig {

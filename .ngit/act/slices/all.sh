@@ -25,6 +25,29 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)" || exit 1
 
 SLICES=(lnurl lnd cashu-redis cln nwc lnc eclair cashu-p2pk)
 
+# Services no slice after this one needs, so they stop rather than idle.
+#
+# Sharing one lease means sharing one machine, and the backbone this saves
+# rebuilding is also a backbone that stays resident: run everything the suite
+# ever needs at once and the peak is every node simultaneously. GitHub's
+# monolith does the same on a 16 GB runner; the `ci` sandbox has 8. Measured at
+# the end of a full run: eleven containers and 175 MB free, with failures
+# appearing as a route serving 402 for the readiness poll and then answering
+# nothing at all — the shape of memory pressure, not of a slow backend.
+#
+# Shedding lives here rather than in the slices so each slice stays independent:
+# every one brings up what it needs, so stopping a service only costs the next
+# user of it a restart.
+shed_after() {
+  case "$1" in
+    lnurl) echo "grpc-content-server" ;;
+    nwc)   echo "cln" ;;            # cln serves the cln and nwc slices only
+    lnc)   echo "litd" ;;
+    eclair) echo "eclair" ;;
+    *)     echo "" ;;
+  esac
+}
+
 passed=()
 failed=()
 
@@ -43,6 +66,13 @@ for slice in "${SLICES[@]}"; do
     # leaves the stack broken can take later ones down with it, so when several
     # fail, trust the first.
     printf '\n!! slice %s failed — continuing so the rest of the run still reports\n' "$slice"
+  fi
+
+  shed="$(shed_after "$slice")"
+  if [ -n "$shed" ]; then
+    printf -- '-- releasing %s; no later slice needs it\n' "$shed"
+    # shellcheck disable=SC2086  # deliberate word splitting: a service list
+    docker compose stop $shed >/dev/null 2>&1 || true
   fi
 done
 

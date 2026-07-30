@@ -105,6 +105,11 @@ static REDIS_POOL_SIZE: OnceLock<u32> = OnceLock::new();
 /// returned automatically on drop.
 static REDIS_POOL: OnceLock<Pool<RedisClient>> = OnceLock::new();
 
+/// Redemption interval, set by the master when redemption is on; unset means
+/// off. Workers read this instead of the environment, so they cannot reach a
+/// different answer and quietly skip the work.
+static CASHU_REDEEM_INTERVAL: OnceLock<u64> = OnceLock::new();
+
 /// The Redis pool for this process, opened on first use.
 ///
 /// Never built before nginx forks: r2d2 keeps three background threads for the
@@ -2454,10 +2459,14 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
         == "true";
 
     if redeem_on_lightning && cashu_ecash_support {
-        // Started later, in a worker. A thread running here would still be
-        // running when nginx forks, and the child inherits its locks without
-        // the threads that hold them — the worker then wedges or dies on a
-        // signal inside parking_lot.
+        // Decided here, acted on in a worker: a thread started here would still
+        // be running when nginx forks, and the child inherits its locks without
+        // the threads that hold them.
+        let interval_secs = std::env::var("CASHU_REDEMPTION_INTERVAL_SECS")
+            .unwrap_or_else(|_| "3600".to_string())
+            .parse::<u64>()
+            .unwrap_or(3600);
+        let _ = CASHU_REDEEM_INTERVAL.set(interval_secs);
         ngx_log_error!(
             NGX_LOG_INFO,
             log,
@@ -2476,8 +2485,21 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
 ///
 /// # Safety
 /// Called by nginx once per worker with a valid cycle pointer.
-pub unsafe extern "C" fn init_process(_cycle: *mut ngx_cycle_s) -> isize {
-    start_cashu_redemption_in_worker();
+pub unsafe extern "C" fn init_process(cycle: *mut ngx_cycle_s) -> isize {
+    let Some(&interval_secs) = CASHU_REDEEM_INTERVAL.get() else {
+        return 0; // redemption off — the master decided
+    };
+
+    // nginx's log rather than the Rust one, so it is visible either way: a
+    // worker that never starts redeeming should not look like one that did.
+    if !cycle.is_null() {
+        let log = unsafe { (*cycle).log };
+        if !log.is_null() {
+            ngx_log_error!(NGX_LOG_INFO, log, "Waiting for the Cashu redemption lease");
+        }
+    }
+
+    start_cashu_redemption_in_worker(interval_secs);
     0
 }
 
@@ -2490,27 +2512,7 @@ pub unsafe extern "C" fn init_process(_cycle: *mut ngx_cycle_s) -> isize {
 /// Every worker waits on it rather than asking once, because the holder does not
 /// always die: on reload the new workers start while the old one is still
 /// draining, and it releases the lock only after they would have given up.
-fn start_cashu_redemption_in_worker() {
-    let redeem_on_lightning = std::env::var("CASHU_REDEEM_ON_LIGHTNING")
-        .unwrap_or_else(|_| "false".to_string())
-        .trim()
-        .to_lowercase()
-        == "true";
-    let cashu_ecash_support = std::env::var("CASHU_ECASH_SUPPORT")
-        .unwrap_or_else(|_| "false".to_string())
-        .trim()
-        .to_lowercase()
-        == "true";
-
-    if !(redeem_on_lightning && cashu_ecash_support) {
-        return;
-    }
-
-    let interval_secs = std::env::var("CASHU_REDEMPTION_INTERVAL_SECS")
-        .unwrap_or_else(|_| "3600".to_string())
-        .parse::<u64>()
-        .unwrap_or(3600);
-
+fn start_cashu_redemption_in_worker(interval_secs: u64) {
     #[cfg(unix)]
     {
         let db_path = std::env::var("CASHU_DB_PATH")

@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-e96fe3c1.js";
+            window.path_to_searchindex_js = "searchindex-6b30a7d8.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-b5966016.js"></script>
@@ -271,8 +271,8 @@
 <tr><td><code>LND</code></td><td>✅</td><td>Uses <code>LookupInvoice</code> gRPC</td></tr>
 <tr><td><code>CLN</code> / <code>BOLT12</code></td><td>✅</td><td>Uses <code>listinvoices</code> JSON-RPC over unix socket</td></tr>
 <tr><td><code>ECLAIR</code></td><td>✅</td><td>Uses <code>POST /getreceivedinfo</code> REST API</td></tr>
+<tr><td><code>NWC</code></td><td>⚠️</td><td>Uses NIP-47 <code>lookup_invoice</code>, which wallets may not implement</td></tr>
 <tr><td><code>LNC</code></td><td>❌</td><td>LNC mailbox does not expose <code>LookupInvoice</code></td></tr>
-<tr><td><code>NWC</code></td><td>❌</td><td><code>lookup_invoice</code> is optional in NIP-47</td></tr>
 <tr><td><code>LNURL</code></td><td>❌</td><td>Remote wallet — no server-side query API</td></tr>
 </tbody>
 </table>

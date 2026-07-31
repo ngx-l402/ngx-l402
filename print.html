@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-e96fe3c1.js";
+            window.path_to_searchindex_js = "searchindex-6b30a7d8.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-b5966016.js"></script>
@@ -483,11 +483,9 @@ docker stop l402-nginx
 </code></pre>
 <hr>
 <h2 id="specific-versions"><a class="header" href="#specific-versions">Specific Versions</a></h2>
-<pre><code class="language-bash">docker pull ghcr.io/ngx-l402/ngx-l402:v1.2.8
-
-# Releases up to v1.2.7 were published under the previous namespace:
-docker pull ghcr.io/dhananjaypurohit/ngx_l402:v1.2.5
+<pre><code class="language-bash">docker pull ghcr.io/ngx-l402/ngx-l402:&lt;version&gt;   # e.g. 1.2.8
 </code></pre>
+<p>See the <a href="https://github.com/orgs/ngx-l402/packages/container/package/ngx-l402">available tags</a>.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="environment-variables"><a class="header" href="#environment-variables">Environment Variables</a></h1>
 <p>All configuration is done via environment variables set in <code>nginx.service</code> (typically at <code>/lib/systemd/system/nginx.service</code>).</p>
@@ -731,12 +729,51 @@ Environment=L402_PERF_LOG=1
 <tr><td><code>l402_invoice_rate_limit</code></td><td><code>&lt;N&gt;r/m</code> or <code>&lt;N&gt;r/s</code></td><td>disabled</td><td>Max invoice generation rate per IP per route</td></tr>
 <tr><td><code>l402_auto_detect_payment</code></td><td>boolean¹</td><td><code>off</code></td><td>Server-side payment detection — queries the Lightning node instead of requiring the client to supply the preimage</td></tr>
 <tr><td><code>l402_indefinite_access</code></td><td>boolean¹</td><td><code>off</code></td><td>Skip the single-use preimage replay check — a single payment stays valid for the macaroon lifetime</td></tr>
+<tr><td><code>l402_realm</code></td><td>string</td><td>—</td><td>Bind the macaroon to a named protection space instead of the exact request path, so one payment authorizes every location sharing the name</td></tr>
 </tbody>
 </table>
 </div>
 <blockquote>
 <p>¹ <strong>Boolean directives</strong> accept: <code>on</code> / <code>off</code> / <code>true</code> / <code>false</code> / <code>1</code> / <code>0</code> / <code>yes</code> / <code>no</code> (case-insensitive).</p>
 </blockquote>
+<h3 id="realm-scoped-access"><a class="header" href="#realm-scoped-access">Realm-scoped access</a></h3>
+<p>By default a macaroon is bound to the exact path it was minted for: paying for
+<code>/a</code> gives you <code>/a</code> and nothing else. <code>l402_realm</code> replaces that binding with a
+named protection space, so one payment covers every location that names it.</p>
+<pre><code class="language-nginx">location /library/preview {
+    l402                      on;
+    l402_amount_msat_default  10000;
+    l402_macaroon_timeout     300;
+    l402_realm                "library";
+    l402_indefinite_access    on;
+
+    try_files $uri $uri/index.html =404;
+}
+
+location /library/full {
+    l402                      on;
+    l402_amount_msat_default  10000;
+    l402_macaroon_timeout     300;
+    l402_realm                "library";
+    l402_indefinite_access    on;
+
+    try_files $uri $uri/index.html =404;
+}
+</code></pre>
+<p>Three things to know before using it:</p>
+<ul>
+<li><strong><code>l402_indefinite_access on</code> is effectively required.</strong> The client presents the
+same preimage on every path in the realm, and the single-use replay check would
+reject the second request. Without it a realm token works exactly once.</li>
+<li><strong>The realm is not bound to a price.</strong> Two locations sharing a name with
+different <code>l402_amount_msat_default</code> means a token bought at the cheaper one
+opens the dearer one. Give differently-priced content different realm names.</li>
+<li><strong>The name is the whole boundary.</strong> Anything naming that realm is reachable
+with one payment, so prefer specific names (<code>library-2026</code>) over generic ones
+(<code>api</code>), and set <code>l402_macaroon_timeout</code> to bound how long access lasts.</li>
+</ul>
+<p>The HTTP method is still bound in realm mode: a <code>GET</code> token will not satisfy a
+<code>POST</code>.</p>
 <h3 id="example-auto-detect-enabled-location"><a class="header" href="#example-auto-detect-enabled-location">Example: auto-detect enabled location</a></h3>
 <pre><code class="language-nginx">location /protected {
     l402                         on;
@@ -763,8 +800,9 @@ Environment=L402_PERF_LOG=1
 same preimage grants access forever.</p>
 </blockquote>
 <blockquote>
-<p><strong>Backends that support auto-detect</strong>: <code>LND</code>, <code>CLN</code>, <code>BOLT12</code>, <code>ECLAIR</code>.
-<code>LNC</code>, <code>NWC</code>, and <code>LNURL</code> do <strong>not</strong> support server-side lookup.</p>
+<p><strong>Backends that support auto-detect</strong>: <code>LND</code>, <code>CLN</code>, <code>BOLT12</code>, <code>ECLAIR</code>, and
+<code>NWC</code> where the wallet implements the optional NIP-47 <code>lookup_invoice</code>.
+<code>LNC</code> and <code>LNURL</code> do <strong>not</strong> support server-side lookup.</p>
 </blockquote>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="redis--dynamic-configuration"><a class="header" href="#redis--dynamic-configuration">Redis &amp; Dynamic Configuration</a></h1>
@@ -794,6 +832,13 @@ SET lnurl:/api/tenant1 alice@getalby.com
 # Route /api/tenant2 payments to bob
 SET lnurl:/api/tenant2 bob@getalby.com
 </code></pre>
+<blockquote class="blockquote-tag blockquote-tag-note">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path></svg>Note</p>
+<p>These keys set the payout destination for a route — for Lightning invoices and
+for Cashu redemption, where a token accepted on a route is melted to the LNURL
+that route maps to. Redis is a trusted component here: bind it to a private
+interface, set <code>requirepass</code>, and limit write access to tenant configuration.</p>
+</blockquote>
 <hr>
 <h2 id="replay-attack-prevention"><a class="header" href="#replay-attack-prevention">Replay Attack Prevention</a></h2>
 <p>Redis is used to enforce single-use of L402 preimages and Cashu tokens, preventing replay attacks across distributed deployments.</p>
@@ -986,8 +1031,8 @@ SET lnurl:/api/tenant2 bob@getalby.com
 <tr><td><code>LND</code></td><td>✅</td><td>Uses <code>LookupInvoice</code> gRPC</td></tr>
 <tr><td><code>CLN</code> / <code>BOLT12</code></td><td>✅</td><td>Uses <code>listinvoices</code> JSON-RPC over unix socket</td></tr>
 <tr><td><code>ECLAIR</code></td><td>✅</td><td>Uses <code>POST /getreceivedinfo</code> REST API</td></tr>
+<tr><td><code>NWC</code></td><td>⚠️</td><td>Uses NIP-47 <code>lookup_invoice</code>, which wallets may not implement</td></tr>
 <tr><td><code>LNC</code></td><td>❌</td><td>LNC mailbox does not expose <code>LookupInvoice</code></td></tr>
-<tr><td><code>NWC</code></td><td>❌</td><td><code>lookup_invoice</code> is optional in NIP-47</td></tr>
 <tr><td><code>LNURL</code></td><td>❌</td><td>Remote wallet — no server-side query API</td></tr>
 </tbody>
 </table>
@@ -1109,9 +1154,15 @@ Environment=CASHU_MAX_PROOFS_PER_MELT=1000
 <pre><code class="language-bash"># One-time setup — persists across restarts
 sudo mkdir -p /var/lib/nginx
 sudo chown nginx:nginx /var/lib/nginx
-sudo chmod 755 /var/lib/nginx
+sudo chmod 750 /var/lib/nginx
 </code></pre>
 <p>The <code>cdk-sqlite</code> crate automatically creates the database file and tables. Database location: <code>/var/lib/nginx/cashu_tokens.db</code></p>
+<blockquote class="blockquote-tag blockquote-tag-note">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path></svg>Note</p>
+<p>This directory holds the token database and, when the mnemonic is
+auto-generated, <code>wallet.mnemonic</code> (mode <code>0600</code>). Keep it owned by the nginx
+user, and include both files in your encrypted backups.</p>
+</blockquote>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="building-from-source"><a class="header" href="#building-from-source">Building from Source</a></h1>
 <h2 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h2>

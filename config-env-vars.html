@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-e96fe3c1.js";
+            window.path_to_searchindex_js = "searchindex-6b30a7d8.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-b5966016.js"></script>
@@ -422,12 +422,51 @@ Environment=L402_PERF_LOG=1
 <tr><td><code>l402_invoice_rate_limit</code></td><td><code>&lt;N&gt;r/m</code> or <code>&lt;N&gt;r/s</code></td><td>disabled</td><td>Max invoice generation rate per IP per route</td></tr>
 <tr><td><code>l402_auto_detect_payment</code></td><td>boolean¹</td><td><code>off</code></td><td>Server-side payment detection — queries the Lightning node instead of requiring the client to supply the preimage</td></tr>
 <tr><td><code>l402_indefinite_access</code></td><td>boolean¹</td><td><code>off</code></td><td>Skip the single-use preimage replay check — a single payment stays valid for the macaroon lifetime</td></tr>
+<tr><td><code>l402_realm</code></td><td>string</td><td>—</td><td>Bind the macaroon to a named protection space instead of the exact request path, so one payment authorizes every location sharing the name</td></tr>
 </tbody>
 </table>
 </div>
 <blockquote>
 <p>¹ <strong>Boolean directives</strong> accept: <code>on</code> / <code>off</code> / <code>true</code> / <code>false</code> / <code>1</code> / <code>0</code> / <code>yes</code> / <code>no</code> (case-insensitive).</p>
 </blockquote>
+<h3 id="realm-scoped-access"><a class="header" href="#realm-scoped-access">Realm-scoped access</a></h3>
+<p>By default a macaroon is bound to the exact path it was minted for: paying for
+<code>/a</code> gives you <code>/a</code> and nothing else. <code>l402_realm</code> replaces that binding with a
+named protection space, so one payment covers every location that names it.</p>
+<pre><code class="language-nginx">location /library/preview {
+    l402                      on;
+    l402_amount_msat_default  10000;
+    l402_macaroon_timeout     300;
+    l402_realm                "library";
+    l402_indefinite_access    on;
+
+    try_files $uri $uri/index.html =404;
+}
+
+location /library/full {
+    l402                      on;
+    l402_amount_msat_default  10000;
+    l402_macaroon_timeout     300;
+    l402_realm                "library";
+    l402_indefinite_access    on;
+
+    try_files $uri $uri/index.html =404;
+}
+</code></pre>
+<p>Three things to know before using it:</p>
+<ul>
+<li><strong><code>l402_indefinite_access on</code> is effectively required.</strong> The client presents the
+same preimage on every path in the realm, and the single-use replay check would
+reject the second request. Without it a realm token works exactly once.</li>
+<li><strong>The realm is not bound to a price.</strong> Two locations sharing a name with
+different <code>l402_amount_msat_default</code> means a token bought at the cheaper one
+opens the dearer one. Give differently-priced content different realm names.</li>
+<li><strong>The name is the whole boundary.</strong> Anything naming that realm is reachable
+with one payment, so prefer specific names (<code>library-2026</code>) over generic ones
+(<code>api</code>), and set <code>l402_macaroon_timeout</code> to bound how long access lasts.</li>
+</ul>
+<p>The HTTP method is still bound in realm mode: a <code>GET</code> token will not satisfy a
+<code>POST</code>.</p>
 <h3 id="example-auto-detect-enabled-location"><a class="header" href="#example-auto-detect-enabled-location">Example: auto-detect enabled location</a></h3>
 <pre><code class="language-nginx">location /protected {
     l402                         on;
@@ -454,8 +493,9 @@ Environment=L402_PERF_LOG=1
 same preimage grants access forever.</p>
 </blockquote>
 <blockquote>
-<p><strong>Backends that support auto-detect</strong>: <code>LND</code>, <code>CLN</code>, <code>BOLT12</code>, <code>ECLAIR</code>.
-<code>LNC</code>, <code>NWC</code>, and <code>LNURL</code> do <strong>not</strong> support server-side lookup.</p>
+<p><strong>Backends that support auto-detect</strong>: <code>LND</code>, <code>CLN</code>, <code>BOLT12</code>, <code>ECLAIR</code>, and
+<code>NWC</code> where the wallet implements the optional NIP-47 <code>lookup_invoice</code>.
+<code>LNC</code> and <code>LNURL</code> do <strong>not</strong> support server-side lookup.</p>
 </blockquote>
 
                     </main>

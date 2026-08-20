@@ -9,13 +9,13 @@ use ngx::ffi::{
     ngx_http_discard_request_body, ngx_http_finalize_request, ngx_http_handler_pt,
     ngx_http_module_t, ngx_http_phases_NGX_HTTP_ACCESS_PHASE, ngx_http_request_t, ngx_int_t,
     ngx_log_s, ngx_module_t, ngx_shared_memory_add, ngx_shm_zone_t, ngx_slab_alloc,
-    ngx_slab_pool_t, ngx_str_t, ngx_uint_t, NGX_CONF_NOARGS, NGX_CONF_TAKE1, NGX_DECLINED,
-    NGX_DONE, NGX_ERROR, NGX_HTTP_COPY, NGX_HTTP_DELETE, NGX_HTTP_GET, NGX_HTTP_HEAD,
+    ngx_slab_pool_t, ngx_str_t, ngx_test_config, ngx_uint_t, NGX_CONF_NOARGS, NGX_CONF_TAKE1,
+    NGX_DECLINED, NGX_DONE, NGX_ERROR, NGX_HTTP_COPY, NGX_HTTP_DELETE, NGX_HTTP_GET, NGX_HTTP_HEAD,
     NGX_HTTP_INTERNAL_SERVER_ERROR, NGX_HTTP_LOCK, NGX_HTTP_LOC_CONF, NGX_HTTP_LOC_CONF_OFFSET,
     NGX_HTTP_MAIN_CONF, NGX_HTTP_MKCOL, NGX_HTTP_MODULE, NGX_HTTP_MOVE, NGX_HTTP_NOT_ALLOWED,
     NGX_HTTP_OPTIONS, NGX_HTTP_PATCH, NGX_HTTP_POST, NGX_HTTP_PROPFIND, NGX_HTTP_PROPPATCH,
     NGX_HTTP_PUT, NGX_HTTP_SRV_CONF, NGX_HTTP_TRACE, NGX_HTTP_UNLOCK, NGX_LOG_ERR, NGX_LOG_INFO,
-    NGX_LOG_WARN, NGX_OK, NGX_RS_MODULE_SIGNATURE,
+    NGX_LOG_NOTICE, NGX_LOG_WARN, NGX_OK, NGX_RS_MODULE_SIGNATURE,
 };
 use ngx::http::{
     HTTPStatus, HttpModule, HttpModuleLocationConf, HttpModuleMainConf, HttpModuleServerConf,
@@ -2388,6 +2388,23 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
     // SAFETY: `cycle->log` is guaranteed valid by Nginx before invoking
     // module init callbacks; it points to the global error log.
     let log = (*cycle).log;
+
+    // `nginx -t` only validates the configuration files. Nothing below reads
+    // them: it builds the Tokio runtime, the Lightning backend client and the
+    // LNURL cache, all of which exist to serve requests.
+    //
+    // SAFETY: `ngx_test_config` is set by nginx while parsing `-t` in
+    // `ngx_get_options`, before `ngx_init_cycle` invokes any init_module
+    // callback. It is read-only from then on, and read here in the
+    // single-threaded master before any fork.
+    if ngx_test_config != 0 {
+        ngx_log_error!(
+            NGX_LOG_NOTICE,
+            log,
+            "ngx_l402: config test, skipping runtime initialisation"
+        );
+        return NGX_OK as isize;
+    }
 
     // Initialize logger - this is critical for RUST_LOG to work
     let _ = env_logger::try_init();

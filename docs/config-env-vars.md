@@ -281,6 +281,7 @@ These are set inside `location {}` blocks in `nginx.conf` (not environment varia
 | `l402_auto_detect_payment` | boolean¹ | `off` | Server-side payment detection — queries the Lightning node instead of requiring the client to supply the preimage |
 | `l402_indefinite_access` | boolean¹ | `off` | Skip the single-use preimage replay check — a single payment stays valid for the macaroon lifetime |
 | `l402_realm` | string | — | Bind the macaroon to a named protection space instead of the exact request path, so one payment authorizes every location sharing the name |
+| `l402_log_format` | `json` or `text` | `text` | Emit one structured JSON line per L402 access event (verify, challenge, challenge error, rate-limited) — see [logging.md](logging.md) |
 
 > ¹ **Boolean directives** accept: `on` / `off` / `true` / `false` / `1` / `0` / `yes` / `no` (case-insensitive).
 

@@ -267,6 +267,9 @@ services:
       - CASHU_REDEMPTION_INTERVAL_SECS=15
       - CASHU_WHITELISTED_MINTS=${CASHU_WHITELISTED_MINTS}
       - REDIS_URL=redis://redis:6379
+      # info! lines (including the l402_log_format json events) only reach the
+      # container log if env_logger's filter allows them; default is error-only.
+      - RUST_LOG=info
     volumes:
       - cashu-data:/app/data
     depends_on:

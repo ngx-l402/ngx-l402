@@ -286,6 +286,86 @@ jobs:
 
           echo "✅ Dry-run shadow mode & metrics integration tests completed!"
 
+      - name: Run Integration Tests - Structured JSON Logging
+        run: |
+          echo "Testing l402_log_format json structured access logs..."
+
+          # Unauthenticated request → 402 path → l402_challenge. If the LN
+          # backend flakes we get l402_challenge_error instead; either event
+          # proves the JSON pipeline (same tolerance as the dry-run section).
+          echo "Request to /json-logs without Authorization (expect 402)..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Connection: close" http://0.0.0.0:8000/json-logs) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 402 ] && [ "$status_code" -ne 500 ]; then
+            echo "FAIL: /json-logs returned $status_code, expected 402 (or 500 on LN backend failure)"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+          echo "PASS: /json-logs returned $status_code"
+
+          # Invalid credentials → 401 path → l402_verify with auth_state=invalid.
+          # The macaroon is path-bound to /protected, so on /json-logs it is
+          # simply an invalid credential, which is all this test needs.
+          echo "Request to /json-logs with invalid preimage (expect 401)..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 MDAxMmxvY2F0aW9uIEw0MDIKMDAzMGlkZW50aWZpZXIgM460twjJAuVrQN-u5JPUZ0aKNWevybkbveRc2DeF2ZAKMDAyMWNpZCBSZXF1ZXN0UGF0aCA9IC9wcm90ZWN0ZWQKMDAyZnNpZ25hdHVyZSCwR6G2lDj1thda81BPwQuo73_shURzPf1XOwuejNLwVwo=:fbe9ac25c04e14b10177514e2d57b0e39224e70277ac1a2cd23c28e58cd4ea35" -H "Connection: close" http://0.0.0.0:8000/json-logs) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 401 ]; then
+            echo "FAIL: /json-logs with invalid preimage returned $status_code, expected 401"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+          echo "PASS: /json-logs returned 401 for invalid preimage"
+
+          # /json-logs allows 1 invoice/minute and the first request already
+          # used it, so this one must be rate-limited → l402_rate_limited.
+          # The 401 in between does not consume the limit (only 402s do).
+          echo "Second unauthenticated request to /json-logs (expect 429)..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Connection: close" http://0.0.0.0:8000/json-logs) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 429 ]; then
+            echo "FAIL: second /json-logs request returned $status_code, expected 429 (1r/m limit)"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+          echo "PASS: /json-logs returned 429 over the rate limit"
+
+          # Let nginx flush the container logs before asserting on them.
+          sleep 2
+          logs=$(docker logs nginx-lnurl 2>&1)
+
+          if ! echo "$logs" | grep -q '"event":"l402_challenge".*"route":"/json-logs"' && \
+             ! echo "$logs" | grep -q '"event":"l402_challenge_error".*"route":"/json-logs"'; then
+            echo "FAIL: no l402_challenge/l402_challenge_error JSON event for /json-logs"
+            echo "$logs" | tail -50
+            exit 1
+          fi
+          echo "PASS: l402_challenge JSON event present for /json-logs"
+
+          if ! echo "$logs" | grep -q '"event":"l402_verify".*"route":"/json-logs".*"auth_state":"invalid"'; then
+            echo "FAIL: no l402_verify auth_state=invalid JSON event for /json-logs"
+            echo "$logs" | tail -50
+            exit 1
+          fi
+          echo "PASS: l402_verify auth_state=invalid JSON event present"
+
+          if ! echo "$logs" | grep -q '"event":"l402_rate_limited".*"route":"/json-logs"'; then
+            echo "FAIL: no l402_rate_limited JSON event for /json-logs"
+            echo "$logs" | tail -50
+            exit 1
+          fi
+          echo "PASS: l402_rate_limited JSON event present for /json-logs"
+
+          # /protected never enabled the directive: earlier sections drove plenty
+          # of traffic through it, and none of it may appear as a JSON event.
+          if echo "$logs" | grep -q '"event":"l402_.*"route":"/protected"'; then
+            echo "FAIL: found l402 JSON event for /protected, which runs default text logging"
+            echo "$logs" | grep '"event":"l402_' | tail -10
+            exit 1
+          fi
+          echo "PASS: no JSON events for /protected (text default unchanged)"
+
+          echo "✅ Structured JSON logging integration tests completed!"
+
       - name: Run Integration Tests - gRPC
         run: |
           source .github/scripts/ci-wait.sh

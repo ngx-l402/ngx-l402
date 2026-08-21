@@ -1345,6 +1345,11 @@ pub struct ModuleConfig {
     // (inherit from parent scope); `Some(false)` explicitly turns it off and
     // stops inheritance.
     dry_run: Option<bool>,
+    // Structured JSON access logging (`l402_log_format json`). Tri-state like
+    // dry_run so an inner location can force it off when an outer scope turned
+    // it on. Unset everywhere means the default text logging — existing
+    // deployments see no change.
+    log_format_json: Option<bool>,
     // Skip single-use preimage replay check; one payment stays valid for the
     // macaroon lifetime (pair with l402_macaroon_timeout). `None` means unset
     // (inherit from parent scope); `Some(false)` explicitly turns it off and
@@ -1356,7 +1361,7 @@ pub struct ModuleConfig {
     manifest_hidden: bool,
 }
 
-pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 13] = [
+pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 14] = [
     ngx_command_t {
         name: ngx_string!("l402"),
         type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1) as ngx_uint_t,
@@ -1454,6 +1459,14 @@ pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 13] = [
         offset: 0,
         post: std::ptr::null_mut(),
     },
+    ngx_command_t {
+        name: ngx_string!("l402_log_format"),
+        type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1) as ngx_uint_t,
+        set: Some(ngx_http_l402_log_format_set),
+        conf: NGX_HTTP_LOC_CONF_OFFSET,
+        offset: 0,
+        post: std::ptr::null_mut(),
+    },
     ngx_command_t::empty(),
 ];
 
@@ -1534,6 +1547,9 @@ impl Merge for ModuleConfig {
         // location overrides `l402_dry_run on;` on the outer scope.
         if self.dry_run.is_none() {
             self.dry_run = prev.dry_run;
+        }
+        if self.log_format_json.is_none() {
+            self.log_format_json = prev.log_format_json;
         }
         if prev.manifest_hidden {
             self.manifest_hidden = true;
@@ -1741,6 +1757,7 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         dry_run,
         indefinite_access,
         realm,
+        log_format_json,
     ) = unsafe {
         // NOTE: `authorization` can be null — not every request carries the header.
         let auth_header = if !r.headers_in.authorization.is_null() {
@@ -1797,6 +1814,7 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         let dry_run = conf.dry_run.unwrap_or(false);
         let indefinite_access = conf.indefinite_access.unwrap_or(false);
         let realm = conf.realm.clone();
+        let log_format_json = conf.log_format_json.unwrap_or(false);
 
         (
             auth_header,
@@ -1810,6 +1828,7 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
             dry_run,
             indefinite_access,
             realm,
+            log_format_json,
         )
     };
 
@@ -1914,18 +1933,51 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
     match result {
         r if r == NGX_DECLINED as isize => {
             metrics::inc(metrics::Metric::PaymentsValidTotal);
-            match LAST_PAYMENT_METHOD.with(|m| m.take()) {
+            let payment_method = LAST_PAYMENT_METHOD.with(|m| m.take());
+            match payment_method {
                 Some(PaymentMethod::Lightning) => {
                     metrics::inc(metrics::Metric::PaymentsLightningTotal)
                 }
                 Some(PaymentMethod::Cashu) => metrics::inc(metrics::Metric::PaymentsCashuTotal),
                 None => {}
             }
+            if log_format_json {
+                let method_field = match payment_method {
+                    Some(PaymentMethod::Lightning) => ",\"method\":\"lightning\"",
+                    Some(PaymentMethod::Cashu) => ",\"method\":\"cashu\"",
+                    None => "",
+                };
+                log_json_event(
+                    "l402_verify",
+                    &request_path,
+                    backend_label(),
+                    &format!(
+                        ",\"client_ip\":\"{}\",\"auth_state\":\"valid\"{},\"latency_ms\":{}",
+                        ngx_l402_core::escape_json(&get_client_ip(request)),
+                        method_field,
+                        auth_duration.as_millis()
+                    ),
+                );
+            }
         }
         // 400 joins 401: a Cashu token rejected under NUT-24 is an invalid
         // payment, same as a bad preimage. 500 stays out — that is our failure,
         // not the payer's, and must not inflate the invalid-payment count.
-        400 | 401 => metrics::inc(metrics::Metric::PaymentsInvalidTotal),
+        400 | 401 => {
+            metrics::inc(metrics::Metric::PaymentsInvalidTotal);
+            if log_format_json {
+                log_json_event(
+                    "l402_verify",
+                    &request_path,
+                    backend_label(),
+                    &format!(
+                        ",\"client_ip\":\"{}\",\"auth_state\":\"invalid\",\"latency_ms\":{}",
+                        ngx_l402_core::escape_json(&get_client_ip(request)),
+                        auth_duration.as_millis()
+                    ),
+                );
+            }
+        }
         402 => metrics::inc(metrics::Metric::PaymentsMissingTotal),
         _ => {}
     }
@@ -1958,6 +2010,18 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
                     client_ip,
                     request_path
                 );
+                if log_format_json {
+                    log_json_event(
+                        "l402_rate_limited",
+                        &request_path,
+                        backend_label(),
+                        &format!(
+                            ",\"client_ip\":\"{}\",\"window_secs\":{}",
+                            ngx_l402_core::escape_json(&client_ip),
+                            window_secs
+                        ),
+                    );
+                }
                 // SAFETY: `request` is non-null and valid for this handler's
                 // lifetime, as guaranteed by nginx before invoking the handler.
                 unsafe {
@@ -2039,6 +2103,9 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         // worker's first request builds its own channel: this catches a request
         // that will never finish, it is not a latency budget.
         const CHALLENGE_TIMEOUT: Duration = Duration::from_secs(25);
+        // Remember *why* challenge synthesis failed so the JSON event can
+        // carry an error type instead of a free-form message.
+        let mut challenge_error_kind: Option<&'static str> = None;
         let header_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             rt.block_on(async {
                 tokio::time::timeout(
@@ -2054,10 +2121,12 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
             })
         }))
         .unwrap_or_else(|_| {
+            challenge_error_kind = Some("panic");
             error!("❌ Panic in get_l402_header (LNURL resolution failure); returning 500");
             Ok(None)
         })
         .unwrap_or_else(|_| {
+            challenge_error_kind = Some("timeout");
             error!(
                 "❌ Invoice generation timed out after {}s",
                 CHALLENGE_TIMEOUT.as_secs()
@@ -2076,6 +2145,20 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         match header_result {
             Some(header_value) => {
                 metrics::inc(metrics::Metric::InvoicesGeneratedTotal);
+                if log_format_json {
+                    log_json_event(
+                        "l402_challenge",
+                        &request_path,
+                        backend_label(),
+                        &format!(
+                            ",\"client_ip\":\"{}\",\"auth_state\":\"missing\",\"price_msat\":{},\"price_source\":\"{}\",\"latency_ms\":{}",
+                            ngx_l402_core::escape_json(&get_client_ip(request)),
+                            final_amount,
+                            price_source,
+                            invoice_start.elapsed().as_millis()
+                        ),
+                    );
+                }
 
                 // Set WWW-Authenticate header for API clients
                 unsafe {
@@ -2119,6 +2202,19 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
             None => {
                 metrics::inc(metrics::Metric::InvoicesGenerationErrorsTotal);
                 ngx_log_error!(NGX_LOG_ERR, log_ref, "Failed to get L402 header");
+                if log_format_json {
+                    log_json_event(
+                        "l402_challenge_error",
+                        &request_path,
+                        backend_label(),
+                        &format!(
+                            ",\"client_ip\":\"{}\",\"error\":\"{}\",\"latency_ms\":{}",
+                            ngx_l402_core::escape_json(&get_client_ip(request)),
+                            challenge_error_kind.unwrap_or("backend"),
+                            invoice_start.elapsed().as_millis()
+                        ),
+                    );
+                }
                 return 500;
             }
         }
@@ -2771,6 +2867,32 @@ fn spawn_cashu_redemption_thread(interval_secs: u64) {
     }
 }
 
+/// Label for the active Lightning backend, cached at init. Shared by the
+/// dry-run line and the `l402_log_format json` events so log pipelines can
+/// group every structured line by the same value.
+fn backend_label() -> &'static str {
+    LN_BACKEND_LABEL
+        .get()
+        .map(String::as_str)
+        .unwrap_or("unknown")
+}
+
+/// Emit one structured JSON access event. Only called when the location has
+/// `l402_log_format json`; field names follow the dry-run line (`event` as
+/// discriminator, `route`, `backend`, `auth_state`) so the same log-pipeline
+/// queries match both. `extra_fields` is a pre-built fragment of
+/// `,"key":value` pairs — every interpolated string value must go through
+/// `escape_json` at the call site.
+fn log_json_event(event: &str, route: &str, backend: &str, extra_fields: &str) {
+    info!(
+        "{{\"event\":\"{event}\",\"route\":\"{route}\",\"backend\":\"{backend}\"{extra}}}",
+        event = event,
+        route = ngx_l402_core::escape_json(route),
+        backend = backend,
+        extra = extra_fields,
+    );
+}
+
 /// Handle dry-run (shadow) mode: evaluate everything, log + increment metrics,
 /// but never block the request. Always returns [`NGX_DECLINED`] so nginx
 /// continues to the next phase and the upstream response is served as 200.
@@ -3031,6 +3153,47 @@ pub unsafe extern "C" fn ngx_http_l402_dry_run_set(
         } else {
             error!("Invalid l402_dry_run value: '{}' (expected on/off)", val);
             return c"l402_dry_run: expected 'on' or 'off'".as_ptr() as *mut c_char;
+        }
+    }
+    std::ptr::null_mut()
+}
+
+/// Directive handler for `l402_log_format json|text;`.
+///
+/// `json` emits one structured line per L402 access event (verify, challenge,
+/// challenge error, rate-limited) with the same field names as the dry-run
+/// line. `text` (the default) keeps the free-form logs. Opt-in per location;
+/// an inner location can force `text` when an outer scope set `json`.
+///
+/// # Safety
+/// `cf` and `conf` are the valid, non-null pointers Nginx passes to
+/// directive-parsing callbacks; `conf` points to this location's
+/// `ModuleConfig`. `(*cf).args` holds exactly one argument because the
+/// directive is declared `NGX_CONF_TAKE1`.
+pub unsafe extern "C" fn ngx_http_l402_log_format_set(
+    cf: *mut ngx_conf_t,
+    _cmd: *mut ngx_command_t,
+    conf: *mut c_void,
+) -> *mut c_char {
+    // SAFETY: `cf`, `conf`, and `(*cf).args` are guaranteed valid by Nginx
+    // during config-parsing callbacks. `args.add(1)` is safe because
+    // NGX_CONF_TAKE1 ensures exactly one argument is present.
+    unsafe {
+        let conf = &mut *(conf as *mut ModuleConfig);
+        let args = (*(*cf).args).elts as *mut ngx_str_t;
+        let val = (*args.add(1)).to_str().unwrap_or_default();
+
+        if val.eq_ignore_ascii_case("json") {
+            conf.log_format_json = Some(true);
+            info!("⚙️ l402_log_format json enabled (structured access logs)");
+        } else if val.eq_ignore_ascii_case("text") {
+            conf.log_format_json = Some(false);
+        } else {
+            error!(
+                "Invalid l402_log_format value: '{}' (expected json/text)",
+                val
+            );
+            return c"l402_log_format: expected 'json' or 'text'".as_ptr() as *mut c_char;
         }
     }
     std::ptr::null_mut()

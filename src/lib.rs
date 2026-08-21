@@ -14,8 +14,8 @@ use ngx::ffi::{
     NGX_HTTP_INTERNAL_SERVER_ERROR, NGX_HTTP_LOCK, NGX_HTTP_LOC_CONF, NGX_HTTP_LOC_CONF_OFFSET,
     NGX_HTTP_MAIN_CONF, NGX_HTTP_MKCOL, NGX_HTTP_MODULE, NGX_HTTP_MOVE, NGX_HTTP_NOT_ALLOWED,
     NGX_HTTP_OPTIONS, NGX_HTTP_PATCH, NGX_HTTP_POST, NGX_HTTP_PROPFIND, NGX_HTTP_PROPPATCH,
-    NGX_HTTP_PUT, NGX_HTTP_SRV_CONF, NGX_HTTP_TRACE, NGX_HTTP_UNLOCK, NGX_LOG_ERR, NGX_LOG_INFO,
-    NGX_LOG_NOTICE, NGX_LOG_WARN, NGX_OK, NGX_RS_MODULE_SIGNATURE,
+    NGX_HTTP_PUT, NGX_HTTP_SRV_CONF, NGX_HTTP_TRACE, NGX_HTTP_UNLOCK, NGX_LOG_EMERG, NGX_LOG_ERR,
+    NGX_LOG_INFO, NGX_LOG_NOTICE, NGX_LOG_WARN, NGX_OK, NGX_RS_MODULE_SIGNATURE,
 };
 use ngx::http::{
     HTTPStatus, HttpModule, HttpModuleLocationConf, HttpModuleMainConf, HttpModuleServerConf,
@@ -50,27 +50,33 @@ static ROOT_KEY_CACHE: OnceLock<Vec<u8>> = OnceLock::new();
 
 /// Read ROOT_KEY from the environment (first call) or from the in-process
 /// cache (all subsequent calls, including from worker processes).
-/// Panics at startup if the variable is missing or shorter than 32 bytes,
-/// preventing silent use of a weak / hardcoded key.
-fn require_root_key() -> Vec<u8> {
-    ROOT_KEY_CACHE
-        .get_or_init(|| {
-            let key = std::env::var("ROOT_KEY").unwrap_or_else(|_| {
-                panic!(
-                    "ROOT_KEY environment variable is not set. \
-                     Generate one with: openssl rand -hex 32"
-                )
-            });
-            if key.len() < 32 {
-                panic!(
-                    "ROOT_KEY must be at least 32 characters long (got {}). \
-                     Generate one with: openssl rand -hex 32",
-                    key.len()
-                );
-            }
-            key.into_bytes()
-        })
-        .clone()
+///
+/// Returns `Err` rather than panicking: this runs under `init_module`, whose
+/// caller is nginx's C, so a panic has nothing to unwind into and the runtime
+/// aborts. The error travels up to `init_module`, which logs it and returns
+/// `-1` for the `[emerg]` nginx expects.
+fn require_root_key() -> Result<Vec<u8>, String> {
+    if let Some(cached) = ROOT_KEY_CACHE.get() {
+        return Ok(cached.clone());
+    }
+
+    let key = std::env::var("ROOT_KEY").map_err(|_| {
+        "ROOT_KEY environment variable is not set. \
+         Generate one with: openssl rand -hex 32"
+            .to_string()
+    })?;
+    if key.len() < 32 {
+        return Err(format!(
+            "ROOT_KEY must be at least 32 characters long (got {}). \
+             Generate one with: openssl rand -hex 32",
+            key.len()
+        ));
+    }
+
+    let bytes = key.into_bytes();
+    // A lost race stores the same value, so the loser's copy is still correct.
+    let _ = ROOT_KEY_CACHE.set(bytes.clone());
+    Ok(bytes)
 }
 
 /// Registry of l402-enabled locations, populated at config-parse time and
@@ -385,7 +391,7 @@ pub async fn get_or_create_lnurl_client(
         cln_config: None,
         bolt12_config: None,
         eclair_config: None,
-        root_key: require_root_key(),
+        root_key: require_root_key()?,
     };
 
     match lnurl::LnAddressUrlResJson::new_client(&ln_client_config).await {
@@ -728,7 +734,7 @@ pub struct L402Module {
 }
 
 impl L402Module {
-    pub async fn new() -> Self {
+    pub async fn new() -> Result<Self, String> {
         info!("🚀 Creating new L402Module");
 
         // Record how to reach Redis; do not build the pool here.
@@ -788,7 +794,7 @@ impl L402Module {
                     cln_config: None,
                     bolt12_config: None,
                     eclair_config: None,
-                    root_key: require_root_key(),
+                    root_key: require_root_key()?,
                 }
             }
             "LND" => {
@@ -853,7 +859,7 @@ impl L402Module {
                     cln_config: None,
                     bolt12_config: None,
                     eclair_config: None,
-                    root_key: require_root_key(),
+                    root_key: require_root_key()?,
                 }
             }
             "NWC" => {
@@ -870,7 +876,7 @@ impl L402Module {
                     nwc_config: Some(nwc::NWCOptions { uri }),
                     bolt12_config: None,
                     eclair_config: None,
-                    root_key: require_root_key(),
+                    root_key: require_root_key()?,
                 }
             }
             "CLN" => {
@@ -886,7 +892,7 @@ impl L402Module {
                     cln_config: Some(cln::CLNOptions { lightning_dir }),
                     bolt12_config: None,
                     eclair_config: None,
-                    root_key: require_root_key(),
+                    root_key: require_root_key()?,
                 }
             }
             "BOLT12" => {
@@ -914,7 +920,7 @@ impl L402Module {
                         lightning_dir,
                     }),
                     eclair_config: None,
-                    root_key: require_root_key(),
+                    root_key: require_root_key()?,
                 }
             }
             "ECLAIR" => {
@@ -941,7 +947,7 @@ impl L402Module {
                         api_url: address,
                         password,
                     }),
-                    root_key: require_root_key(),
+                    root_key: require_root_key()?,
                 }
             }
             _ => {
@@ -957,7 +963,7 @@ impl L402Module {
                     cln_config: None,
                     bolt12_config: None,
                     eclair_config: None,
-                    root_key: require_root_key(),
+                    root_key: require_root_key()?,
                 }
             }
         };
@@ -973,10 +979,10 @@ impl L402Module {
             Arc::new(|req| vec![format!("RequestPath = {}", req.uri().path())]),
         )
         .await
-        .expect("Failed to create middleware");
+        .map_err(|e| format!("Failed to create L402 middleware: {:?}", e))?;
 
         let _ = LN_CLIENT_CONFIG.set(ln_client_config);
-        Self { middleware }
+        Ok(Self { middleware })
     }
 
     /// Auto-detect settlement: ask the worker's LN client whether the invoice
@@ -2588,12 +2594,23 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
         info!("ℹ️ Cashu eCash support is disabled");
     }
 
-    MODULE.get_or_init(|| {
+    if MODULE.get().is_none() {
         info!("🔄 Initializing runtime and L402Module");
         openssl_probe::init_openssl_env_vars();
-        let rt = Runtime::new().expect("Failed to create runtime");
+        let rt = match Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => {
+                ngx_log_error!(
+                    NGX_LOG_EMERG,
+                    log,
+                    "ngx_l402: failed to create runtime: {}",
+                    e
+                );
+                return -1;
+            }
+        };
         let module = rt.block_on(async {
-            let m = L402Module::new().await;
+            let m = L402Module::new().await?;
             if cashu_ecash_support {
                 cashu::restore_wallets_state().await;
                 cashu::reconcile_pending_proofs().await;
@@ -2639,8 +2656,19 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
                 }
             }
 
-            m
+            Ok::<L402Module, String>(m)
         });
+
+        // A missing or too-short ROOT_KEY lands here. Reporting it as `[emerg]`
+        // plus -1 is what nginx expects; panicking would abort the master,
+        // since there is nothing to unwind into across the FFI boundary.
+        let module = match module {
+            Ok(m) => m,
+            Err(e) => {
+                ngx_log_error!(NGX_LOG_EMERG, log, "ngx_l402: {}", e);
+                return -1;
+            }
+        };
 
         // Record LN client type for cashu redemption. The actual client
         // connection is created lazily inside the redemption thread to avoid
@@ -2652,8 +2680,8 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
         }
 
         info!("✅ L402Module initialized successfully");
-        module
-    });
+        let _ = MODULE.set(module);
+    }
 
     info!("✅ L402 module initialization complete");
 

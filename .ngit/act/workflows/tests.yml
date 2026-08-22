@@ -7,8 +7,6 @@ on:
     tags:
       - 'v*'
   pull_request:
-    branches:
-      - main
 
 # Least privilege for the test jobs; the two publish jobs below raise their own.
 permissions:

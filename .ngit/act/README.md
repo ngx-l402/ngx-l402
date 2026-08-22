@@ -34,17 +34,28 @@ and it is why a proposal cannot go green on Nostr and red on GitHub.
 That is the whole directory. There is no CI infrastructure here — no shell, no
 Docker bootstrap, no second copy of any test.
 
-## The one transform sync.sh applies
+## The two transforms sync.sh applies
 
-It **drops every job that declares a job-level `uses:`.** ngit-ci refuses a
+**1. It unfilters the `pull_request` trigger.** GitHub reads
+`pull_request: branches: [main]` as "PRs *targeting* main". ngit-ci matches it
+against the proposal's own `branch-name` tag — the *source* branch — so a
+proposal from `fix/whatever` matches nothing and the workflow silently never
+runs, with no error anywhere. Dropping the filter is the reading that preserves
+the intent: on GitHub these run for every PR to main, and on Nostr `main` is
+the only thing a proposal ever targets. `push: branches:` is left alone, since
+there the ref really is the ref.
+
+Worth fixing upstream — the filter should apply to the base branch — but until
+it does, a filtered `pull_request` on a Nostr proposal is a workflow that never
+fires and never says so.
+
+**2. It drops every job that declares a job-level `uses:`.** ngit-ci refuses a
 workflow file containing one, because it cannot statically verify the container
 declarations of a reusable workflow it has not fetched. In `tests.yml` that is
-the tag-gated release fan-out — `publish`, `publish-image` and `publish-docs`,
-which call `release-workflow.yml`, `ghcr-workflow.yml` and `docs.yml`. All three
-are gated on `refs/tags/v*` and would never run on a proposal.
+the tag-gated release fan-out — `publish`, `publish-image` and `publish-docs`.
+All three are gated on `refs/tags/v*` and would never run on a proposal.
 
-Everything else is copied verbatim: of `tests.yml`'s 2945 lines, 2917 are kept
-unchanged, and the other three workflows are byte-identical.
+Everything else is copied verbatim.
 
 `docs.yml`, `ghcr-workflow.yml` and `release-workflow.yml` are not mirrored at
 all — they publish to GitHub Pages, GHCR and GitHub Releases.

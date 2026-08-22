@@ -294,10 +294,15 @@ fn resolve_wallet_mnemonic(db_url: &str) -> Result<(), String> {
 ///
 /// The master creates them as root; the workers that use them run as nginx.
 /// The data directory already names that user, so follow it.
+///
+/// Ownership and mode are applied to an `O_NOFOLLOW` descriptor, never to the
+/// path. This runs as root, so a path-based chown here is a privilege-
+/// escalation primitive: a symlink planted at `<db>-wal` would hand the link's
+/// target to the worker user with mode 0660.
 fn set_db_ownership(db_url: &str) {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
         let path = std::path::Path::new(
             db_url
@@ -318,10 +323,30 @@ fn set_db_ownership(db_url: &str) {
             if !file.exists() {
                 continue;
             }
+
+            // Read-only is enough: fchown/fchmod act on the descriptor, and
+            // opening the SQLite files this way does not disturb them.
+            let opened = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&file);
+
+            let handle = match opened {
+                Ok(handle) => handle,
+                Err(e) => {
+                    warn!(
+                        "⚠️ Not adjusting ownership of {} (ELOOP = symlink, refused): {}",
+                        file.display(),
+                        e
+                    );
+                    continue;
+                }
+            };
+
             if let Some((uid, gid)) = owner {
-                let _ = std::os::unix::fs::chown(&file, Some(uid), Some(gid));
+                let _ = std::os::unix::fs::fchown(&handle, Some(uid), Some(gid));
             }
-            let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o660));
+            let _ = handle.set_permissions(std::fs::Permissions::from_mode(0o660));
         }
     }
     #[cfg(not(unix))]
@@ -365,25 +390,29 @@ fn wallet_mnemonic_file_path(db_url: &str) -> Option<String> {
 /// Persist the mnemonic to `path` with owner-only permissions where supported.
 ///
 /// On unix the file is created with mode 0600 up front, so it is never visible
-/// at the umask's default permissions.
+/// at the umask's default permissions, and `O_NOFOLLOW` refuses a symlink: this
+/// writes the BIP39 phrase controlling every Cashu fund, and `O_CREAT` alone
+/// follows an existing link, which would deliver it to the link's target.
 fn persist_mnemonic(path: &str, mnemonic: &str) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(path)
-            .map_err(|e| format!("open {}: {}", path, e))?;
+            .map_err(|e| format!("open {} (ELOOP = symlink, refused): {}", path, e))?;
         f.write_all(format!("{}\n", mnemonic).as_bytes())
             .map_err(|e| format!("write {}: {}", path, e))?;
-        // An existing file keeps its own mode on open, so set it explicitly too.
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        // An existing file keeps its own mode on open, so set it explicitly —
+        // on the descriptor, since a path-based call would follow a symlink
+        // swapped in after the open.
+        let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
     }
     #[cfg(not(unix))]
     {
@@ -458,13 +487,34 @@ fn wallet_fingerprint_file_path(db_url: &str) -> Option<String> {
     )
 }
 
+/// Persist the wallet fingerprint beside the database.
+///
+/// `fs::write` and a path-based chmod both follow symlinks, and this runs as
+/// root in the master — a link planted here would redirect the write, and the
+/// chmod, onto an arbitrary file. Open with `O_NOFOLLOW` and set the mode on
+/// the descriptor instead.
 fn persist_fingerprint(path: &str, fingerprint: &str) -> Result<(), String> {
-    std::fs::write(path, format!("{}\n", fingerprint))
-        .map_err(|e| format!("write {}: {}", path, e))?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|e| format!("open {} (ELOOP = symlink, refused): {}", path, e))?;
+        f.write_all(format!("{}\n", fingerprint).as_bytes())
+            .map_err(|e| format!("write {}: {}", path, e))?;
+        let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, format!("{}\n", fingerprint))
+            .map_err(|e| format!("write {}: {}", path, e))?;
     }
     Ok(())
 }

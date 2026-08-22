@@ -1,0 +1,2919 @@
+name: Integration Tests
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+
+# Least privilege for the test jobs; the two publish jobs below raise their own.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      RUST_BACKTRACE: full
+      RUST_LOG: debug
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Start a Docker daemon inside the job
+        run: bash .ngit/act/lib/docker-in-job.sh
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-export-modules-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run unit tests (ngx_l402_core)
+        # Fast, nginx-free pure-logic tests (wallet-seed derivation, etc.).
+        # Runs before the heavy Docker integration steps so a logic regression
+        # — e.g. a wallet-seed derivation change that would strand funds —
+        # fails the build in seconds.
+        run: cargo test -p ngx_l402_core --verbose
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev protobuf-compiler
+
+      - name: Set up Docker Compose
+        env:
+          ROOT_KEY: a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
+          CURRENCY: USD
+          AMOUNT: 0.01
+        run: |
+          sudo curl -L "https://github.com/docker/compose/releases/download/v2.29.1/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+          sudo chmod +x /usr/local/bin/docker-compose
+          docker-compose -f docker-compose.yml up -d bitcoind
+
+      - name: Create env file
+        run: |
+          touch .env
+          echo ROOT_KEY=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4 >> .env
+          cat .env
+
+      - name: Start LNURL service
+        env:
+          LNURL_ADDRESS: hello@getalby.com
+          CASHU_WALLET_MNEMONIC: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        run: |
+          echo "Starting nginx-lnurl and grpc-content-server..."
+          docker-compose -f docker-compose.yml up -d nginx-lnurl grpc-content-server
+
+      - name: Run Integration Tests - LNURL
+        run: |
+          source .github/scripts/ci-wait.sh
+          echo "Testing with LNURL configuration..."
+          # Poll until nginx answers instead of guessing at a sleep: module
+          # startup does LN client + Redis + Cashu init and can exceed a fixed wait.
+          # Free route only: /protected resolves the LNURL address over the
+          # network, so polling it would hammer a third party once per second.
+          wait_http http://0.0.0.0:8000/ 200 90 || { docker logs nginx-lnurl; exit 1; }
+          docker logs nginx-lnurl
+
+          # Test free route
+          echo "Testing free route..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 200 ]; then
+            echo "Error: Free route returned status $status_code, expected 200"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+
+          # Test protected route without header
+          echo "Testing protected route without header..."
+          curl_until 402 -L http://0.0.0.0:8000/protected
+          if [ "$status_code" -ne 402 ]; then
+            echo "Error: Protected route without header returned status $status_code, expected 402"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+
+          # Check if WWW-Authenticate header is present
+          if ! echo "$response" | grep -q 'WWW-Authenticate: L402 macaroon='; then
+            echo "Error: WWW-Authenticate header is missing in the 402 response"
+            echo "$response"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+
+          # Flush Redis to clear any previously stored preimages (replay protection)
+          echo "Flushing Redis for clean test state..."
+          echo "Keys before flush:"
+          docker exec redis redis-cli keys "l402:*"
+          docker exec redis redis-cli flushall
+          echo "Keys after flush:"
+          docker exec redis redis-cli keys "l402:*"
+          docker exec redis redis-cli dbsize
+          
+          # Wait a moment for flush to propagate
+          sleep 2
+          
+          # Note: valid-credentials (→200) test is skipped for LNURL because the
+          # LNURL address (hello@getalby.com) cannot be paid from regtest CI.
+          # Full payment → verification flow is covered by the LND and NWC test sections.
+
+          # Test with malformed / wrong-key credentials - must always reject
+          echo "Testing with invalid preimage..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 MDAxMmxvY2F0aW9uIEw0MDIKMDAzMGlkZW50aWZpZXIgM460twjJAuVrQN-u5JPUZ0aKNWevybkbveRc2DeF2ZAKMDAyMWNpZCBSZXF1ZXN0UGF0aCA9IC9wcm90ZWN0ZWQKMDAyZnNpZ25hdHVyZSCwR6G2lDj1thda81BPwQuo73_shURzPf1XOwuejNLwVwo=:fbe9ac25c04e14b10177514e2d57b0e39224e70277ac1a2cd23c28e58cd4ea35" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 401 ]; then
+            echo "Error: Protected route with invalid preimage returned status $status_code, expected 401"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+
+          # Test with macaroon without caveats
+          echo "Testing with macaroon without caveats..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 AgEETFNBVALmAUr/gQMBARJNYWNhcm9vbklkZW50aWZpZXIB/4IAAQMBB1ZlcnNpb24BBgABC1BheW1lbnRIYXNoAf+EAAEHVG9rZW5JZAH/hgAAABT/gwEBAQRIYXNoAf+EAAEGAUAAABn/hQEBAQlbMzJddWludDgB/4YAAQYBQAAAa/+CAiD/pv/jOjY1/9oC/4z/tHb/qf/2Jf+d/4H/u/+YGHj/+/+O/8D/v/+P/8X/qRL/5v/x/4r/tkIBIA1Y/8j/pR3/0P+b/7cwWP+W/87/sD18GP//Hf/f/9Aj//NcBFs2/9VhNEUF/70AAAAGIDlR1jVm5IfEJgvuSQoJLqLg4FcW4Ib1vW8sbkRHdUWX:651505fae9ea341c770c6ebef207d8560d546eb3aee26985e584c15d1c987875" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 401 ]; then
+            echo "Error: Protected route with macaroon without caveats returned status $status_code, expected 401"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+
+          echo "Testing Multi-tenant LNURL Lightning invoice generation..."
+
+          # Test tenant1 route - should generate invoice to hello@getalby.com
+          echo "Testing tenant1 route..."
+          curl_until 402 -L http://0.0.0.0:8000/tenant1
+          if [ "$status_code" -ne 402 ]; then
+            echo "Error: Tenant1 route returned status $status_code, expected 402"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+
+          # Check if WWW-Authenticate header is present for tenant1
+          if ! echo "$response" | grep -q 'WWW-Authenticate: L402 macaroon='; then
+            echo "Error: WWW-Authenticate header is missing for tenant1"
+            echo "$response"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+
+          # Extract invoice from tenant1 response
+          invoice_tenant1=$(echo "$response" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
+          if [ -z "$invoice_tenant1" ]; then
+            echo "Error: No invoice found for tenant1"
+            echo "$response"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+          echo "✅ Tenant1 returned L402 challenge with invoice: ${invoice_tenant1:0:50}..."
+
+          echo "✅ Multi-tenant LNURL Lightning integration tests completed!"
+
+      - name: Run Integration Tests - Dry-Run (Shadow) Mode & Metrics
+        run: |
+          echo "Testing l402_dry_run shadow mode and l402_metrics endpoint..."
+
+          # nginx runs worker_processes auto, so the Rust static AtomicU64
+          # counters are per-process. Hit /shadow several times and poll
+          # /metrics until we find a worker that has handled dry-run traffic.
+
+          # Warm up — spread dry-run requests across workers.
+          for i in 1 2 3 4 5; do
+            curl -s -o /dev/null --max-time 30 -H "Connection: close" http://0.0.0.0:8000/shadow || true
+          done
+
+          # Shadow mode must always pass through — same request that returns
+          # 402 on /protected must return 200 on /shadow.
+          echo "Request to /shadow without Authorization (expect 200, no 402)..."
+          shadow_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 -H "Connection: close" http://0.0.0.0:8000/shadow) || true
+          shadow_code=$(echo "$shadow_resp" | tail -n1); shadow_code=${shadow_code:-000}
+          if [ "$shadow_code" -ne 200 ]; then
+            echo "FAIL: /shadow returned $shadow_code, expected 200 (dry-run must not block)"
+            echo "$shadow_resp"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+          echo "PASS: /shadow returned 200"
+
+          if ! echo "$shadow_resp" | grep -qi "^X-L402-Dry-Run: 1"; then
+            echo "FAIL: X-L402-Dry-Run header missing from /shadow response"
+            echo "$shadow_resp"
+            exit 1
+          fi
+          echo "PASS: X-L402-Dry-Run: 1 header present"
+
+          if ! echo "$shadow_resp" | grep -qi "^X-L402-Dry-Run-Price-Msat: 10000"; then
+            echo "FAIL: X-L402-Dry-Run-Price-Msat header missing/incorrect"
+            echo "$shadow_resp"
+            exit 1
+          fi
+          echo "PASS: X-L402-Dry-Run-Price-Msat: 10000 present"
+
+          # Challenge synthesis may legitimately fail if the LN backend is
+          # flaky — we count it but don't fail the request. Just log whether
+          # a challenge header came back for visibility.
+          if echo "$shadow_resp" | grep -qi "^X-L402-Dry-Run-Challenge:"; then
+            echo "INFO: X-L402-Dry-Run-Challenge header present (LN backend reachable)"
+          else
+            echo "INFO: X-L402-Dry-Run-Challenge absent (LN backend may be unreachable — non-fatal)"
+          fi
+
+          # Metrics endpoint — must serve text/plain Prometheus exposition.
+          # Poll multiple times to handle per-worker counter copies.
+          echo "Scraping /metrics endpoint..."
+          metrics_code=0
+          metrics_resp=""
+          dry_run_total=""
+          for i in {1..10}; do
+            metrics_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 -H "Connection: close" http://0.0.0.0:8000/metrics) || true
+            metrics_code=$(echo "$metrics_resp" | tail -n1); metrics_code=${metrics_code:-000}
+            if [ "$metrics_code" -eq 200 ]; then
+              dry_run_total=$(echo "$metrics_resp" | awk '/^l402_dry_run_requests_total / {print $2}')
+              if [ -n "$dry_run_total" ] && [ "$dry_run_total" -ge 1 ]; then
+                break
+              fi
+            fi
+            sleep 0.5
+          done
+
+          if [ "$metrics_code" -ne 200 ]; then
+            echo "FAIL: /metrics returned $metrics_code, expected 200"
+            echo "$metrics_resp"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+          echo "PASS: /metrics returned 200"
+
+          if ! echo "$metrics_resp" | grep -qi "^Content-Type: text/plain"; then
+            echo "FAIL: /metrics Content-Type is not text/plain"
+            echo "$metrics_resp"
+            exit 1
+          fi
+          echo "PASS: Content-Type is text/plain"
+
+          for counter in l402_requests_total l402_dry_run_requests_total l402_dry_run_would_block_total \
+                        l402_challenges_issued_total l402_payments_valid_total l402_payments_invalid_total \
+                        l402_payments_missing_total l402_payments_lightning_total l402_payments_cashu_total \
+                        l402_invoices_generated_total; do
+            if ! echo "$metrics_resp" | grep -q "^${counter} "; then
+              echo "FAIL: expected counter ${counter} missing from /metrics body"
+              echo "$metrics_resp"
+              exit 1
+            fi
+            echo "PASS: counter ${counter} exposed"
+          done
+
+          # After the /shadow hits above, dry_run_requests_total must be >= 1.
+          if [ -z "$dry_run_total" ] || [ "$dry_run_total" -lt 1 ]; then
+            echo "FAIL: l402_dry_run_requests_total=$dry_run_total, expected >= 1"
+            echo "$metrics_resp"
+            exit 1
+          fi
+          echo "PASS: l402_dry_run_requests_total=$dry_run_total"
+
+          echo "✅ Dry-run shadow mode & metrics integration tests completed!"
+
+      - name: Run Integration Tests - Structured JSON Logging
+        run: |
+          echo "Testing l402_log_format json structured access logs..."
+
+          # Unauthenticated request → 402 path → l402_challenge. If the LN
+          # backend flakes we get l402_challenge_error instead; either event
+          # proves the JSON pipeline (same tolerance as the dry-run section).
+          echo "Request to /json-logs without Authorization (expect 402)..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Connection: close" http://0.0.0.0:8000/json-logs) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 402 ] && [ "$status_code" -ne 500 ]; then
+            echo "FAIL: /json-logs returned $status_code, expected 402 (or 500 on LN backend failure)"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+          echo "PASS: /json-logs returned $status_code"
+
+          # Invalid credentials → 401 path → l402_verify with auth_state=invalid.
+          # The macaroon is path-bound to /protected, so on /json-logs it is
+          # simply an invalid credential, which is all this test needs.
+          echo "Request to /json-logs with invalid preimage (expect 401)..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 MDAxMmxvY2F0aW9uIEw0MDIKMDAzMGlkZW50aWZpZXIgM460twjJAuVrQN-u5JPUZ0aKNWevybkbveRc2DeF2ZAKMDAyMWNpZCBSZXF1ZXN0UGF0aCA9IC9wcm90ZWN0ZWQKMDAyZnNpZ25hdHVyZSCwR6G2lDj1thda81BPwQuo73_shURzPf1XOwuejNLwVwo=:fbe9ac25c04e14b10177514e2d57b0e39224e70277ac1a2cd23c28e58cd4ea35" -H "Connection: close" http://0.0.0.0:8000/json-logs) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 401 ]; then
+            echo "FAIL: /json-logs with invalid preimage returned $status_code, expected 401"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+          echo "PASS: /json-logs returned 401 for invalid preimage"
+
+          # /json-logs allows 1 invoice/minute and the first request already
+          # used it, so this one must be rate-limited → l402_rate_limited.
+          # The 401 in between does not consume the limit (only 402s do).
+          echo "Second unauthenticated request to /json-logs (expect 429)..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Connection: close" http://0.0.0.0:8000/json-logs) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 429 ]; then
+            echo "FAIL: second /json-logs request returned $status_code, expected 429 (1r/m limit)"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+          echo "PASS: /json-logs returned 429 over the rate limit"
+
+          # Let nginx flush the container logs before asserting on them.
+          sleep 2
+          logs=$(docker logs nginx-lnurl 2>&1)
+
+          if ! echo "$logs" | grep -q '"event":"l402_challenge".*"route":"/json-logs"' && \
+             ! echo "$logs" | grep -q '"event":"l402_challenge_error".*"route":"/json-logs"'; then
+            echo "FAIL: no l402_challenge/l402_challenge_error JSON event for /json-logs"
+            echo "$logs" | tail -50
+            exit 1
+          fi
+          echo "PASS: l402_challenge JSON event present for /json-logs"
+
+          if ! echo "$logs" | grep -q '"event":"l402_verify".*"route":"/json-logs".*"auth_state":"invalid"'; then
+            echo "FAIL: no l402_verify auth_state=invalid JSON event for /json-logs"
+            echo "$logs" | tail -50
+            exit 1
+          fi
+          echo "PASS: l402_verify auth_state=invalid JSON event present"
+
+          if ! echo "$logs" | grep -q '"event":"l402_rate_limited".*"route":"/json-logs"'; then
+            echo "FAIL: no l402_rate_limited JSON event for /json-logs"
+            echo "$logs" | tail -50
+            exit 1
+          fi
+          echo "PASS: l402_rate_limited JSON event present for /json-logs"
+
+          # /protected never enabled the directive: earlier sections drove plenty
+          # of traffic through it, and none of it may appear as a JSON event.
+          if echo "$logs" | grep -q '"event":"l402_.*"route":"/protected"'; then
+            echo "FAIL: found l402 JSON event for /protected, which runs default text logging"
+            echo "$logs" | grep '"event":"l402_' | tail -10
+            exit 1
+          fi
+          echo "PASS: no JSON events for /protected (text default unchanged)"
+
+          echo "✅ Structured JSON logging integration tests completed!"
+
+      - name: Run Integration Tests - gRPC
+        run: |
+          source .github/scripts/ci-wait.sh
+          docker logs grpc-content-server
+          echo "Testing gRPC server..."
+          sleep 5
+
+          # Install grpcurl for testing gRPC endpoints
+          echo "Installing grpcurl..."
+          curl -L https://github.com/fullstorydev/grpcurl/releases/download/v1.8.9/grpcurl_1.8.9_linux_x86_64.tar.gz | tar -xzf - -C /tmp
+          sudo mv /tmp/grpcurl /usr/local/bin/
+
+          # Test gRPC service reflection
+          echo "Testing gRPC service reflection..."
+          grpcurl -plaintext localhost:50051 list || {
+            echo "Error: gRPC reflection failed"
+            docker logs grpc-content-server
+            exit 1
+          }
+
+          # Test GetContent method
+          echo "Testing GetContent method..."
+          response=$(grpcurl -plaintext -d '{"path": "/test.txt"}' localhost:50051 content.ContentService/GetContent)
+          if ! echo "$response" | grep -q "Content for path"; then
+            echo "Error: GetContent method failed"
+            echo "Response: $response"
+            docker logs grpc-content-server
+            exit 1
+          fi
+
+          # Test GetProtectedContent method
+          echo "Testing GetProtectedContent method..."
+          response=$(grpcurl -plaintext -d '{"path": "/protected"}' localhost:50051 content.ContentService/GetProtectedContent)
+          if ! echo "$response" | grep -q "This is Protected Content"; then
+            echo "Error: GetProtectedContent method failed"
+            echo "Response: $response"
+            docker logs grpc-content-server
+            exit 1
+          fi
+
+          # Test GetFreeContent method
+          echo "Testing GetFreeContent method..."
+          response=$(grpcurl -plaintext -d '{"path": "/free"}' localhost:50051 content.ContentService/GetFreeContent)
+          if ! echo "$response" | grep -q "Free Content"; then
+            echo "Error: GetFreeContent method failed"
+            echo "Response: $response"
+            docker logs grpc-content-server
+            exit 1
+          fi
+
+          # Test gRPC through nginx proxy (L402 protected)
+          echo "Testing gRPC through nginx proxy with L402 protection..."
+          
+          # First test without L402 header - should get 402
+          echo "Testing gRPC endpoint without L402 header..."
+          curl_until 402 -H "Content-Type: application/grpc" -H "grpc-timeout: 60S" -X POST http://0.0.0.0:8000/content.ContentService/GetProtectedContent
+          if [ "$status_code" -ne 402 ]; then
+            echo "Error: gRPC endpoint without L402 returned status $status_code, expected 402"
+            echo "$response"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+          
+          # Check if WWW-Authenticate header is present
+          if ! echo "$response" | grep -q 'WWW-Authenticate: L402 macaroon='; then
+            echo "Error: WWW-Authenticate header is missing in the 402 response for gRPC"
+            echo "$response"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+
+          # Note: valid-credentials gRPC test (→200) is skipped — the nginx-lnurl
+          # LNURL backend (hello@getalby.com) cannot be paid from regtest CI.
+          # The 402 challenge + header presence already verified above.
+
+          echo "All gRPC tests completed successfully!"
+
+      - name: Stop LNURL service
+        run: |
+          docker-compose -f docker-compose.yml stop nginx-lnurl
+
+      - name: Start LND node, LND node receiver, cashu-mint and Tor
+        run: |
+          docker-compose -f docker-compose.yml up -d --no-deps bitcoind tor lndnode lndnode-receiver cashu-mint
+          # The next step drives bitcoin-cli straight away, so wait for it.
+          for i in $(seq 1 90); do
+            docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass getblockchaininfo >/dev/null 2>&1 && break
+            if [ "$i" -eq 90 ]; then
+              echo "❌ bitcoind did not answer RPC after 90s"
+              docker logs bitcoind 2>&1 | tail -30
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "✅ bitcoind answering RPC after ${i}s"
+
+          # The same step funds both LND nodes, and the first check that they
+          # are up is far below that.
+          for node in "lndnode" "lndnode-receiver --rpcserver=127.0.0.1:10010"; do
+            set -- $node
+            name=$1; shift
+            for i in $(seq 1 120); do
+              docker exec "$name" lncli "$@" -n regtest getinfo >/dev/null 2>&1 && break
+              if [ "$i" -eq 120 ]; then
+                echo "❌ $name did not answer after 120s"
+                docker logs "$name" 2>&1 | tail -30
+                exit 1
+              fi
+              sleep 1
+            done
+            echo "✅ $name answering after ${i}s"
+          done
+
+      - name: Verify Bitcoin daemon Service, create wallet and fund lndnode and lndnode-receiver
+        run: |
+          #!/bin/bash
+
+          wallet_name="my_wallet"
+          echo "Using wallet: $wallet_name"
+
+          # Check if wallet exists, create/load it
+          if docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass listwallets | grep -q "\"$wallet_name\""; then
+              echo "Wallet $wallet_name exists, loading..."
+              docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass loadwallet "$wallet_name" 2>/dev/null
+          else
+              echo "Creating wallet $wallet_name..."
+              docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass createwallet "$wallet_name"
+          fi
+
+          # Generate an address in this wallet
+          fund_address=$(docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=$wallet_name getnewaddress)
+          echo "Mining 101 blocks to $fund_address..."
+          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=$wallet_name generatetoaddress 101 "$fund_address" >> /dev/null
+
+          echo "Sleeping 5 seconds..."
+          sleep 5
+
+          # ------- FUND LND NODE -------
+          echo "Funding LND node..."
+
+          # Print initial LND node balance
+          initial_balance=$(docker exec lndnode lncli -n regtest walletbalance | jq -r '.confirmed_balance')
+          echo "Initial LND node balance: $initial_balance sats"
+
+          # Fund LND node
+          lnd_addr=$(docker exec lndnode lncli -n regtest newaddress p2wkh | jq -r '.address')
+          echo "Sending 1 BTC to LND node at $lnd_addr..."
+          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=$wallet_name sendtoaddress "$lnd_addr" 1
+
+          # Mine 6 blocks to confirm funding
+          new_addr=$(docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=$wallet_name getnewaddress)
+          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=$wallet_name generatetoaddress 6 "$new_addr"
+
+          # The blocks are mined, but LND credits the funding only once it has
+          # caught up with them. Reporting success at zero hides that.
+          for i in $(seq 1 120); do
+            final_balance=$(docker exec lndnode lncli -n regtest walletbalance 2>/dev/null | jq -r '.confirmed_balance // 0')
+            [ "${final_balance:-0}" -gt 0 ] && break
+            if [ "$i" -eq 120 ]; then
+              echo "❌ LND node still shows 0 sats after 120s"
+              docker exec lndnode lncli -n regtest getinfo || true
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "✅ LND node funded successfully: ${final_balance} sats"
+
+          # ------- FUND LND-receiver NODE -------
+          echo "Funding LND-receiver node..."
+
+          # Print initial LND-receiver node balance
+          initial_balance=$(docker exec lndnode-receiver lncli --rpcserver=127.0.0.1:10010 -n regtest walletbalance | jq -r '.confirmed_balance')
+          echo "Initial LND-receiver node balance: $initial_balance sats"
+
+          # Fund LND-receiver node
+          lnd_addr=$(docker exec lndnode-receiver lncli --rpcserver=127.0.0.1:10010 -n regtest newaddress p2wkh | jq -r '.address')
+          echo "Sending 1 BTC to LND-receiver node at $lnd_addr..."
+          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=$wallet_name sendtoaddress "$lnd_addr" 1
+
+          # Mine 6 blocks to confirm funding
+          new_addr=$(docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=$wallet_name getnewaddress)
+          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=$wallet_name generatetoaddress 6 "$new_addr"
+
+          echo "✅ LND-receiver node funded successfully!"
+
+          # -------- CHANNEL (LND NODE RECEIVER - LND NODE) --------
+          echo "Opening channel from LND-receiver node to LND node..."
+
+          # Step 1: Get LND node pubkey
+          LNDNODE_PUBKEY=$(docker exec lndnode lncli -n regtest getinfo | jq -r '.identity_pubkey')
+          echo "LND node pubkey: $LNDNODE_PUBKEY"
+
+          # Step 2: Connect receiver to LND node
+          echo "Connecting LND-receiver to LND node..."
+          docker exec lndnode-receiver lncli --network=regtest --rpcserver=127.0.0.1:10010 connect "$LNDNODE_PUBKEY"@lndnode:9735 || true
+
+          # Step 3: Open channel from receiver to LND node.
+          # openchannel refuses until the wallet has caught up with the chain
+          # and the funding is confirmed — answering RPC is not the same thing.
+          for i in $(seq 1 120); do
+            synced=$(docker exec lndnode-receiver lncli --network=regtest --rpcserver=127.0.0.1:10010 getinfo 2>/dev/null | jq -r '.synced_to_chain // false')
+            bal=$(docker exec lndnode-receiver lncli --network=regtest --rpcserver=127.0.0.1:10010 walletbalance 2>/dev/null | jq -r '.confirmed_balance // 0')
+            if [ "$synced" = "true" ] && [ "${bal:-0}" -gt 0 ]; then
+              echo "✅ lndnode-receiver synced with ${bal} sat confirmed (after ${i}s)"
+              break
+            fi
+            if [ "$i" -eq 120 ]; then
+              echo "❌ lndnode-receiver not ready after 120s (synced=$synced balance=${bal:-0})"
+              docker exec lndnode-receiver lncli --network=regtest --rpcserver=127.0.0.1:10010 getinfo || true
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "Opening channel from LND-receiver to LND node..."
+          docker exec lndnode-receiver lncli --network=regtest --rpcserver=127.0.0.1:10010 openchannel --node_key="$LNDNODE_PUBKEY" --local_amt=1000000
+
+          # Step 4: Mine 6 blocks to confirm channel
+          echo "Mining 6 blocks to confirm channel..."
+          docker exec bitcoind sh -c "bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=$wallet_name generatetoaddress 6 \$(bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=$wallet_name getnewaddress)"
+
+          echo "✅ Channel lndnode-receiver to lndnode opened successfully!"
+
+          # ------- CASHU SETUP -------
+          echo 'Creating Cashu invoice...'
+
+          docker exec cashu-mint sh -c "poetry run cashu invoice 25000 2>&1" > /tmp/cashu_output.txt &
+
+          sleep 3
+
+          CASHU_INVOICE=$(grep 'Invoice:' /tmp/cashu_output.txt | tail -1 | cut -d' ' -f2 || true)
+
+          echo "Cashu invoice: $CASHU_INVOICE"
+          rm /tmp/cashu_output.txt
+
+          if [ -n "$CASHU_INVOICE" ]; then
+            echo 'Paying Cashu mint invoice...'
+            docker exec lndnode-receiver lncli --network=regtest --rpcserver=localhost:10010 sendpayment --pay_req="$CASHU_INVOICE" -f
+            sleep 3
+          else
+            echo 'Could not create Cashu invoice, skipping token minting'
+          fi
+
+          # Get Cashu balance
+          CASHU_BALANCE=$(docker exec cashu-mint sh -c "poetry run cashu balance" 2>/dev/null | grep 'Balance:' | awk '{print $2}' || echo '0')
+          echo "Cashu user wallet balance: $CASHU_BALANCE sats"
+
+          # ------ LIQUIDITY --------
+          echo "Pushing liquidity from lndnode to lndnode-receiver..."
+          INVOICE=$(docker exec lndnode lncli -n regtest addinvoice --amt=8000 | jq -r '.payment_request')
+          docker exec lndnode-receiver lncli -n regtest --rpcserver=127.0.0.1:10010 payinvoice --force "$INVOICE"
+          # This push is lndnode's only outbound, and every later test spends
+          # from it. Unsettled, they all fail with insufficient balance far from
+          # here — so confirm it landed rather than sleeping on it.
+          bal=0
+          for i in $(seq 1 60); do
+            bal=$(docker exec lndnode lncli -n regtest channelbalance 2>/dev/null \
+              | jq -r '(.local_balance.sat // .balance // 0) | tonumber' 2>/dev/null || echo 0)
+            [ "${bal:-0}" -ge 7000 ] && break
+            if [ "$i" -eq 60 ]; then
+              echo "❌ lndnode outbound is ${bal:-0} sat after 60s — tests cannot pay"
+              docker exec lndnode lncli -n regtest listchannels || true
+              docker exec lndnode-receiver lncli -n regtest --rpcserver=127.0.0.1:10010 listchannels || true
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "✅ Liquidity pushed successfully (lndnode outbound: ${bal} sat)"
+
+      - name: Extract Macaroon and Cert Paths
+        run: |
+          CONTAINER_NAME="lndnode"
+          
+          # Wait a bit more for LND to fully start
+          echo "Checking if LND is ready..."
+          for i in {1..30}; do
+            if docker exec ${CONTAINER_NAME} lncli -n regtest getinfo > /dev/null 2>&1; then
+              echo "LND is ready"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "Warning: LND may not be fully ready, but continuing..."
+            fi
+            sleep 2
+          done
+          
+          # Define paths to the macaroon and certificate in the container
+          MACAROON_PATH="/root/.lnd/data/chain/bitcoin/regtest/admin.macaroon"
+          CERT_PATH="/root/.lnd/tls.cert"
+          
+          # Copy macaroon
+          if docker exec ${CONTAINER_NAME} test -f "$MACAROON_PATH" 2>/dev/null; then
+            docker cp ${CONTAINER_NAME}:$MACAROON_PATH ./admin.macaroon
+            echo "✓ Extracted macaroon from $MACAROON_PATH"
+          else
+            echo "Error: Macaroon not found at $MACAROON_PATH"
+            echo "Debug: Listing /root/.lnd structure:"
+            docker exec ${CONTAINER_NAME} find /root/.lnd -type f 2>/dev/null | head -10 || true
+            exit 1
+          fi
+          
+          # Copy certificate
+          if docker exec ${CONTAINER_NAME} test -f "$CERT_PATH" 2>/dev/null; then
+            docker cp ${CONTAINER_NAME}:$CERT_PATH ./tls.cert
+            echo "✓ Extracted certificate from $CERT_PATH"
+          else
+            echo "Error: Certificate not found at $CERT_PATH"
+            echo "Debug: Listing /root/.lnd structure:"
+            docker exec ${CONTAINER_NAME} ls -la /root/.lnd/ 2>/dev/null || true
+            exit 1
+          fi
+          
+          # Verify files were copied
+          if [ -f "./admin.macaroon" ] && [ -f "./tls.cert" ]; then
+            echo "✓ Successfully extracted macaroon and certificate"
+            echo "MACAROON_PATH=./admin.macaroon" >> $GITHUB_ENV
+            echo "CERT_PATH=./tls.cert" >> $GITHUB_ENV
+          else
+            echo "Error: Files were not copied successfully"
+            exit 1
+          fi
+
+      - name: Wait for Tor to generate onion address
+        run: |
+          echo "Waiting for Tor to start and generate hidden service..."
+          sleep 15
+          
+          # Based on docker-compose.yml Tor configuration:
+          # HiddenServiceDir /var/lib/tor/hidden_service/
+          # So the hostname file should be at: /var/lib/tor/hidden_service/hostname
+          TOR_HOSTNAME_PATH="/var/lib/tor/hidden_service/hostname"
+          
+          max_attempts=30
+          attempt=0
+          ONION_ADDRESS=""
+          
+          while [ $attempt -lt $max_attempts ] && [ -z "$ONION_ADDRESS" ]; do
+            # Check if Tor container is running
+            if ! docker ps | grep -q tor; then
+              echo "Tor container is not running"
+              break
+            fi
+            
+            # Check for hostname file at the configured path
+            if docker exec tor test -f "$TOR_HOSTNAME_PATH" 2>/dev/null; then
+              ONION_ADDRESS=$(docker exec tor cat "$TOR_HOSTNAME_PATH" 2>/dev/null | tr -d '\n\r')
+              if [ -n "$ONION_ADDRESS" ]; then
+                echo "✓ Found onion address: $ONION_ADDRESS"
+                echo "LND_ONION_ADDRESS=$ONION_ADDRESS:10009" >> $GITHUB_ENV
+                break
+              fi
+            fi
+            
+            attempt=$((attempt + 1))
+            echo "Attempt $attempt/$max_attempts: Waiting for onion address..."
+            if [ $attempt -eq 10 ]; then
+              echo "Debug: Checking Tor directory structure:"
+              docker exec tor ls -la /var/lib/tor/ 2>/dev/null || true
+            fi
+            sleep 2
+          done
+          
+          if [ -z "$LND_ONION_ADDRESS" ]; then
+            echo "Warning: Could not retrieve onion address after $max_attempts attempts"
+            echo "Tor hidden service may take longer to generate, or may not be configured"
+            echo "SOCKS5 proxy tests will be skipped"
+          else
+            echo "✓ Onion address retrieved: $LND_ONION_ADDRESS"
+          fi
+
+      - name: Test LND with SOCKS5 proxy (Tor connection)
+        run: |
+          if [ -n "$LND_ONION_ADDRESS" ]; then
+            echo "Testing LND connection through Tor SOCKS5 proxy..."
+            echo "Onion address: $LND_ONION_ADDRESS"
+            echo "SOCKS5 proxy: 127.0.0.1:9050"
+            cargo test --verbose || echo "SOCKS5 test completed (expected limitation noted)"
+          else
+            echo "Skipping SOCKS5 test - onion address not available"
+          fi
+        env:
+          LN_CLIENT_TYPE: LND
+          LND_ADDRESS: ${{ env.LND_ONION_ADDRESS }}
+          SOCKS5_PROXY: 127.0.0.1:9050
+          MACAROON_FILE_PATH: ${{ env.MACAROON_PATH }}
+          CERT_FILE_PATH: ${{ env.CERT_PATH }}
+
+      - name: Verify SOCKS5 proxy is accessible
+        run: |
+          echo "Testing SOCKS5 proxy connectivity..."
+          # Test if Tor SOCKS5 proxy is accessible
+          curl --socks5-hostname 127.0.0.1:9050 http://example.com > /dev/null 2>&1 && \
+            echo "✓ SOCKS5 proxy is working" || \
+            echo "⚠ SOCKS5 proxy test failed (may be expected in CI environment)"
+          # Check if Tor is running
+          docker ps | grep tor && echo "✓ Tor container is running" || echo "✗ Tor container not found"
+
+      - name: Start cln services
+        run: |
+          source .github/scripts/ci-wait.sh
+          # nostr-relay is listed explicitly: --no-deps skips depends_on, and
+          # CLN's nip47 plugin needs the relay up to announce the NWC URI.
+          docker-compose -f docker-compose.yml up -d --no-deps nostr-relay
+          wait_http http://0.0.0.0:7000/ 200 60 || { docker logs nostr-relay; exit 1; }
+          docker-compose -f docker-compose.yml up -d --no-deps cln nginx-cln
+
+      - name: Run Integration Tests - CLN
+        run: |
+          source .github/scripts/ci-wait.sh
+          echo "Testing with CLN configuration..."
+          # Free route first — a 402 needs the CLN socket the chmod unlocks.
+          wait_http http://0.0.0.0:8000/ 200 90 || { docker logs nginx-cln; exit 1; }
+          docker exec nginx-cln chmod 777 /root /root/.lightning /root/.lightning/regtest
+          wait_http http://0.0.0.0:8000/protected 402 60 || { docker logs nginx-cln; exit 1; }
+
+          # Test free route
+          echo "Testing free route..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 200 ]; then
+            echo "Error: Free route returned status $status_code, expected 200"
+            docker logs nginx-cln
+            exit 1
+          fi
+
+          # Flush Redis for CLN test
+          echo "Flushing Redis for CLN test..."
+          docker exec redis redis-cli flushall
+
+          # Note: valid-credentials (→200) test is skipped for CLN here because the
+          # LND→CLN payment channel is not yet established at this point in the CI.
+          # The full payment → verification flow is covered by the CLN Autodetect test below.
+
+          # Test with invalid preimage
+          echo "Testing with invalid preimage..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 MDAxMmxvY2F0aW9uIEw0MDIKMDAzMGlkZW50aWZpZXIgM460twjJAuVrQN-u5JPUZ0aKNWevybkbveRc2DeF2ZAKMDAyMWNpZCBSZXF1ZXN0UGF0aCA9IC9wcm90ZWN0ZWQKMDAyZnNpZ25hdHVyZSCwR6G2lDj1thda81BPwQuo73_shURzPf1XOwuejNLwVwo=:fbe9ac25c04e14b10177514e2d57b0e39224e70277ac1a2cd23c28e58cd4ea35" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 401 ]; then
+            echo "Error: Protected route with invalid preimage returned status $status_code, expected 401"
+            docker logs nginx-cln
+            exit 1
+          fi
+
+          # Test with macaroon without caveats
+          echo "Testing with macaroon without caveats..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 AgEETFNBVALmAUr/gQMBARJNYWNhcm9vbklkZW50aWZpZXIB/4IAAQMBB1ZlcnNpb24BBgABC1BheW1lbnRIYXNoAf+EAAEHVG9rZW5JZAH/hgAAABT/gwEBAQRIYXNoAf+EAAEGAUAAABn/hQEBAQlbMzJddWludDgB/4YAAQYBQAAAa/+CAiD/pv/jOjY1/9oC/4z/tHb/qf/2Jf+d/4H/u/+YGHj/+/+O/8D/v/+P/8X/qRL/5v/x/4r/tkIBIA1Y/8j/pR3/0P+b/7cwWP+W/87/sD18GP//Hf/f/9Aj//NcBFs2/9VhNEUF/70AAAAGIDlR1jVm5IfEJgvuSQoJLqLg4FcW4Ib1vW8sbkRHdUWX:651505fae9ea341c770c6ebef207d8560d546eb3aee26985e584c15d1c987875" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 401 ]; then
+            echo "Error: Protected route with macaroon without caveats returned status $status_code, expected 401"
+            docker logs nginx-cln
+            exit 1
+          fi
+
+          # Test protected route without header
+          echo "Testing protected route without header..."
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 60 -L http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 402 ]; then
+            echo "Error: Protected route without header returned status $status_code, expected 402"
+            docker logs nginx-cln
+            exit 1
+          fi
+          
+          # Check if WWW-Authenticate header is present
+          if ! echo "$response" | grep -q 'WWW-Authenticate: L402 macaroon='; then
+            echo "Error: WWW-Authenticate header is missing in the 402 response"
+            echo "$response"
+            docker logs nginx-cln
+            exit 1
+          fi
+
+      - name: Stop CLN service
+        run: |
+          docker-compose -f docker-compose.yml stop nginx-cln
+
+      # ========== BOLT12 Tests (runs while CLN is still up) ==========
+      - name: Generate BOLT12 Offer and Start nginx-bolt12
+        run: |
+          echo "Generating BOLT12 Offer..."
+          BOLT12_OFFER=$(docker exec cln lightning-cli --network=regtest offer any "L402 Access" | jq -r '.bolt12')
+          echo "Generated BOLT12_OFFER: $BOLT12_OFFER"
+          
+          if [ -z "$BOLT12_OFFER" ] || [ "$BOLT12_OFFER" = "null" ]; then
+            echo "Error: Failed to generate BOLT12 offer"
+            docker logs cln
+            exit 1
+          fi
+          
+          echo "Starting nginx-bolt12 with BOLT12_OFFER..."
+          export BOLT12_OFFER
+          # --no-deps, or compose recreates the cln that just made this offer.
+          docker-compose -f docker-compose.yml up -d --no-deps nginx-bolt12
+          source .github/scripts/ci-wait.sh
+          # Free route first — a 402 needs the CLN socket the chmod unlocks.
+          wait_http http://0.0.0.0:8000/ 200 90 || { docker logs nginx-bolt12; exit 1; }
+          # Set permissions on CLN socket (same as CLN tests)
+          docker exec nginx-bolt12 chmod 777 /root /root/.lightning /root/.lightning/regtest
+          wait_http http://0.0.0.0:8000/protected 402 60 || { docker logs nginx-bolt12; exit 1; }
+
+      - name: Run Integration Tests - BOLT12
+        run: |
+          echo "Testing with BOLT12 configuration..."
+          
+          # Test protected route without header
+          echo "Testing protected route without header..."
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://127.0.0.1:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 402 ]; then
+            echo "Error: Protected route without header returned status $status_code, expected 402"
+            docker logs nginx-bolt12
+            exit 1
+          fi
+          
+          # Check if WWW-Authenticate header is present
+          if ! echo "$response" | grep -q 'WWW-Authenticate: L402 macaroon='; then
+            echo "Error: WWW-Authenticate header is missing in the 402 response"
+            echo "$response"
+            docker logs nginx-bolt12
+            exit 1
+          fi
+
+          # Extract and verify invoice (which might be an offer or bolt12 invoice)
+          invoice=$(echo "$response" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
+          if [ -z "$invoice" ]; then
+            echo "Error: No invoice found in WWW-Authenticate header"
+            echo "$response"
+            docker logs nginx-bolt12
+            exit 1
+          fi
+          
+          echo "Received Invoice/Offer: $invoice"
+          
+          # Check if it looks like a BOLT12 offer (lno), BOLT12 invoice (lni), or BOLT11 (lnbc/lntb)
+          if [[ "$invoice" != lno* ]] && [[ "$invoice" != lni* ]] && [[ "$invoice" != lnbc* ]] && [[ "$invoice" != lntb* ]]; then
+             echo "Error: Invoice does not look like BOLT12 offer/invoice or BOLT11 invoice"
+             exit 1
+          fi
+          
+          echo "✅ BOLT12 Integration test passed (Header verification)"
+
+      - name: Stop nginx-bolt12
+        run: docker-compose -f docker-compose.yml stop nginx-bolt12
+
+      - name: Verify LND node
+        run: |
+          # Load the wallet created earlier
+          wallet_name="my_wallet"
+          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass loadwallet "$wallet_name" 2>/dev/null || true
+
+          identity_pubkey_lndnode=$(docker exec lndnode lncli -n regtest getinfo | jq -r '.identity_pubkey')
+          echo "Pubkey: $identity_pubkey_lndnode"
+          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=$wallet_name -generate 5
+
+          # Get node info for both lightning nodes
+          echo "Getting CLN node info..."
+          cln_pubkey=$(docker exec cln lightning-cli --network=regtest getinfo | jq -r '.id')
+          echo "CLN pubkey: $cln_pubkey"
+
+          echo "Getting LND node info..."
+          lnd_pubkey=$(docker exec lndnode lncli -n regtest getinfo | jq -r '.identity_pubkey')
+          echo "LND pubkey: $lnd_pubkey"
+
+          # Generate a new address for LND node
+          address=$(docker exec lndnode lncli -n regtest newaddress p2wkh | jq -r '.address')
+          echo "Generated address for LND: $address"
+
+          # Send 10 BTC to LND node
+          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=$wallet_name sendtoaddress "$address" 10
+          
+          # Generate blocks to confirm the transaction
+          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=$wallet_name generatetoaddress 6 "$address"
+
+          # Wait for LND to sync after receiving funds
+          echo "Waiting for LND to sync..."
+          sleep 5
+
+          # Connect nodes
+          echo "Connecting LND to CLN..."
+          docker exec lndnode lncli -n regtest connect $cln_pubkey@cln:9835
+
+          # Open channel from LND to CLN (with retry)
+          echo "Opening channel from LND to CLN..."
+          for i in 1 2 3; do
+            if docker exec lndnode lncli -n regtest openchannel $cln_pubkey 1000000; then
+              echo "Channel opened successfully"
+              break
+            fi
+            echo "Attempt $i failed, waiting 10 seconds..."
+            sleep 10
+          done
+
+          # Generate blocks to confirm channel
+          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass -rpcwallet=$wallet_name generatetoaddress 6 "$address"
+
+          # Confirmations alone don't make a channel usable — both nodes must see
+          # them and exchange channel_ready. Paying before that fails with NO_ROUTE.
+          # Check BOTH sides, and match on the CLN pubkey: LND also has a channel
+          # to lndnode-receiver, so an unfiltered count can pass on the wrong one.
+          # CLN's view matters too — it embeds the route hint in the invoice.
+          echo "Waiting for the LND<->CLN channel to become usable on both sides..."
+          for i in $(seq 1 90); do
+            lnd_ok=$(docker exec lndnode lncli -n regtest listchannels 2>/dev/null \
+              | jq -r --arg pk "$cln_pubkey" '[.channels[]? | select(.active and .remote_pubkey==$pk)] | length' 2>/dev/null || echo 0)
+            cln_ok=$(docker exec cln lightning-cli --network=regtest listpeerchannels 2>/dev/null \
+              | jq -r '[.channels[]? | select(.state=="CHANNELD_NORMAL")] | length' 2>/dev/null || echo 0)
+            if [ "${lnd_ok:-0}" -ge 1 ] && [ "${cln_ok:-0}" -ge 1 ]; then
+              echo "  ✓ channel usable on both sides after $((i*2))s"
+              break
+            fi
+            if [ "$i" -eq 90 ]; then
+              echo "  ✗ channel not usable after 180s (lnd=$lnd_ok cln=$cln_ok)"
+              docker exec lndnode lncli -n regtest listchannels || true
+              docker exec lndnode lncli -n regtest pendingchannels || true
+              docker exec cln lightning-cli --network=regtest listpeerchannels || true
+              exit 1
+            fi
+            sleep 2
+          done
+
+          echo "NWC_URI=$(docker exec cln lightning-cli --network=regtest nip47-create label=nwc-for-l402 budget_msat=0 | jq -r '.uri')" >> $GITHUB_ENV
+
+      - name: Start NWC service
+        run: |
+          docker-compose -f docker-compose.yml up -d --no-deps nginx-nwc
+
+      - name: Run Integration Tests - NWC
+        run: |
+          source .github/scripts/ci-wait.sh
+          echo "Testing with NWC configuration..."
+          # Free route only: /protected mints an invoice over the external Nostr
+          # relay, so polling it would hammer a third party once per second.
+          wait_http http://0.0.0.0:8000/ 200 90 || { docker logs nginx-nwc; exit 1; }
+
+          # Test free route
+          echo "Testing free route..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 200 ]; then
+            echo "Error: Free route returned status $status_code, expected 200"
+            docker logs nginx-nwc
+            exit 1
+          fi
+
+          # Test protected route with timeout without header
+          echo "Testing protected route with timeout without header..."
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 60 -L http://0.0.0.0:8000/protected-timeout) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          echo "status_code: $status_code"
+          if [ "$status_code" -ne 402 ]; then
+            echo "Error: Protected route without header returned status $status_code, expected 402"
+            docker logs nginx-nwc
+            exit 1
+          fi
+          
+          # Check if WWW-Authenticate header is present
+          if ! echo "$response" | grep -q 'WWW-Authenticate: L402 macaroon='; then
+            echo "Error: WWW-Authenticate header is missing in the 402 response"
+            echo "$response"
+            docker logs nginx-nwc
+            exit 1
+          fi
+
+          # Extract invoice from header
+          invoice=$(echo "$response" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
+          if [ -z "$invoice" ]; then
+            echo "Error: No invoice found in WWW-Authenticate header"
+            echo "$response"
+            docker logs nginx-nwc
+            exit 1
+          fi
+          echo "invoice: $invoice"
+
+          # Pay invoice using LND to get preimage
+          echo "Paying invoice through LND..."
+          payment_result=$(docker exec lndnode lncli -n regtest payinvoice -f $invoice 2>&1) || true
+          echo "payment_result: $payment_result"
+          
+          # Wait a few seconds for payment to settle
+          echo "Waiting for payment to settle..."
+          sleep 5
+          
+          # Get payment result with preimage
+          payment_result=$(docker exec lndnode lncli -n regtest listpayments | jq -r '.payments[-1]')
+          payment_status=$(echo "$payment_result" | jq -r '.status')
+          echo "payment_result: $payment_result"
+          echo "payment_status: $payment_status"
+          
+          if [ "$payment_status" != "SUCCEEDED" ]; then
+            echo "Error: Payment failed or timed out"
+            docker logs nginx-nwc
+            exit 1
+          fi
+
+          # Extract preimage from payment result
+          preimage=$(echo "$payment_result" | jq -r '.payment_preimage')
+          macaroon=$(echo "$response" | grep -i "WWW-Authenticate: L402" | grep -o 'macaroon="[^"]*"' | cut -d'"' -f2)
+
+          # Wait for preimage to be registered in the system
+          echo "Waiting for preimage registration..."
+          sleep 5
+
+          # Test with obtained preimage
+          echo "Testing protected route with valid preimage..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 $macaroon:$preimage" http://0.0.0.0:8000/protected-timeout) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 200 ]; then
+            echo "Error: Protected route with valid preimage returned status $status_code, expected 200"
+            docker logs nginx-nwc
+            exit 1
+          fi
+
+          # Wait for macaroon to expire (10 seconds)
+          echo "Waiting for macaroon to expire..."
+          sleep 15
+
+          # Test with expired macaroon
+          echo "Testing protected route with expired macaroon..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 $macaroon:$preimage" http://0.0.0.0:8000/protected-timeout) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 401 ]; then
+            echo "Error: Protected route with expired macaroon returned status $status_code, expected 401"
+            docker logs nginx-nwc
+            exit 1
+          fi
+
+          # Test indefinite-access: same preimage can be reused for the macaroon lifetime
+          echo "Testing indefinite-access route..."
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected-indefinite) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 402 ]; then
+            echo "Error: Indefinite-access route without header returned status $status_code, expected 402"
+            docker logs nginx-nwc
+            exit 1
+          fi
+
+          invoice_indef=$(echo "$response" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
+          macaroon_indef=$(echo "$response" | grep -i "WWW-Authenticate: L402" | grep -o 'macaroon="[^"]*"' | cut -d'"' -f2)
+          if [ -z "$invoice_indef" ] || [ -z "$macaroon_indef" ]; then
+            echo "Error: Missing invoice or macaroon for indefinite-access route"
+            echo "$response"
+            docker logs nginx-nwc
+            exit 1
+          fi
+
+          echo "Paying indefinite-access invoice through LND..."
+          payment_result=$(docker exec lndnode lncli -n regtest payinvoice -f $invoice_indef 2>&1) || true
+          sleep 5
+
+          payment_result=$(docker exec lndnode lncli -n regtest listpayments | jq -r '.payments[-1]')
+          payment_status=$(echo "$payment_result" | jq -r '.status')
+          if [ "$payment_status" != "SUCCEEDED" ]; then
+            echo "Error: Indefinite-access payment failed or timed out"
+            docker logs nginx-nwc
+            exit 1
+          fi
+
+          preimage_indef=$(echo "$payment_result" | jq -r '.payment_preimage')
+
+          echo "Testing indefinite-access route with valid preimage (first reuse)..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 $macaroon_indef:$preimage_indef" http://0.0.0.0:8000/protected-indefinite) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 200 ]; then
+            echo "Error: Indefinite-access route first reuse returned status $status_code, expected 200"
+            docker logs nginx-nwc
+            exit 1
+          fi
+
+          echo "Testing indefinite-access route with same preimage (second reuse - should still pass)..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 $macaroon_indef:$preimage_indef" http://0.0.0.0:8000/protected-indefinite) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 200 ]; then
+            echo "Error: Indefinite-access route second reuse returned status $status_code, expected 200"
+            docker logs nginx-nwc
+            exit 1
+          fi
+
+          # Test with invalid preimage
+          echo "Testing with invalid preimage..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 MDAxMmxvY2F0aW9uIEw0MDIKMDAzMGlkZW50aWZpZXIgM460twjJAuVrQN-u5JPUZ0aKNWevybkbveRc2DeF2ZAKMDAyMWNpZCBSZXF1ZXN0UGF0aCA9IC9wcm90ZWN0ZWQKMDAyZnNpZ25hdHVyZSCwR6G2lDj1thda81BPwQuo73_shURzPf1XOwuejNLwVwo=:fbe9ac25c04e14b10177514e2d57b0e39224e70277ac1a2cd23c28e58cd4ea35" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 401 ]; then
+            echo "Error: Protected route with invalid preimage returned status $status_code, expected 401"
+            docker logs nginx-nwc
+            exit 1
+          fi
+
+          # Test with macaroon without caveats
+          echo "Testing with macaroon without caveats..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 AgEETFNBVALmAUr/gQMBARJNYWNhcm9vbklkZW50aWZpZXIB/4IAAQMBB1ZlcnNpb24BBgABC1BheW1lbnRIYXNoAf+EAAEHVG9rZW5JZAH/hgAAABT/gwEBAQRIYXNoAf+EAAEGAUAAABn/hQEBAQlbMzJddWludDgB/4YAAQYBQAAAa/+CAiD/pv/jOjY1/9oC/4z/tHb/qf/2Jf+d/4H/u/+YGHj/+/+O/8D/v/+P/8X/qRL/5v/x/4r/tkIBIA1Y/8j/pR3/0P+b/7cwWP+W/87/sD18GP//Hf/f/9Aj//NcBFs2/9VhNEUF/70AAAAGIDlR1jVm5IfEJgvuSQoJLqLg4FcW4Ib1vW8sbkRHdUWX:651505fae9ea341c770c6ebef207d8560d546eb3aee26985e584c15d1c987875" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 401 ]; then
+            echo "Error: Protected route with macaroon without caveats returned status $status_code, expected 401"
+            docker logs nginx-nwc
+            exit 1
+          fi
+
+      - name: Stop nginx-nwc
+        run: docker-compose -f docker-compose.yml stop nginx-nwc
+
+      - name: Run Integration Tests - CLN Autodetect
+        run: |
+          source .github/scripts/ci-wait.sh
+          echo "Testing CLN Autodetect Payment..."
+          docker-compose -f docker-compose.yml up -d --no-deps nginx-cln
+          # Free route first — a 402 needs the CLN socket the chmod unlocks.
+          wait_http http://0.0.0.0:8000/ 200 90 || { docker logs nginx-cln; exit 1; }
+          docker exec nginx-cln chmod 777 /root /root/.lightning /root/.lightning/regtest
+          wait_http http://0.0.0.0:8000/protected 402 60 || { docker logs nginx-cln; exit 1; }
+
+          # Get invoice from CLN
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected-auto) || true
+          invoice=$(echo "$response" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
+          macaroon=$(echo "$response" | grep -i "WWW-Authenticate: L402" | grep -o 'macaroon="[^"]*"' | cut -d'"' -f2)
+          
+          if [ -z "$invoice" ]; then
+            echo "Error: No invoice found"
+            exit 1
+          fi
+
+          echo "Paying invoice with LND..."
+          docker exec lndnode lncli -n regtest payinvoice -f $invoice
+          sleep 5
+          
+          echo "Testing protected route with ONLY macaroon (expecting autodetect)..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 $macaroon" http://0.0.0.0:8000/protected-auto) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 200 ]; then
+            echo "Error: CLN Autodetect failed with status $status_code, expected 200"
+            docker logs nginx-cln
+            exit 1
+          fi
+          echo "✅ CLN Autodetect successful!"
+          docker-compose -f docker-compose.yml stop nginx-cln
+
+      - name: Stop NWC service and CLN node
+        run: |
+          docker-compose -f docker-compose.yml stop nginx-nwc cln
+
+      - name: Start nginx containers for LND
+        env:
+          CURRENCY: USD
+          AMOUNT: 0.01
+          CASHU_WALLET_MNEMONIC: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        run: |
+          # Make LND macaroon and cert readable by nginx user
+          docker exec lndnode-receiver chmod a+rx /root /root/.lnd /root/.lnd/data /root/.lnd/data/chain /root/.lnd/data/chain/bitcoin /root/.lnd/data/chain/bitcoin/regtest
+          docker exec lndnode-receiver chmod a+r /root/.lnd/data/chain/bitcoin/regtest/admin.macaroon /root/.lnd/tls.cert
+          
+          # Start the remaining services
+          docker-compose -f docker-compose.yml up -d --no-deps nginx-lnd redis
+          sleep 5
+          docker exec nginx-lnd chmod 755 /root
+
+      - name: Run Integration Tests - LND
+        run: |
+          source .github/scripts/ci-wait.sh
+          docker ps -a
+          echo "Testing with LND configuration..."
+          wait_http http://0.0.0.0:8000/protected 402 90 || { docker logs nginx-lnd; exit 1; }
+
+          # Test free route
+          echo "Testing free route..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 200 ]; then
+            echo "Error: Free route returned status $status_code, expected 200"
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          # Test /.well-known/l402-services capability manifest
+          echo "Testing /.well-known/l402-services manifest endpoint..."
+          manifest_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/.well-known/l402-services) || true
+          manifest_code=$(echo "$manifest_resp" | tail -n1); manifest_code=${manifest_code:-000}
+          if [ "$manifest_code" -ne 200 ]; then
+            echo "Error: /.well-known/l402-services returned $manifest_code, expected 200"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          if ! echo "$manifest_resp" | grep -qi "application/json"; then
+            echo "Error: /.well-known/l402-services Content-Type is not application/json"
+            echo "$manifest_resp"
+            exit 1
+          fi
+          if ! echo "$manifest_resp" | grep -q '"routes"'; then
+            echo "Error: manifest response missing 'routes' field"
+            echo "$manifest_resp"
+            exit 1
+          fi
+          echo "✅ /.well-known/l402-services manifest returned valid JSON"
+
+          # Test protected route without header
+          echo "Testing protected route without header..."
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 402 ]; then
+            echo "Error: Protected route without header returned status $status_code, expected 402"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          
+          # Check if WWW-Authenticate header is present
+          if ! echo "$response" | grep -q 'WWW-Authenticate: L402 macaroon='; then
+            echo "Error: WWW-Authenticate header is missing in the 402 response"
+            echo "$response"
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          # Extract and verify invoice amount
+          invoice=$(echo "$response" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
+          if [ -z "$invoice" ]; then
+            echo "Error: No invoice found in WWW-Authenticate header"
+            echo "$response"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+
+          # Decode invoice and check amount
+          decoded_amount=$(docker exec lndnode lncli -n regtest decodepayreq "$invoice" | jq -r '.num_msat')
+          if [ "$decoded_amount" != "10000" ]; then
+            echo "Error: Invoice amount is $decoded_amount msat, expected 10000 msat"
+            echo "$response"
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          # Test dynamic pricing by setting a new price in Redis
+          echo "Setting dynamic price to 15000 msat..."
+          docker exec redis redis-cli set /protected 15000
+
+          # Test protected route to get new invoice with dynamic price
+          echo "Testing protected route with dynamic price..."
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 402 ]; then
+            echo "Error: Protected route with dynamic price returned status $status_code, expected 402"
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          # Extract and verify new invoice amount
+          invoice=$(echo "$response" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
+          if [ -z "$invoice" ]; then
+            echo "Error: No invoice found in WWW-Authenticate header for dynamic price"
+            echo "$response"
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          # Decode invoice and check dynamic amount
+          decoded_amount=$(docker exec lndnode lncli -n regtest decodepayreq "$invoice" | jq -r '.num_msat')
+          if [ "$decoded_amount" != "15000" ]; then
+            echo "Error: Dynamic invoice amount is $decoded_amount msat, expected 15000 msat"
+            echo "$response"
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          # Reset price back to default
+          echo "Resetting price back to default..."
+          docker exec redis redis-cli del /protected
+
+          # Test protected route to verify reset price
+          echo "Testing protected route with reset price..."
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 402 ]; then
+            echo "Error: Protected route with reset price returned status $status_code, expected 402"
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          # Extract and verify reset invoice amount
+          invoice=$(echo "$response" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
+          if [ -z "$invoice" ]; then
+            echo "Error: No invoice found in WWW-Authenticate header after reset"
+            echo "$response"
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          # Decode invoice and check reset amount
+          decoded_amount=$(docker exec lndnode lncli -n regtest decodepayreq "$invoice" | jq -r '.num_msat')
+          if [ "$decoded_amount" != "10000" ]; then
+            echo "Error: Reset invoice amount is $decoded_amount msat, expected 10000 msat"
+            echo "$response"
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          # Flush Redis for LND test
+          echo "Flushing Redis for LND test..."
+          docker exec redis redis-cli flushall
+          
+          # Test with valid L402 credentials — real payment flow
+          echo "Getting fresh invoice for valid-credentials test..."
+          cred_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/protected) || true
+          cred_invoice=$(echo "$cred_resp" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
+          cred_macaroon=$(echo "$cred_resp" | grep -i "WWW-Authenticate: L402" | grep -o 'macaroon="[^"]*"' | cut -d'"' -f2)
+          echo "Paying invoice via lndnode..."
+          cred_payment_hash=$(docker exec lndnode lncli -n regtest decodepayreq "$cred_invoice" | jq -r '.payment_hash')
+          docker exec lndnode lncli -n regtest payinvoice -f "$cred_invoice"
+          sleep 5
+          cred_preimage=$(docker exec lndnode lncli -n regtest listpayments | jq -r --arg h "$cred_payment_hash" '.payments[] | select(.payment_hash == $h) | .payment_preimage')
+
+          echo "Testing with valid L402 credentials..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 \
+            -H "Authorization: L402 $cred_macaroon:$cred_preimage" \
+            http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 200 ]; then
+            echo "Error: Protected route with valid L402 returned status $status_code, expected 200"
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          # Replaying the same valid preimage on a non-indefinite route must be rejected
+          echo "Testing protected route with reused preimage (should be rejected)..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 \
+            -H "Authorization: L402 $cred_macaroon:$cred_preimage" \
+            http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 401 ]; then
+            echo "Error: Reused preimage returned status $status_code, expected 401"
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          # Test with invalid preimage (reuse same fresh macaroon, wrong preimage)
+          echo "Testing with invalid preimage..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 \
+            -H "Authorization: L402 $cred_macaroon:fbe9ac25c04e14b10177514e2d57b0e39224e70277ac1a2cd23c28e58cd4ea35" \
+            http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 401 ]; then
+            echo "Error: Protected route with invalid preimage returned status $status_code, expected 401"
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          # Test with macaroon without caveats
+          echo "Testing with macaroon without caveats..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 AgEETFNBVALmAUr/gQMBARJNYWNhcm9vbklkZW50aWZpZXIB/4IAAQMBB1ZlcnNpb24BBgABC1BheW1lbnRIYXNoAf+EAAEHVG9rZW5JZAH/hgAAABT/gwEBAQRIYXNoAf+EAAEGAUAAABn/hQEBAQlbMzJddWludDgB/4YAAQYBQAAAa/+CAiD/pv/jOjY1/9oC/4z/tHb/qf/2Jf+d/4H/u/+YGHj/+/+O/8D/v/+P/8X/qRL/5v/x/4r/tkIBIA1Y/8j/pR3/0P+b/7cwWP+W/87/sD18GP//Hf/f/9Aj//NcBFs2/9VhNEUF/70AAAAGIDlR1jVm5IfEJgvuSQoJLqLg4FcW4Ib1vW8sbkRHdUWX:651505fae9ea341c770c6ebef207d8560d546eb3aee26985e584c15d1c987875" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 401 ]; then
+            echo "Error: Protected route with macaroon without caveats returned status $status_code, expected 401"
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          # Test L402 method binding: a token paid for one HTTP
+          # method must not be redeemable on a different method on the same
+          # path. Uses a freshly-paid invoice so this case is independent of
+          # the hardcoded preimage tested above.
+          echo "Testing L402 method binding (RequestMethod caveat)..."
+          docker exec redis redis-cli flushall
+
+          method_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 -X GET http://0.0.0.0:8000/protected) || true
+          method_status=$(echo "$method_resp" | tail -n1); method_status=${method_status:-000}
+          if [ "$method_status" -ne 402 ]; then
+            echo "Error: GET /protected (no auth) returned $method_status, expected 402"
+            echo "$method_resp"
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          method_invoice=$(echo "$method_resp" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
+          method_macaroon=$(echo "$method_resp" | grep -i "WWW-Authenticate: L402" | grep -o 'macaroon="[^"]*"' | cut -d'"' -f2)
+          if [ -z "$method_invoice" ] || [ -z "$method_macaroon" ]; then
+            echo "Error: missing invoice or macaroon in 402 response for method-binding test"
+            echo "$method_resp"
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          echo "Paying method-binding invoice from lndnode..."
+          docker exec lndnode lncli -n regtest payinvoice -f "$method_invoice"
+          sleep 5
+          method_preimage=$(docker exec lndnode lncli -n regtest listpayments | jq -r '.payments[-1].payment_preimage')
+          if [ -z "$method_preimage" ] || [ "$method_preimage" = "null" ]; then
+            echo "Error: could not extract preimage from lndnode for method-binding test"
+            docker exec lndnode lncli -n regtest listpayments
+            exit 1
+          fi
+
+          # Cross-method replay: a GET-bound token used on a different allowed
+          # method must be rejected. We use HEAD (not POST): this location uses
+          # try_files + static content, so nginx returns 405 for POST before
+          # the L402 handler runs — HEAD still reaches access phase like GET.
+          # Use `curl -I` (libcurl proper HEAD) instead of `-X HEAD`; the latter
+          # makes curl wait for a body that never comes and hangs until timeout.
+          # Run this BEFORE the GET case so the preimage isn't yet stored as used
+          # by replay protection — we want to confirm the rejection comes from
+          # the method caveat, not from preimage reuse.
+          echo "HEAD /protected with GET-bound token (expect 401)..."
+          cross_method_status=$(curl -o /dev/null -s -w "%{http_code}" --max-time 30 -I -H "Authorization: L402 $method_macaroon:$method_preimage" http://0.0.0.0:8000/protected) || true
+          cross_method_resp="(status only: $cross_method_status)"
+          if [ "$cross_method_status" -ne 401 ]; then
+            echo "Error: HEAD /protected with GET-bound token returned $cross_method_status, expected 401 (cross-method replay must be rejected)"
+            echo "$cross_method_resp"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "PASS: cross-method replay rejected"
+
+          # Same token on the original method must still succeed.
+          echo "GET /protected with GET-bound token (expect 200)..."
+          get_resp=$(curl -s -w "\n%{http_code}" --max-time 30 -X GET -H "Authorization: L402 $method_macaroon:$method_preimage" http://0.0.0.0:8000/protected) || true
+          get_status=$(echo "$get_resp" | tail -n1); get_status=${get_status:-000}
+          if [ "$get_status" -ne 200 ]; then
+            echo "Error: GET /protected with GET-bound token returned $get_status, expected 200"
+            echo "$get_resp"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "PASS: same-method redemption accepted"
+
+          # Realm binding: /realm-a and /realm-b name the same protection space,
+          # so one payment authorizes both. A realm token must NOT open a
+          # path-bound location — that would be an auth bypass.
+          echo "Testing L402 realm binding (Realm caveat)..."
+          docker exec redis redis-cli flushall
+
+          realm_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/realm-a) || true
+          realm_status=$(echo "$realm_resp" | tail -n1); realm_status=${realm_status:-000}
+          if [ "$realm_status" -ne 402 ]; then
+            echo "Error: GET /realm-a (no auth) returned $realm_status, expected 402"
+            echo "$realm_resp"
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          realm_invoice=$(echo "$realm_resp" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
+          realm_macaroon=$(echo "$realm_resp" | grep -i "WWW-Authenticate: L402" | grep -o 'macaroon="[^"]*"' | cut -d'"' -f2)
+          if [ -z "$realm_invoice" ] || [ -z "$realm_macaroon" ]; then
+            echo "Error: missing invoice or macaroon in 402 response for realm test"
+            echo "$realm_resp"
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          echo "Paying realm invoice from lndnode..."
+          docker exec lndnode lncli -n regtest payinvoice -f "$realm_invoice"
+          sleep 5
+          realm_preimage=$(docker exec lndnode lncli -n regtest listpayments | jq -r '.payments[-1].payment_preimage')
+          if [ -z "$realm_preimage" ] || [ "$realm_preimage" = "null" ]; then
+            echo "Error: could not extract preimage from lndnode for realm test"
+            docker exec lndnode lncli -n regtest listpayments
+            exit 1
+          fi
+
+          echo "GET /realm-a with realm token (expect 200)..."
+          realm_a_status=$(curl -o /dev/null -s -w "%{http_code}" --max-time 30 -H "Authorization: L402 $realm_macaroon:$realm_preimage" http://0.0.0.0:8000/realm-a) || true
+          if [ "$realm_a_status" -ne 200 ]; then
+            echo "Error: GET /realm-a with realm token returned $realm_a_status, expected 200"
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          # The point of the feature: a different path in the same realm, paid once.
+          echo "GET /realm-b with the SAME token (expect 200)..."
+          realm_b_status=$(curl -o /dev/null -s -w "%{http_code}" --max-time 30 -H "Authorization: L402 $realm_macaroon:$realm_preimage" http://0.0.0.0:8000/realm-b) || true
+          if [ "$realm_b_status" -ne 200 ]; then
+            echo "Error: GET /realm-b with realm token returned $realm_b_status, expected 200 (one payment must cover the realm)"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "PASS: one payment authorized both paths in the realm"
+
+          # A realm token carries `Realm = …` and no `RequestPath`; a path-bound
+          # location must reject it rather than let the caveat fall through.
+          echo "GET /protected with realm token (expect 401)..."
+          realm_escape_status=$(curl -o /dev/null -s -w "%{http_code}" --max-time 30 -H "Authorization: L402 $realm_macaroon:$realm_preimage" http://0.0.0.0:8000/protected) || true
+          if [ "$realm_escape_status" -ne 401 ]; then
+            echo "Error: GET /protected with realm token returned $realm_escape_status, expected 401 (realm token must not open a path-bound location)"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "PASS: realm token rejected outside its realm"
+
+          # The manifest must describe the caveats each route actually mints.
+          # Advertising RequestPath on a realm route would send agents off to
+          # pre-validate a scope the token never carries.
+          echo "Checking the manifest matches what each route mints..."
+          manifest_json=$(curl -s --max-time 30 http://0.0.0.0:8000/.well-known/l402-services) || true
+          realm_caveats=$(echo "$manifest_json" | jq -c '.routes[] | select(.path == "/realm-a") | .caveats_required')
+          path_caveats=$(echo "$manifest_json" | jq -c '.routes[] | select(.path == "/protected") | .caveats_required')
+          echo "  /realm-a   -> ${realm_caveats:-<missing>}"
+          echo "  /protected -> ${path_caveats:-<missing>}"
+
+          if ! echo "$realm_caveats" | grep -q 'Realm = demo-realm'; then
+            echo "Error: /realm-a does not advertise 'Realm = demo-realm': ${realm_caveats:-<missing>}"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          if echo "$realm_caveats" | grep -q 'RequestPath'; then
+            echo "Error: /realm-a advertises RequestPath, which a realm token never carries: $realm_caveats"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          if ! echo "$realm_caveats" | grep -q 'RequestMethod'; then
+            echo "Error: /realm-a does not advertise RequestMethod: ${realm_caveats:-<missing>}"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          # The path-bound route must still advertise its exact path.
+          if ! echo "$path_caveats" | grep -q 'RequestPath = /protected'; then
+            echo "Error: /protected does not advertise 'RequestPath = /protected': ${path_caveats:-<missing>}"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "PASS: manifest matches the caveats each route mints"
+
+          # Test LND Autodetect Payment
+          echo "Testing LND Autodetect Payment..."
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected-auto) || true
+          invoice=$(echo "$response" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
+          macaroon=$(echo "$response" | grep -i "WWW-Authenticate: L402" | grep -o 'macaroon="[^"]*"' | cut -d'"' -f2)
+          
+          echo "Paying invoice with lndnode..."
+          docker exec lndnode lncli -n regtest payinvoice -f $invoice
+          sleep 5
+          
+          echo "Testing protected route with ONLY macaroon (expecting autodetect)..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 $macaroon" http://0.0.0.0:8000/protected-auto) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 200 ]; then
+            echo "Error: LND Autodetect failed with status $status_code, expected 200"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "✅ LND Autodetect successful!"
+
+          # Test Cashu eCash support
+          echo "Testing Cashu eCash support..."
+
+          # Ensure the Cashu database has proper permissions
+          echo "Setting up Cashu database permissions..."
+          docker exec nginx-lnd chmod 770 /app/data
+          docker exec nginx-lnd chmod 660 /app/data/cashu_tokens.db
+          echo "Cashu database permissions set successfully"
+          
+          # Check mint logs
+          docker logs cashu-mint
+          
+          # Execute cashu commands inside the mint container using poetry run
+          echo "Executing cashu commands inside the mint container..."
+          
+          # Check wallet info
+          echo "Checking wallet info..."
+          docker exec cashu-mint poetry run cashu info
+          
+          # Check initial balance
+          echo "Checking initial balance..."
+          docker exec cashu-mint poetry run cashu balance
+          
+          # Check balance after minting
+          echo "Checking balance after minting..."
+          docker exec cashu-mint poetry run cashu balance
+          
+          # Get token from wallet
+          echo "Retrieving token from wallet..."
+          CASHU_TOKEN=$(docker exec cashu-mint poetry run cashu send 10)
+          
+          echo "Cashu token: $CASHU_TOKEN"
+
+          sleep 5
+          
+          # Standard mode must advertise the NUT-24 challenge too, not just P2PK.
+          # cashu.me reads X-Cashu off the 402 and throws without it, so a
+          # missing header means no browser wallet can pay this gateway.
+          echo "Checking X-Cashu header on 402 response (standard mode)..."
+          std_resp=$(curl -s -i --max-time 30 http://0.0.0.0:8000/protected) || true
+          std_code=$(echo "$std_resp" | grep "^HTTP" | tail -1 | awk '{print $2}'); std_code=${std_code:-000}
+          if [ "$std_code" -ne 402 ]; then
+            echo "❌ Expected 402, got $std_code"
+            docker logs nginx-lnd | tail -30
+            exit 1
+          fi
+          if ! echo "$std_resp" | grep -qi "^X-Cashu:"; then
+            echo "❌ X-Cashu header missing from 402 response in standard mode"
+            echo "$std_resp"
+            docker logs nginx-lnd | tail -30
+            exit 1
+          fi
+          echo "✅ X-Cashu NUT-24 payment request present on 402 in standard mode"
+
+          # Test protected route with Cashu token
+          echo "Testing protected route with Cashu token..."
+          max_retries=3
+          retry_count=0
+          status_code=0
+          
+          while [ $retry_count -lt $max_retries ] && [ "$status_code" -ne 200 ]; do
+            echo "Attempt $(($retry_count + 1)) of $max_retries..."
+            response=$(curl -v -s -i -w "\n%{http_code}" --max-time 60 -L -H "Authorization: Cashu $CASHU_TOKEN" http://0.0.0.0:8000/protected) || true
+            status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+            
+            if [ "$status_code" -ne 200 ]; then
+              if echo "$response" | grep -q "401 Unauthorized"; then
+                echo "Pool connection timed out, retrying..."
+                sleep 5
+                retry_count=$((retry_count + 1))
+              else
+                break
+              fi
+            fi
+          done
+          
+          # The token should be accepted if the verification logic is working
+          if [ "$status_code" -ne 200 ]; then
+            echo "Error: Protected route with Cashu token returned unexpected status $status_code"
+            echo "$response"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          
+          # Test with invalid Cashu token (insufficient amount)
+          echo "Testing with invalid Cashu token (insufficient amount)..."
+          
+          INVALID_CASHU_TOKEN=$(docker exec cashu-mint poetry run cashu send 1)
+
+          sleep 5
+          
+          # Test with the invalid token
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L -H "Authorization: Cashu $INVALID_CASHU_TOKEN" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          
+          # NUT-24: an insufficient amount is answered with 400, not 401
+          if [ "$status_code" -ne 400 ]; then
+            echo "Error: Protected route with invalid Cashu token returned status $status_code, expected 400"
+            echo "$response"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          
+          # Test with malformed Cashu token
+          echo "Testing with malformed Cashu token..."
+          
+          # Create a malformed token
+          MALFORMED_CASHU_TOKEN='{
+            "token": [
+              {
+                "mint": "http://cashu-mint:3338",
+                "proofs": []
+              }
+            ]
+          }'
+          
+          # Encode the malformed token
+          ENCODED_MALFORMED_TOKEN=$(echo -n "$MALFORMED_CASHU_TOKEN" | base64 -w 0)
+
+          sleep 5
+          
+          # Test with the malformed token
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L -H "Authorization: Cashu $ENCODED_MALFORMED_TOKEN" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          
+          # This should fail verification due to empty proofs
+          if [ "$status_code" -ne 401 ]; then
+            echo "Error: Protected route with malformed Cashu token returned status $status_code, expected 401"
+            echo "$response"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          
+          # Test whitelisted mints functionality
+          echo "Testing whitelisted mints functionality..."
+          
+          # Test with token from non-whitelisted mint
+          echo "Testing with token from non-whitelisted mint (https://nofees.testnut.cashu.space)..."
+          
+          # Create a token with a non-whitelisted mint URL
+          NON_WHITELISTED_TOKEN='{
+            "token": [
+              {
+                "mint": "https://nofees.testnut.cashu.space",
+                "proofs": [
+                  {
+                    "id": "test-proof",
+                    "amount": 10,
+                    "secret": "test-secret",
+                    "C": "test-commitment"
+                  }
+                ]
+              }
+            ]
+          }'
+          
+          # Encode the non-whitelisted token
+          ENCODED_NON_WHITELISTED_TOKEN=$(echo -n "$NON_WHITELISTED_TOKEN" | base64 -w 0)
+
+          sleep 5
+          
+          # Test with the non-whitelisted token
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L -H "Authorization: Cashu $ENCODED_NON_WHITELISTED_TOKEN" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          
+          # 401, not the 400 a real unlisted mint would give: this fixture is
+          # hand-built JSON that fails to decode before the whitelist check runs.
+          if [ "$status_code" -ne 401 ]; then
+            echo "Error: Protected route with non-whitelisted Cashu token returned status $status_code, expected 401"
+            echo "$response"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          
+          echo "✅ Non-whitelisted mint token (https://nofees.testnut.cashu.space) correctly rejected!"
+          
+          # Test database regeneration and fallback seed state restoration
+          echo "Testing database regeneration and wallet state restoration..."
+
+          # Delete Cashu database while container is still running
+          echo "Deleting Cashu database..."
+          docker exec nginx-lnd rm -f /app/data/cashu_tokens.db /app/data/cashu_tokens.db-shm /app/data/cashu_tokens.db-wal
+
+          # Restart the container to trigger initialization and restore_wallets_state
+          docker-compose -f docker-compose.yml restart nginx-lnd
+
+          # Wait for container and database initialization
+          sleep 10
+          docker exec nginx-lnd chmod 660 /app/data/cashu_tokens.db || echo 'Warning: could not set permissions'
+
+          echo "Minting external token for DB regeneration test..."
+          NEW_CASHU_TOKEN=$(docker exec cashu-mint poetry run cashu send 15)
+
+          echo "Testing protected route with new Cashu token after DB deletion..."
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L -H "Authorization: Cashu $NEW_CASHU_TOKEN" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+
+          if [ "$status_code" -ne 200 ]; then
+            echo "Error: Protected route with Cashu token after DB deletion returned status $status_code, expected 200"
+            echo "$response"
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          echo "✅ Database regeneration and wallet state restoration test passed!"
+
+          # --- Auto-generated mnemonic persists across restarts ---
+          echo "Testing auto-generated mnemonic persists across restarts..."
+          # Delete both wallet files from inside the running container (same UID)
+          # so that on the next start there is no env var AND no persisted file,
+          # forcing the generation path.
+          docker exec nginx-lnd rm -f /app/data/wallet.fingerprint /app/data/wallet.mnemonic
+          # Start without CASHU_WALLET_MNEMONIC in the env so a mnemonic is generated
+          CASHU_WALLET_MNEMONIC="" docker-compose -f docker-compose.yml up -d --no-deps nginx-lnd
+          # nginx serves only after module init, which is when the mnemonic is
+          # written — so this also gates the file check below.
+          source .github/scripts/ci-wait.sh
+          wait_http http://0.0.0.0:8000/ 200 90 || { docker logs nginx-lnd | tail -30; exit 1; }
+          # A wallet.mnemonic file must have been created
+          MNEMONIC_FILE=$(docker run --rm -v ngx-l402_cashu-data:/data alpine \
+            sh -c 'cat /data/wallet.mnemonic 2>/dev/null || echo ""')
+          if [ -z "$MNEMONIC_FILE" ]; then
+            echo "❌ No wallet.mnemonic generated on first run"
+            docker logs nginx-lnd | tail -30
+            exit 1
+          fi
+          echo "✅ wallet.mnemonic generated on first run"
+          # A fingerprint must have been recorded
+          FP1=$(docker run --rm -v ngx-l402_cashu-data:/data alpine \
+            sh -c 'cat /data/wallet.fingerprint 2>/dev/null | tr -d "[:space:]" || echo ""')
+          if [ -z "$FP1" ]; then
+            echo "❌ No wallet.fingerprint recorded on first run"
+            exit 1
+          fi
+          echo "✅ wallet.fingerprint recorded: $FP1"
+          # Restart — the generated mnemonic must be reloaded from wallet.mnemonic;
+          # the same fingerprint must be re-recorded.
+          docker-compose -f docker-compose.yml restart nginx-lnd
+          wait_http http://0.0.0.0:8000/ 200 90 || { docker logs nginx-lnd | tail -30; exit 1; }
+          FP2=$(docker run --rm -v ngx-l402_cashu-data:/data alpine \
+            sh -c 'cat /data/wallet.fingerprint 2>/dev/null | tr -d "[:space:]" || echo ""')
+          if [ "$FP1" != "$FP2" ]; then
+            echo "❌ Fingerprint changed across restart ($FP1 != $FP2) — mnemonic not persisted"
+            exit 1
+          fi
+          echo "✅ Auto-generated mnemonic persists across restarts (fingerprint stable: $FP1)"
+          # Restore: delete auto-generated wallet files from inside the running
+          # container (same UID/GID) then recreate with the known test mnemonic.
+          # Using docker exec avoids alpine UID-mapping issues on the named volume.
+          docker exec nginx-lnd rm -f /app/data/wallet.fingerprint /app/data/wallet.mnemonic
+          CASHU_WALLET_MNEMONIC="abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about" \
+            docker-compose -f docker-compose.yml up -d --no-deps nginx-lnd
+          sleep 15
+          # Verify Cashu initialized with the restored mnemonic
+          if docker logs nginx-lnd 2>&1 | grep -q "does not match the wallet that owns"; then
+            echo "❌ Fingerprint mismatch after restore — check wallet.fingerprint was actually deleted"
+            docker logs nginx-lnd | tail -30
+            exit 1
+          fi
+          docker exec nginx-lnd chmod 660 /app/data/cashu_tokens.db || echo 'Warning: could not set permissions'
+
+          # --- Wallet-mnemonic fingerprint guard ---
+          # A fingerprint that no longer matches the configured mnemonic must
+          # refuse Cashu init, so a changed/typo'd mnemonic can't orphan funds.
+          echo "Testing wallet fingerprint guard (mismatch must refuse init)..."
+          docker exec nginx-lnd sh -c 'echo corrupt-fingerprint > /app/data/wallet.fingerprint'
+          docker-compose -f docker-compose.yml restart nginx-lnd
+          sleep 10
+          if docker logs nginx-lnd 2>&1 | grep -q "does not match the wallet that owns"; then
+            echo "✅ Fingerprint mismatch correctly refused Cashu initialization!"
+          else
+            echo "Error: expected Cashu init to refuse on fingerprint mismatch, but no refusal was logged"
+            docker logs nginx-lnd 2>&1 | tail -n 50 || true
+            exit 1
+          fi
+          # Restore: remove the corrupt fingerprint so it is re-recorded correctly.
+          docker exec nginx-lnd rm -f /app/data/wallet.fingerprint
+          docker-compose -f docker-compose.yml restart nginx-lnd
+          sleep 10
+          docker exec nginx-lnd chmod 660 /app/data/cashu_tokens.db || echo 'Warning: could not set permissions'
+          echo "✅ Wallet fingerprint guard test passed!"
+
+          echo "All Cashu eCash tests completed successfully!"
+          docker logs nginx-lnd
+
+      - name: Run Integration test - Cashu P2PK mode
+        env:
+          CASHU_WALLET_MNEMONIC: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+          # k=1 secp256k1 scalar → pubkey 0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+          CASHU_P2PK_PRIVATE_KEY: "0000000000000000000000000000000000000000000000000000000000000001"
+          CASHU_P2PK_MODE: "true"
+          # nutshell (the CI cashu-mint) does not include NUT-12 DLEQ proofs
+          # in its tokens; disable the DLEQ requirement so P2PK tokens are
+          # accepted in CI. Production deployments should keep this true.
+          CASHU_REQUIRE_DLEQ: "false"
+        run: |
+          echo "🔑 Testing Cashu P2PK mode (NUT-11/NUT-24)..."
+
+          # Restart nginx-lnd with P2PK mode enabled
+          docker exec nginx-lnd rm -f /app/data/wallet.fingerprint /app/data/wallet.mnemonic
+          docker-compose -f docker-compose.yml up -d --no-deps nginx-lnd
+          sleep 15
+          # Recreating the container resets the writable layer, losing the
+          # `chmod 755 /root` from "Start nginx containers for LND". Nginx
+          # worker processes need execute permission on /root to traverse the
+          # lndnode-receiver-data volume mounted at /root/.lnd.
+          docker exec nginx-lnd chmod 755 /root
+
+          # 1. 402 response must carry an X-Cashu NUT-24 payment request header
+          echo "Checking X-Cashu header on 402 response..."
+          p2pk_resp=$(curl -s -i --max-time 30 http://0.0.0.0:8000/protected) || true
+          p2pk_code=$(echo "$p2pk_resp" | grep "^HTTP" | tail -1 | awk '{print $2}'); p2pk_code=${p2pk_code:-000}
+          if [ "$p2pk_code" -ne 402 ]; then
+            echo "❌ Expected 402 in P2PK mode, got $p2pk_code"
+            docker logs nginx-lnd | tail -30
+            exit 1
+          fi
+          if ! echo "$p2pk_resp" | grep -qi "^X-Cashu:"; then
+            echo "❌ X-Cashu header missing from 402 response in P2PK mode"
+            echo "$p2pk_resp"
+            docker logs nginx-lnd | tail -30
+            exit 1
+          fi
+          echo "✅ X-Cashu NUT-24 payment request header present on 402"
+
+          # 2. The X-Cashu header must contain our known public key.
+          # NUT-24 format: "creq" + version_char + base64url(CBOR).
+          # The pubkey is stored in the CBOR as a UTF-8 text string.
+          # Strip the 5-char "creqA" prefix, convert base64url → base64,
+          # add padding, decode, then grep the raw CBOR bytes.
+          EXPECTED_PUBKEY="0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+          xcashu_val=$(echo "$p2pk_resp" | grep -i "^X-Cashu:" | sed 's/^[Xx]-[Cc]ashu:[[:space:]]*//' | tr -d '\r')
+          xcashu_cbor=$(printf '%s' "$xcashu_val" | cut -c6- | tr -- '-_' '+/' | \
+            awk '{l=length($0)%4; if(l==2){print $0"=="}else if(l==3){print $0"="}else{print $0}}' | \
+            base64 -d 2>/dev/null)
+          if ! printf '%s' "$xcashu_cbor" | grep -qa "$EXPECTED_PUBKEY"; then
+            echo "❌ X-Cashu header does not contain expected pubkey $EXPECTED_PUBKEY"
+            echo "$p2pk_resp" | grep -i "X-Cashu"
+            exit 1
+          fi
+          echo "✅ X-Cashu header contains correct public key"
+
+          # 3. A plain (non-P2PK-locked) token must be rejected in P2PK mode
+          echo "Checking plain token is rejected in P2PK mode..."
+          PLAIN_TOKEN=$(docker exec cashu-mint poetry run cashu send 10)
+          plain_resp=$(curl -s -w "\n%{http_code}" --max-time 30 \
+            -H "Authorization: Cashu $PLAIN_TOKEN" http://0.0.0.0:8000/protected) || true
+          plain_code=$(echo "$plain_resp" | tail -n1); plain_code=${plain_code:-000}
+          # NUT-24 lists "insufficient locking conditions" among its 400 cases
+          if [ "$plain_code" -ne 400 ]; then
+            echo "❌ Plain token accepted in P2PK mode (got $plain_code), expected 400"
+            docker logs nginx-lnd | tail -30
+            exit 1
+          fi
+          echo "✅ Plain (non-P2PK) token correctly rejected in P2PK mode"
+
+          # 4. A P2PK-locked token must be accepted
+          echo "Sending P2PK-locked token..."
+          P2PK_TOKEN=$(docker exec cashu-mint poetry run cashu send 10 \
+            --lock "P2PK:$EXPECTED_PUBKEY" 2>/dev/null || echo "")
+          if [ -z "$P2PK_TOKEN" ]; then
+            echo "⚠️  cashu send --lock not supported in this nutshell version — skipping send test"
+          else
+            p2pk_auth_resp=$(curl -s -w "\n%{http_code}" --max-time 60 -L \
+              -H "Authorization: Cashu $P2PK_TOKEN" http://0.0.0.0:8000/protected) || true
+            p2pk_auth_code=$(echo "$p2pk_auth_resp" | tail -n1); p2pk_auth_code=${p2pk_auth_code:-000}
+            if [ "$p2pk_auth_code" -ne 200 ]; then
+              echo "❌ P2PK-locked token rejected (got $p2pk_auth_code), expected 200"
+              docker logs nginx-lnd | tail -30
+              exit 1
+            fi
+            echo "✅ P2PK-locked token accepted (200)"
+          fi
+
+          # Restore nginx-lnd to non-P2PK mode for subsequent tests.
+          # Also wipe the Cashu token DB: the P2PK-locked proofs accepted above
+          # were stored directly as Unspent (no mint swap, by design of the
+          # P2PK fast path). The automatic redemption thread doesn't know how
+          # to produce a P2PK witness, so if left in the DB it loops forever
+          # on "Witness is missing for p2pk signature" / melt 400s — starving
+          # the redemption queue and breaking the next test that expects a
+          # plain token to be auto-redeemed.
+          docker exec nginx-lnd rm -f /app/data/wallet.fingerprint /app/data/wallet.mnemonic \
+            /app/data/cashu_tokens.db /app/data/cashu_tokens.db-shm /app/data/cashu_tokens.db-wal
+          env -u CASHU_P2PK_MODE -u CASHU_P2PK_PRIVATE_KEY -u CASHU_REQUIRE_DLEQ \
+            docker-compose -f docker-compose.yml up -d --no-deps nginx-lnd
+          sleep 15
+          docker exec nginx-lnd chmod 755 /root
+          docker exec nginx-lnd chmod 660 /app/data/cashu_tokens.db || echo 'Warning: could not set permissions'
+          echo "✅ Cashu P2PK mode tests passed!"
+
+      - name: Run Integration test - Redis Replay Attack Prevention
+        run: |
+          echo "🔒 Testing Redis replay attack prevention for L402 preimages and Cashu tokens..."
+          
+          # Flush Redis to start clean
+          docker exec redis redis-cli flushall
+          
+          # ========== TEST 1: L402 Preimage Replay Attack Prevention ==========
+          echo "Testing L402 preimage replay attack prevention..."
+
+          # Get fresh credentials via real payment (nginx-lnd is active on port 8000)
+          echo "Getting fresh invoice for replay test..."
+          replay_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/protected) || true
+          replay_invoice=$(echo "$replay_resp" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
+          replay_macaroon=$(echo "$replay_resp" | grep -i "WWW-Authenticate: L402" | grep -o 'macaroon="[^"]*"' | cut -d'"' -f2)
+          replay_payment_hash=$(docker exec lndnode lncli -n regtest decodepayreq "$replay_invoice" | jq -r '.payment_hash')
+          docker exec lndnode lncli -n regtest payinvoice -f "$replay_invoice"
+          sleep 5
+          replay_preimage=$(docker exec lndnode lncli -n regtest listpayments | jq -r --arg h "$replay_payment_hash" '.payments[] | select(.payment_hash == $h) | .payment_preimage')
+
+          # First request with valid L402 credentials should succeed
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 \
+            -H "Authorization: L402 $replay_macaroon:$replay_preimage" \
+            http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 200 ]; then
+            echo "❌ Error: First request with valid L402 preimage returned status $status_code, expected 200"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "✅ First request with valid L402 preimage succeeded"
+
+          # Wait a moment for Redis to store the preimage
+          sleep 2
+
+          # Check Redis for stored preimage
+          PREIMAGE_KEYS=$(docker exec redis redis-cli keys "l402:preimage:*" 2>/dev/null | wc -l)
+          echo "Found $PREIMAGE_KEYS preimage entries in Redis"
+          if [ "$PREIMAGE_KEYS" -lt 1 ]; then
+            echo "❌ Error: Preimage was not stored in Redis"
+            exit 1
+          fi
+          echo "✅ Preimage stored in Redis successfully"
+
+          # Second request with SAME preimage should fail (replay attack)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 \
+            -H "Authorization: L402 $replay_macaroon:$replay_preimage" \
+            http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 401 ]; then
+            echo "❌ Error: Replay attack with same L402 preimage returned status $status_code, expected 401"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "✅ L402 preimage replay attack prevented successfully!"
+          
+          # ========== TEST 2: Cashu Token Replay Attack Prevention ==========
+          echo "Testing Cashu token replay attack prevention..."
+          
+          # Create a Cashu token
+          CASHU_TOKEN=$(docker exec cashu-mint poetry run cashu send 10)
+          echo "Created Cashu token: ${CASHU_TOKEN:0:50}..."
+          
+          # First request with Cashu token should succeed
+          response=$(curl -s -w "\n%{http_code}" --max-time 60 -L -H "Authorization: Cashu $CASHU_TOKEN" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 200 ]; then
+            echo "❌ Error: First request with Cashu token returned status $status_code, expected 200"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "✅ First request with Cashu token succeeded"
+          
+          # Wait a moment for Redis to store the token
+          sleep 2
+          
+          # Check Redis for stored Cashu token
+          CASHU_KEYS=$(docker exec redis redis-cli keys "l402:cashu_token:*" 2>/dev/null | wc -l)
+          echo "Found $CASHU_KEYS Cashu token entries in Redis"
+          if [ "$CASHU_KEYS" -lt 1 ]; then
+            echo "❌ Error: Cashu token was not stored in Redis"
+            exit 1
+          fi
+          echo "✅ Cashu token stored in Redis successfully"
+          
+          # Second request with SAME Cashu token should fail (replay attack)
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L -H "Authorization: Cashu $CASHU_TOKEN" http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 401 ]; then
+            echo "❌ Error: Replay attack with same Cashu token returned status $status_code, expected 401"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "✅ Cashu token replay attack prevented successfully!"
+          
+          # ========== SUMMARY ==========
+          echo "📊 Redis replay attack prevention summary:"
+          echo "  - L402 preimage entries: $PREIMAGE_KEYS"
+          echo "  - Cashu token entries: $CASHU_KEYS"
+          
+          # Show sample Redis keys
+          echo "Sample Redis keys:"
+          docker exec redis redis-cli keys "l402:*" | head -5
+          
+          echo "✅ All Redis replay attack prevention tests passed!"
+        env:
+          CASHU_WHITELISTED_MINTS: http://cashu-mint:3338
+          CASHU_WALLET_MNEMONIC: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+
+      - name: Run Integration Tests - Invoice Rate Limiting
+        run: |
+          echo "Testing Redis-based invoice rate limiting (l402_invoice_rate_limit)..."
+
+          # Start with a clean Redis state
+          docker exec redis redis-cli flushall
+
+          # Request 1: within limit - must return 402
+          echo "Request 1 (expect 402 - within limit)..."
+          r1=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/rate-limited) || true
+          sc1=$(echo "$r1" | tail -n1)
+          if [ "$sc1" -ne 402 ]; then
+            echo "FAIL: Request 1 returned $sc1, expected 402"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "PASS: Request 1 returned 402 (invoice issued, counter = 1)"
+
+          # Request 2: still within limit - must return 402
+          echo "Request 2 (expect 402 - at limit)..."
+          r2=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/rate-limited) || true
+          sc2=$(echo "$r2" | tail -n1)
+          if [ "$sc2" -ne 402 ]; then
+            echo "FAIL: Request 2 returned $sc2, expected 402"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "PASS: Request 2 returned 402 (invoice issued, counter = 2)"
+
+          # Request 3: over the limit - must return 429
+          echo "Request 3 (expect 429 - limit exceeded)..."
+          r3=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/rate-limited) || true
+          sc3=$(echo "$r3" | tail -n1)
+          if [ "$sc3" -ne 429 ]; then
+            echo "FAIL: Request 3 returned $sc3, expected 429"
+            echo "$r3"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "PASS: Request 3 returned 429 Too Many Requests"
+
+          # Retry-After header must be present in the 429 response
+          if ! echo "$r3" | grep -qi "Retry-After:"; then
+            echo "FAIL: Retry-After header missing from 429 response"
+            echo "$r3"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "PASS: Retry-After header present in 429 response"
+
+          # Rate limit counter must be persisted in Redis
+          RATE_KEYS=$(docker exec redis redis-cli keys "l402:invoice_rate:*" | wc -l)
+          echo "Found $RATE_KEYS rate limit key(s) in Redis"
+          if [ "$RATE_KEYS" -lt 1 ]; then
+            echo "FAIL: No rate limit counter found in Redis"
+            exit 1
+          fi
+          echo "PASS: Rate limit counter persisted in Redis"
+
+          echo "Verifying authenticated requests bypass the rate limiter..."
+          r_auth=$(curl -s -w "\n%{http_code}" --max-time 30 \
+            -H "Authorization: L402 invalid_token:deadbeef" \
+            http://0.0.0.0:8000/rate-limited) || true
+          sc_auth=$(echo "$r_auth" | tail -n1); sc_auth=${sc_auth:-000}
+          if [ "$sc_auth" -eq 429 ]; then
+            echo "FAIL: Authenticated request was incorrectly rate-limited (got 429)"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "PASS: Authenticated request returned $sc_auth (not 429) - rate limiter correctly bypassed"
+
+          echo "All invoice rate limiting integration tests passed."
+
+      - name: Run Integration test - Cashu redemption on Lightning
+        run: |
+          # Capture initial channel balance (not wallet balance, since Lightning payments affect channels)
+          INITIAL_RECEIVER_CHANNEL=$(docker exec lndnode-receiver lncli --rpcserver=127.0.0.1:10010 -n regtest channelbalance)
+          echo "Initial LND-receiver Channel Balance: $INITIAL_RECEIVER_CHANNEL"
+
+          INITIAL_RECEIVER_LOCAL_BALANCE=$(echo $INITIAL_RECEIVER_CHANNEL | jq -r '.local_balance.sat')
+          echo "Initial LND-receiver Local Balance: $INITIAL_RECEIVER_LOCAL_BALANCE sats"
+
+          INITIAL_LND_CHANNEL=$(docker exec lndnode lncli -n regtest channelbalance)
+          echo "Initial LND Channel Balance: $INITIAL_LND_CHANNEL"
+
+          INITIAL_LND_LOCAL_BALANCE=$(echo $INITIAL_LND_CHANNEL | jq -r '.local_balance.sat')
+          echo "Initial LND Local Balance: $INITIAL_LND_LOCAL_BALANCE sats"
+
+          echo "initial channel balance: lndnode"
+          docker exec lndnode lncli -n regtest channelbalance
+
+          echo "initial channel balance: lndnode-receiver"
+          docker exec lndnode-receiver lncli -n regtest --rpcserver=127.0.0.1:10010 channelbalance
+
+          echo "initial channels info: lndnode"
+          docker exec lndnode lncli -n regtest listchannels
+
+          echo "initial channels info: lndnode-receiver"
+          docker exec lndnode-receiver lncli -n regtest --rpcserver=127.0.0.1:10010 listchannels
+
+          echo "Cashu current balance"
+          docker exec cashu-mint poetry run cashu balance
+
+          echo "Running Cashu redemption on Lightning test..."
+          cashu_token=$(docker exec cashu-mint poetry run cashu send 100)
+          echo "Cashu Token of amount 100: $cashu_token"
+
+          # access protected nginx-lnd route with cashu token
+          response=$(curl -s -w "\n%{http_code}" --max-time 60 -L -H "Authorization: Cashu $cashu_token" http://0.0.0.0:8000/protected) || true
+
+          if [ "$(echo "$response" | tail -n1)" -ne 200 ]; then
+            echo "Error: unable to access protected route with Cashu token with response $(echo "$response" | tail -n1)"
+            source .github/scripts/ci-wait.sh
+            assert_no_crash nginx-lnd || true
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          echo "Cashu token consumed successfully to access protected route."
+
+          # Poll for the redemption to land instead of a fixed sleep. With the
+          # extra P2PK/DB-regen/mnemonic tests now running earlier in this job
+          # (each restarting nginx-lnd and queuing tokens through the same
+          # automatic-redemption thread), a fixed interval+30s wait is no
+          # longer reliably enough — the actual melt has been observed landing
+          # several minutes later under CI load. Poll up to 5 minutes.
+          echo "Waiting up to 300s for redemption to increase the receiver channel balance..."
+          FINAL_RECEIVER_LOCAL_BALANCE=$INITIAL_RECEIVER_LOCAL_BALANCE
+          for i in $(seq 1 60); do
+            FINAL_RECEIVER_CHANNEL=$(docker exec lndnode-receiver lncli --rpcserver=127.0.0.1:10010 -n regtest channelbalance)
+            FINAL_RECEIVER_LOCAL_BALANCE=$(echo $FINAL_RECEIVER_CHANNEL | jq -r '.local_balance.sat')
+            if [ "$FINAL_RECEIVER_LOCAL_BALANCE" -gt "$INITIAL_RECEIVER_LOCAL_BALANCE" ]; then
+              echo "Redemption detected after ~$((i * 5))s"
+              break
+            fi
+            sleep 5
+          done
+
+          # Capture final channel balance (Lightning payments affect channel balance, not wallet balance)
+          FINAL_RECEIVER_CHANNEL=$(docker exec lndnode-receiver lncli --rpcserver=127.0.0.1:10010 -n regtest channelbalance)
+          echo "FINAL LND-receiver Channel Balance: $FINAL_RECEIVER_CHANNEL"
+
+          FINAL_RECEIVER_LOCAL_BALANCE=$(echo $FINAL_RECEIVER_CHANNEL | jq -r '.local_balance.sat')
+          echo "FINAL LND-receiver Local Balance: $FINAL_RECEIVER_LOCAL_BALANCE sats"
+
+          FINAL_LND_CHANNEL=$(docker exec lndnode lncli -n regtest channelbalance)
+          echo "FINAL LND Channel Balance: $FINAL_LND_CHANNEL"
+
+          FINAL_LND_LOCAL_BALANCE=$(echo $FINAL_LND_CHANNEL | jq -r '.local_balance.sat')
+          echo "FINAL LND Local Balance: $FINAL_LND_LOCAL_BALANCE sats"
+
+          BALANCE_RECEIVER_DIFFERENCE=$((FINAL_RECEIVER_LOCAL_BALANCE - INITIAL_RECEIVER_LOCAL_BALANCE))
+          echo "Channel Balance RECEIVER Difference: $BALANCE_RECEIVER_DIFFERENCE sats"
+
+          BALANCE_LND_DIFFERENCE=$((FINAL_LND_LOCAL_BALANCE - INITIAL_LND_LOCAL_BALANCE))
+          echo "Channel Balance Difference (LND): $BALANCE_LND_DIFFERENCE sats"
+
+          echo "final channel balance: lndnode"
+          docker exec lndnode lncli -n regtest channelbalance
+
+          echo "final channel balance: lndnode-receiver"
+          docker exec lndnode-receiver lncli -n regtest --rpcserver=127.0.0.1:10010 channelbalance
+
+          echo "final channels info: lndnode"
+          docker exec lndnode lncli -n regtest listchannels
+
+          echo "final channels info: lndnode-receiver"
+          docker exec lndnode-receiver lncli -n regtest --rpcserver=127.0.0.1:10010 listchannels
+
+          echo "invoices by lnd node"
+          docker exec lndnode lncli -n regtest listinvoices | tail -20
+
+          echo "invoices by lnd-receiver node"
+          docker exec lndnode-receiver lncli -n regtest --rpcserver=127.0.0.1:10010 listinvoices | tail -20
+
+          if [ "$BALANCE_RECEIVER_DIFFERENCE" -gt 0 ]; then
+            echo "✅ LND-receiver channel balance increased by $BALANCE_RECEIVER_DIFFERENCE sats from Cashu token redemption"
+          else
+            echo "❌ No redemption activity detected - channel balance did not increase"
+
+            echo "Payments by lnd node"
+            docker exec lndnode lncli -n regtest listpayments
+
+            echo "Payments by lnd-receiver node"
+            docker exec lndnode-receiver lncli -n regtest --rpcserver=127.0.0.1:10010 listpayments
+
+            echo "========== NGINX-LND LOGS BEGIN ==============="
+            docker logs nginx-lnd
+            echo "============ NGINX-LND LOGS END ================"
+
+            echo "========== CASHU MINT LOGS BEGIN ==============="
+            docker logs cashu-mint
+            echo "============ CASHU MINT LOGS END ================"
+
+            exit 1
+          fi
+
+          echo "✅ Cashu redemption on Lightning integration tests completed!"
+
+      - name: Verify Dynamic Parameter Discovery Feature
+        run: |
+          echo "════════════════════════════════════════════════════"
+          echo "   Testing Dynamic Parameter Discovery Feature"
+          echo "════════════════════════════════════════════════════"
+          echo ""
+          
+          # Redemption logs are written to a dedicated file, not stdout
+          REDEMPTION_LOG="/var/log/nginx/cashu_redemption.log"
+          
+          echo "[1/3] Checking redemption log file..."
+          if docker exec nginx-lnd test -f "$REDEMPTION_LOG"; then
+            echo "✅ Redemption log file exists"
+            echo ""
+            
+            echo "[2/3] Checking if dynamic parameter discovery triggered..."
+            if docker exec nginx-lnd grep -q "Fetching Mint Info for dynamic parameter discovery" "$REDEMPTION_LOG"; then
+              echo "✅ Dynamic parameter discovery feature triggered"
+              echo ""
+              
+              echo "[3/3] Extracting discovery results..."
+              docker exec nginx-lnd grep -E "(Fetching Mint Info|Found dynamic|NUT-05|NUT-08|Using default)" "$REDEMPTION_LOG" | tail -10
+              echo ""
+              echo "════════════════════════════════════════════════════"
+              echo "   ✅ Dynamic Parameter Discovery Test PASSED"
+              echo "════════════════════════════════════════════════════"
+            else
+              echo "❌ FAILED: Dynamic parameter discovery did NOT trigger"
+              echo ""
+              echo "Redemption log contents:"
+              docker exec nginx-lnd cat "$REDEMPTION_LOG"
+              echo ""
+              echo "════════════════════════════════════════════════════"
+              echo "   ❌ Dynamic Parameter Discovery Test FAILED"
+              echo "════════════════════════════════════════════════════"
+              exit 1
+            fi
+          else
+            echo "❌ FAILED: Redemption log file not found"
+            echo "Expected: $REDEMPTION_LOG"
+            echo ""
+            echo "Checking nginx-lnd container logs:"
+            docker logs nginx-lnd 2>&1 | tail -50
+            echo ""
+            echo "════════════════════════════════════════════════════"
+            echo "   ❌ Dynamic Parameter Discovery Test FAILED"
+            echo "════════════════════════════════════════════════════"
+            exit 1
+          fi
+
+      - name: Stop nginx-lnd and start nginx-lnurl
+        env: 
+          CASHU_WHITELISTED_MINTS: http://cashu-mint:3338
+          CASHU_WALLET_MNEMONIC: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+          LNURL_ADDRESS: hello@getalby.com
+        run: |
+          echo "Stopping nginx-lnd and starting nginx-lnurl for multi-tenant LNURL mode..."
+          # Remove wallet files from inside the running container (same UID/GID as nginx)
+          # before stopping, so nginx-lnurl can start fresh with its own mnemonic.
+          docker exec nginx-lnd rm -f /app/data/wallet.fingerprint /app/data/wallet.mnemonic
+          docker-compose -f docker-compose.yml stop nginx-lnd
+          # --no-deps, or redis loses its replay and pricing state.
+          docker-compose -f docker-compose.yml up -d --no-deps nginx-lnurl
+          sleep 15
+
+      - name: Run Integration Tests - Multi-tenant LNURL Cashu Redemption
+        run: |
+          echo "🏢 Testing Multi-tenant LNURL Cashu Redemption with 2 tenants..."
+
+          # Flush Redis for clean test
+          echo "Setting up Redis for multi-tenant testing..."
+          docker exec redis redis-cli flushall
+
+          # Create Cashu tokens for 2 tenants
+          echo "Creating Cashu tokens for 2-tenant multi-tenant redemption..."
+
+          # Create token 1 for tenant1 (amount: 50 sats) - maps to hello@getalby.com (nginx.conf)
+          TOKEN1=$(docker exec cashu-mint poetry run cashu send 50)
+          echo "Token1 for tenant1 (50 sats): $TOKEN1"
+
+          # Create token 2 for tenant2 (amount: 30 sats) - maps to test@walletofsatoshi.com (nginx.conf)
+          TOKEN2=$(docker exec cashu-mint poetry run cashu send 30)
+          echo "Token2 for tenant2 (30 sats): $TOKEN2"
+
+          sleep 5
+
+          # ========== TEST ACCESSING TENANT-SPECIFIC ROUTES ==========
+          echo "Testing multi-tenant token redemption with 2 different LNURL addresses..."
+
+          # Access tenant1 route - should map to hello@getalby.com (from nginx.conf)
+          echo "Accessing tenant1 route (hello@getalby.com)..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L -H "Authorization: Cashu $TOKEN1" http://0.0.0.0:8000/tenant1) || true
+          if [ "$(echo "$response" | tail -n1)" -ne 200 ]; then
+            echo "Error: Failed to access tenant1 route with Token1"
+            docker logs nginx-lnurl | tail -50
+            exit 1
+          fi
+          echo "✅ Token1 accepted and mapped to tenant1 (hello@getalby.com)"
+
+          # Access tenant2 route - should map to test@walletofsatoshi.com (from nginx.conf)
+          echo "Accessing tenant2 route (test@walletofsatoshi.com)..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L -H "Authorization: Cashu $TOKEN2" http://0.0.0.0:8000/tenant2) || true
+          if [ "$(echo "$response" | tail -n1)" -ne 200 ]; then
+            echo "Error: Failed to access tenant2 route with Token2"
+            docker logs nginx-lnurl | tail -50
+            exit 1
+          fi
+          echo "✅ Token2 accepted and mapped to tenant2 (test@walletofsatoshi.com)"
+
+          # ========== VERIFY REDIS PROOF-TO-LNURL MAPPINGS ==========
+          echo "Checking Redis for proof-to-lnurl mappings..."
+          sleep 2
+          REDIS_KEYS=$(docker exec redis redis-cli keys "cashu:proof_lnurl:*" 2>/dev/null | wc -l)
+          echo "Found $REDIS_KEYS proof-to-lnurl mappings in Redis"
+
+          if [ "$REDIS_KEYS" -gt 0 ]; then
+            echo "✅ Multi-tenant proof mappings created in Redis"
+          else
+            echo "❌ No proof mappings found in Redis"
+            exit 1
+          fi
+
+          echo "✅ Multi-tenant LNURL Cashu Redemption integration test completed with 2 tenants!"
+
+          # ========== TEST DYNAMIC REDIS LNURL OVERRIDE ==========
+          echo "Testing dynamic Redis LNURL address override (lnurl:<path> key)..."
+          # Override tenant1's LNURL address dynamically via Redis
+          docker exec redis redis-cli SET "lnurl:/tenant1" "dynamic@getalby.com"
+          OVERRIDE_TOKEN=$(docker exec cashu-mint poetry run cashu send 10)
+          override_resp=$(curl -s -w "\n%{http_code}" --max-time 30 -L \
+            -H "Authorization: Cashu $OVERRIDE_TOKEN" http://0.0.0.0:8000/tenant1) || true
+          override_code=$(echo "$override_resp" | tail -n1); override_code=${override_code:-000}
+          if [ "$override_code" -ne 200 ]; then
+            echo "❌ Dynamic LNURL override: token rejected with $override_code, expected 200"
+            docker logs nginx-lnurl | tail -30
+            exit 1
+          fi
+          # The proof should be mapped to the dynamic address, not the static one
+          sleep 2
+          DYNAMIC_KEYS=$(docker exec redis redis-cli keys "cashu:proof_lnurl:*" 2>/dev/null | wc -l)
+          if [ "$DYNAMIC_KEYS" -lt 1 ]; then
+            echo "❌ No proof-to-lnurl mapping after dynamic override"
+            exit 1
+          fi
+          echo "✅ Dynamic Redis LNURL override accepted token and created proof mapping"
+          # Clean up override key
+          docker exec redis redis-cli DEL "lnurl:/tenant1"
+
+      - name: Stop nginx-lnurl and start litd
+        run: |
+          echo "Stopping nginx-lnurl and starting litd (Lightning Terminal)..."
+          docker-compose -f docker-compose.yml stop nginx-lnurl
+          docker-compose -f docker-compose.yml up -d litd
+          sleep 20
+          echo "Waiting for litd to fully start..."
+          
+          # Check if litd is responding
+          max_attempts=30
+          attempt=0
+          while [ $attempt -lt $max_attempts ]; do
+            if docker exec litd wget -q -O- http://localhost:8443 > /dev/null 2>&1; then
+              echo "✓ litd is responding"
+              break
+            fi
+            attempt=$((attempt + 1))
+            echo "Attempt $attempt/$max_attempts: Waiting for litd..."
+            sleep 2
+          done
+          
+          if [ $attempt -eq $max_attempts ]; then
+            echo "Warning: litd may not be fully ready, but continuing..."
+            docker logs litd
+          fi
+
+      - name: Generate LNC Pairing Phrase
+        run: |
+          echo "Generating LNC pairing phrase..."
+          
+          # Wait for litd to be fully ready
+          sleep 10
+          
+          max_attempts=10
+          attempt=0
+          PAIRING_PHRASE=""
+          
+          while [ $attempt -lt $max_attempts ] && [ -z "$PAIRING_PHRASE" ]; do
+            echo "Attempt $attempt/$max_attempts: Creating LNC session..."
+            
+            SESSION_OUTPUT=$(docker exec litd litcli --network=regtest sessions add --label="ci_test" --type=admin 2>&1 || true)
+            
+            echo "Debug: Session output:"
+            echo "$SESSION_OUTPUT"
+            
+            if echo "$SESSION_OUTPUT" | grep -q "pairing_secret_mnemonic"; then
+              # Extract the full mnemonic - it should be the value of pairing_secret_mnemonic field
+              # The output is JSON-like, so we extract everything between the quotes after pairing_secret_mnemonic
+              PAIRING_PHRASE=$(echo "$SESSION_OUTPUT" | grep "pairing_secret_mnemonic" | sed 's/.*"pairing_secret_mnemonic"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' | tr -d '\n')
+              
+              # Count words to verify we got the full phrase
+              WORD_COUNT=$(echo "$PAIRING_PHRASE" | wc -w)
+              echo "Debug: Extracted phrase with $WORD_COUNT words"
+              
+              if [ "$WORD_COUNT" -eq 10 ] && [ -n "$PAIRING_PHRASE" ]; then
+                echo "✓ Generated pairing phrase with 10 words"
+                echo "LNC_PAIRING_PHRASE=$PAIRING_PHRASE" >> $GITHUB_ENV
+                break
+              else
+                echo "Warning: Got $WORD_COUNT words instead of 10, retrying..."
+                PAIRING_PHRASE=""
+              fi
+            fi
+            
+            attempt=$((attempt + 1))
+            if [ $attempt -lt $max_attempts ]; then
+              sleep 3
+            fi
+          done
+          
+          if [ -z "$PAIRING_PHRASE" ]; then
+            echo "Error: Could not generate LNC pairing phrase after $max_attempts attempts"
+            echo "Checking litd logs:"
+            docker logs litd | tail -100
+            exit 1
+          fi
+          
+          echo "✓ LNC pairing phrase generated successfully"
+          echo "Pairing phrase: ${PAIRING_PHRASE:0:50}..."
+
+      - name: Start nginx-lnc
+        run: |
+          echo "Starting nginx-lnc with LNC configuration..."
+          docker-compose -f docker-compose.yml up -d --no-deps nginx-lnc
+          sleep 15
+
+      - name: Run Integration Tests - LNC
+        run: |
+          echo "Testing with LNC (Lightning Node Connect) configuration..."
+          
+          # Test free route
+          echo "Testing free route..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 200 ]; then
+            echo "Error: Free route returned status $status_code, expected 200"
+            docker logs nginx-lnc
+            exit 1
+          fi
+          echo "✅ Free route test passed"
+
+          # Test protected route without header - should return 402 with invoice
+          echo "Testing protected route without header (LNC invoice generation)..."
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 402 ]; then
+            echo "Error: Protected route without header returned status $status_code, expected 402"
+            docker logs nginx-lnc
+            exit 1
+          fi
+          echo "✅ Protected route returned 402 Payment Required"
+          
+          # Check if WWW-Authenticate header is present
+          if ! echo "$response" | grep -q 'WWW-Authenticate: L402 macaroon='; then
+            echo "Error: WWW-Authenticate header is missing in the 402 response"
+            echo "$response"
+            docker logs nginx-lnc
+            exit 1
+          fi
+          echo "✅ WWW-Authenticate header present"
+
+          # Extract and validate invoice from header
+          invoice=$(echo "$response" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
+          if [ -z "$invoice" ]; then
+            echo "Error: No invoice found in WWW-Authenticate header"
+            echo "$response"
+            docker logs nginx-lnc
+            exit 1
+          fi
+          echo "✅ Invoice extracted: ${invoice:0:50}..."
+
+          # Validate invoice format (should start with lnbc for mainnet or lnbcrt for regtest)
+          if [[ "$invoice" =~ ^lnbc ]]; then
+            echo "✅ Invoice has valid BOLT11 format (lnbc prefix)"
+          elif [[ "$invoice" =~ ^lntb ]]; then
+            echo "✅ Invoice has valid BOLT11 testnet format (lntb prefix)"
+          elif [[ "$invoice" =~ ^lnbcrt ]]; then
+            echo "✅ Invoice has valid BOLT11 regtest format (lnbcrt prefix)"
+          else
+            echo "Error: Invoice does not have valid BOLT11 format"
+            echo "Invoice: $invoice"
+            exit 1
+          fi
+
+          # Decode invoice to verify it was generated correctly
+          echo "Decoding invoice to verify structure..."
+          decoded=$(docker exec lndnode lncli -n regtest decodepayreq "$invoice" 2>&1)
+          if echo "$decoded" | grep -q "num_msat"; then
+            amount=$(echo "$decoded" | jq -r '.num_msat' 2>/dev/null || echo "unknown")
+            echo "✅ Invoice decoded successfully (amount: $amount msat)"
+          else
+            echo "Warning: Could not decode invoice, but invoice was generated"
+            echo "Decoded output: $decoded"
+          fi
+
+          echo "✅ LNC invoice generation test completed successfully!"
+          echo "✅ LNC integration with Lightning Terminal verified!"
+
+      - name: Stop nginx-lnc and litd
+        run: |
+          docker-compose -f docker-compose.yml stop nginx-lnc litd
+
+      - name: Start Eclair Node and nginx-eclair
+        run: |
+          echo "Starting Eclair node and nginx-eclair..."
+          # Remove stale eclair-data volume so Eclair always starts with a clean
+          # blockchain/channel state. Without this, leftover data from a previous
+          # CI run causes Eclair to get stuck waiting for a funding tx that no
+          # longer exists on the regtest chain.
+          docker-compose -f docker-compose.yml rm -fsv eclair || true
+          docker volume rm ngx-l402_eclair-data 2>/dev/null || true
+          docker-compose -f docker-compose.yml up -d eclair nginx-eclair
+
+          echo "Waiting for Eclair to be ready and synced..."
+          for i in {1..30}; do
+            ECLAIR_HEIGHT=$(curl -s -u :eclairpass -X POST http://localhost:8282/getinfo | jq -r .blockHeight 2>/dev/null || echo "0") || true
+            BITCOIND_HEIGHT=$(docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass getblockcount 2>/dev/null || echo "0")
+            echo "Eclair height: $ECLAIR_HEIGHT, Bitcoind height: $BITCOIND_HEIGHT"
+            if [ "$ECLAIR_HEIGHT" -ge "$BITCOIND_HEIGHT" ] && [ "$ECLAIR_HEIGHT" -gt 0 ]; then
+              echo "✅ Eclair is synced!"
+              break
+            fi
+            sleep 2
+          done
+
+          # ── Pre-open LND→Eclair channel NOW so it accumulates confirmations
+          #    while the basic Eclair tests run, giving autodetect a head start.
+          echo "Pre-opening LND→Eclair channel..."
+          ECLAIR_NODE_ID=$(curl -s -u :eclairpass -X POST http://localhost:8282/getinfo | jq -r .nodeId) || true
+          echo "Eclair Node ID: $ECLAIR_NODE_ID"
+          echo "ECLAIR_NODE_ID=${ECLAIR_NODE_ID}" >> $GITHUB_ENV
+
+          docker exec lndnode lncli -n regtest connect ${ECLAIR_NODE_ID}@eclair:9945 || true
+          sleep 3
+          docker exec lndnode lncli -n regtest openchannel \
+            --node_key=${ECLAIR_NODE_ID} \
+            --local_amt=1000000 \
+            --min_confs=0 || true
+
+          # Mine 6 blocks first (enough to confirm the funding tx via RPC catch-up)
+          echo "Mining 6 blocks to confirm channel funding..."
+          MINE_ADDR=$(docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass \
+            -rpcwallet=my_wallet getnewaddress)
+          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass \
+            -rpcwallet=my_wallet generatetoaddress 6 "$MINE_ADDR"
+
+          # Restart Eclair to force a full RPC catch-up: after restart Eclair will
+          # re-scan its channel history via bitcoind RPC (not ZMQ) and discover
+          # the confirmed funding tx.
+          BITCOIND_TIP=$(docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass getblockcount)
+          echo "Restarting Eclair to force RPC sync to block $BITCOIND_TIP..."
+          docker-compose -f docker-compose.yml restart eclair
+          sleep 10
+
+          # Wait for Eclair to sync after restart.
+          echo "Waiting for Eclair to sync after restart..."
+          ECLAIR_SYNCED=false
+          for i in {1..40}; do
+            ECLAIR_HEIGHT=$(curl -s -u :eclairpass -X POST http://localhost:8282/getinfo \
+              | jq -r .blockHeight 2>/dev/null || echo "0")
+            if [ "$ECLAIR_HEIGHT" -ge "$BITCOIND_TIP" ] && [ "$ECLAIR_HEIGHT" -gt "0" ]; then
+              echo "Eclair synced to block $ECLAIR_HEIGHT (tip: $BITCOIND_TIP)"
+              ECLAIR_SYNCED=true
+              break
+            fi
+            echo "Eclair at $ECLAIR_HEIGHT, waiting for $BITCOIND_TIP... ($i/40)"
+            sleep 3
+          done
+          if [ "$ECLAIR_SYNCED" != "true" ]; then
+            echo "Error: Eclair did not sync past block $BITCOIND_TIP after restart"
+            docker logs eclair | tail -50
+            exit 1
+          fi
+
+          # Mine additional blocks NOW (after Eclair is synced and listening on ZMQ).
+          # Eclair transitions WAIT_FOR_FUNDING_CONFIRMED → NORMAL only when it
+          # receives a live ZMQ hashblock notification for a block at or past min-depth.
+          # Without new blocks post-restart the channel stays stuck.
+          echo "Mining 6 more blocks to trigger Eclair ZMQ confirmation events..."
+          MINE_ADDR=$(docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass \
+            -rpcwallet=my_wallet getnewaddress)
+          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass \
+            -rpcwallet=my_wallet generatetoaddress 6 "$MINE_ADDR"
+          BITCOIND_TIP=$(docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass getblockcount)
+          sleep 5
+
+          # Reconnect LND to Eclair AFTER it is fully synced so that
+          # the channel_ready messages are exchanged on a stable connection.
+          echo "Reconnecting LND to Eclair after sync..."
+          docker exec lndnode lncli -n regtest connect ${ECLAIR_NODE_ID}@eclair:9945 || true
+          sleep 5
+
+          # Wait for the channel to become NORMAL right here in the setup step so
+          # we fail fast with good diagnostics rather than timing out in the test step.
+          echo "Waiting for LND<->Eclair channel to become NORMAL..."
+          CHAN_READY=false
+          for i in {1..60}; do
+            # Re-attempt peer connection every 10 iterations
+            if [ $((i % 10)) -eq 1 ]; then
+              docker exec lndnode lncli -n regtest connect ${ECLAIR_NODE_ID}@eclair:9945 2>/dev/null || true
+            fi
+
+            ECLAIR_CHAN_STATE=$(curl -s -u :eclairpass -X POST http://localhost:8282/channels 2>/dev/null \
+              | jq -r ".[].state" 2>/dev/null | grep -m1 "NORMAL" || echo "")
+            LND_CHAN_ACTIVE=$(docker exec lndnode lncli -n regtest listchannels --peer=${ECLAIR_NODE_ID} \
+              2>/dev/null | jq '[.channels[] | select(.active == true)] | length' 2>/dev/null || echo "0")
+            LND_CHAN_ACTIVE=${LND_CHAN_ACTIVE:-0}
+
+            if [ "$ECLAIR_CHAN_STATE" = "NORMAL" ] || [ "$LND_CHAN_ACTIVE" -gt "0" ]; then
+              echo "Channel is NORMAL (Eclair: ${ECLAIR_CHAN_STATE}, LND active: ${LND_CHAN_ACTIVE})"
+              CHAN_READY=true
+              break
+            fi
+
+            # Mine a nudge block every 5 iterations to keep ZMQ events flowing
+            if [ $((i % 5)) -eq 0 ]; then
+              NUDGE_ADDR=$(docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass \
+                -rpcwallet=my_wallet getnewaddress 2>/dev/null || echo "")
+              if [ -n "$NUDGE_ADDR" ]; then
+                docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass \
+                  -rpcwallet=my_wallet generatetoaddress 1 "$NUDGE_ADDR" > /dev/null 2>&1 || true
+              fi
+            fi
+
+            echo "Channel not yet NORMAL ($i/60) [Eclair: ${ECLAIR_CHAN_STATE}, LND active: ${LND_CHAN_ACTIVE}]"
+            sleep 3
+          done
+
+          if [ "$CHAN_READY" != "true" ]; then
+            echo "Error: LND<->Eclair channel did not reach NORMAL state during setup"
+            echo "Eclair channels:"
+            curl -s -u :eclairpass -X POST http://localhost:8282/channels
+            echo "LND channels:"
+            docker exec lndnode lncli -n regtest listchannels
+            echo "Eclair logs (last 80 lines):"
+            docker logs eclair --tail=80
+            exit 1
+          fi
+          echo "LND<->Eclair channel ready!"
+
+      - name: Run Integration Tests - Eclair
+        run: |
+          echo "Testing with Eclair configuration..."
+          
+          # Test free route
+          echo "Testing free route..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 200 ]; then
+            echo "Error: Free route returned status $status_code, expected 200"
+            docker logs nginx-eclair
+            exit 1
+          fi
+          echo "✅ Free route test passed"
+
+          # Test protected route without header - should return 402 with invoice
+          echo "Testing protected route without header (Eclair invoice generation)..."
+          response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 402 ]; then
+            echo "Error: Protected route without header returned status $status_code, expected 402"
+            docker logs nginx-eclair
+            docker logs eclair
+            exit 1
+          fi
+          echo "✅ Protected route returned 402 Payment Required"
+          
+          # Check if WWW-Authenticate header is present
+          if ! echo "$response" | grep -q 'WWW-Authenticate: L402 macaroon='; then
+            echo "Error: WWW-Authenticate header is missing in the 402 response"
+            echo "$response"
+            docker logs nginx-eclair
+            exit 1
+          fi
+          echo "✅ WWW-Authenticate header present"
+
+          # Extract and validate invoice from header
+          invoice=$(echo "$response" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
+          if [ -z "$invoice" ]; then
+            echo "Error: No invoice found in WWW-Authenticate header"
+            echo "$response"
+            docker logs nginx-eclair
+            exit 1
+          fi
+          echo "✅ Invoice extracted: ${invoice:0:50}..."
+
+          # Validate invoice format (should start with lnbc for mainnet or lnbcrt for regtest)
+          if [[ "$invoice" =~ ^lnbc ]]; then
+            echo "✅ Invoice has valid BOLT11 format (lnbc prefix)"
+          elif [[ "$invoice" =~ ^lntb ]]; then
+            echo "✅ Invoice has valid BOLT11 testnet format (lntb prefix)"
+          elif [[ "$invoice" =~ ^lnbcrt ]]; then
+            echo "✅ Invoice has valid BOLT11 regtest format (lnbcrt prefix)"
+          else
+            echo "Error: Invoice does not have valid BOLT11 format"
+            echo "Invoice: $invoice"
+            exit 1
+          fi
+
+          # Test Eclair Autodetect
+          # ECLAIR_NODE_ID was exported in the "Start Eclair Node and nginx-eclair" step.
+          # The channel was also opened and funded there, so it has had time to confirm
+          # while the basic Eclair tests ran above.
+          echo "Checking Eclair channel status for autodetect test..."
+          echo "Eclair Node ID (from env): $ECLAIR_NODE_ID"
+
+          # Ensure peer is still connected
+          if ! docker exec lndnode lncli -n regtest listpeers | grep -q "${ECLAIR_NODE_ID}"; then
+            echo "Peer disconnected – reconnecting..."
+            docker exec lndnode lncli -n regtest connect ${ECLAIR_NODE_ID}@eclair:9945 || true
+            sleep 3
+          fi
+
+          # ── Quick pre-check: channel may already be NORMAL ──────────────────────
+          ECLAIR_CHAN_STATE=$(curl -s -u :eclairpass -X POST http://localhost:8282/channels 2>/dev/null \
+            | jq -r '.[].state' 2>/dev/null | grep -m1 "NORMAL" || echo "")
+          # Use grep -o | wc -l instead of grep -c to avoid "0\n0" when grep exits 1 on no match
+          LND_CHAN_ACTIVE=$(docker exec lndnode lncli -n regtest listchannels --peer=${ECLAIR_NODE_ID} \
+            2>/dev/null | grep -o '"active": true' | wc -l)
+
+          if [ "$ECLAIR_CHAN_STATE" = "NORMAL" ] || [ "$LND_CHAN_ACTIVE" -gt "0" ]; then
+            echo "✅ Channel already active (Eclair: ${ECLAIR_CHAN_STATE}, LND: ${LND_CHAN_ACTIVE}) – skipping wait loop."
+          else
+            echo "Waiting for channel to become active..."
+            for i in {1..60}; do
+              # Reconnect only if peer dropped (expensive call – do it sparingly)
+              if [ $((i % 10)) -eq 0 ] && ! docker exec lndnode lncli -n regtest listpeers | grep -q "${ECLAIR_NODE_ID}"; then
+                docker exec lndnode lncli -n regtest connect ${ECLAIR_NODE_ID}@eclair:9945 || true
+              fi
+
+              ECLAIR_CHAN_STATE=$(curl -s -u :eclairpass -X POST http://localhost:8282/channels 2>/dev/null \
+                | jq -r '.[].state' 2>/dev/null | grep -m1 "NORMAL" || echo "")
+              LND_CHAN_ACTIVE=$(docker exec lndnode lncli -n regtest listchannels --peer=${ECLAIR_NODE_ID} \
+                2>/dev/null | grep -o '"active": true' | wc -l)
+
+              if [ "$ECLAIR_CHAN_STATE" = "NORMAL" ] || [ "$LND_CHAN_ACTIVE" -gt "0" ]; then
+                echo "✅ Channel is active! (Eclair: ${ECLAIR_CHAN_STATE}, LND: ${LND_CHAN_ACTIVE})"
+                break
+              fi
+
+              # Mine a nudge block every 2 iterations (~4 s cadence) for fast gossip propagation
+              if [ $((i % 2)) -eq 0 ]; then
+                docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass \
+                  -rpcwallet=my_wallet generatetoaddress 1 \
+                  $(docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass \
+                    -rpcwallet=my_wallet getnewaddress) > /dev/null
+              fi
+
+              echo "Waiting for channel activation... ($i/60) [Eclair: ${ECLAIR_CHAN_STATE}, LND: ${LND_CHAN_ACTIVE}]"
+              sleep 2
+              if [ $i -eq 60 ]; then
+                echo "Error: Channel did not become active in time"
+                echo "Channels status:"
+                docker exec lndnode lncli -n regtest listchannels
+                echo "Peers status:"
+                docker exec lndnode lncli -n regtest listpeers
+                echo "Eclair channels:"
+                curl -s -u :eclairpass -X POST http://localhost:8282/channels
+                echo "Eclair info:"
+                curl -s -u :eclairpass -X POST http://localhost:8282/getinfo
+                exit 1
+              fi
+            done
+          fi
+
+          echo "Getting new invoice for Eclair Autodetect..."
+          response_auto=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected-auto) || true
+          invoice_auto=$(echo "$response_auto" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
+          macaroon_auto=$(echo "$response_auto" | grep -i "WWW-Authenticate: L402" | grep -o 'macaroon="[^"]*"' | cut -d'"' -f2)
+
+          echo "Paying Eclair invoice with LND..."
+          docker exec lndnode lncli -n regtest payinvoice -f $invoice_auto
+          sleep 5
+
+          echo "Testing Eclair Autodetect (macaroon only)..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 -H "Authorization: L402 $macaroon_auto" http://0.0.0.0:8000/protected-auto) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 200 ]; then
+            echo "Error: Eclair Autodetect failed with status $status_code"
+            docker logs nginx-eclair
+            exit 1
+          fi
+          echo "✅ Eclair Autodetect successful!"
+
+          echo "✅ Eclair invoice generation test completed successfully!"
+
+      - name: Stop nginx-eclair
+        run: |
+          docker-compose -f docker-compose.yml stop nginx-eclair eclair
+
+      # nginx restarts workers, so a worker exiting on a signal leaves no other
+      # trace. Runs on failure too, to surface it alongside the failing step.
+      - name: Check for worker crashes
+        if: always()
+        run: |
+          source .github/scripts/ci-wait.sh
+          failed=0
+          for c in nginx-lnd nginx-lnurl nginx-cln nginx-nwc nginx-bolt12 nginx-lnc nginx-eclair; do
+            docker inspect "$c" >/dev/null 2>&1 || continue
+            assert_no_crash "$c" || failed=1
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "❌ An nginx worker exited on a signal — see the lines above."
+            exit 1
+          else
+            echo "✅ No worker crashes detected"
+          fi

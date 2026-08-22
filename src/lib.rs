@@ -419,15 +419,40 @@ pub async fn get_or_create_lnurl_client(
 /// the true gate and closes the TOCTOU window between concurrent workers.
 /// Fails open (returns false) if Redis is unavailable.
 fn is_preimage_used(preimage: &[u8]) -> bool {
+    let redis_key = preimage_redis_key(preimage);
     let Some(pool) = redis_pool() else {
-        return false;
+        return PREIMAGE_CACHE.with(|c| c.borrow().contains(&redis_key));
     };
     let mut conn = match pool.get() {
         Ok(c) => c,
         Err(_) => return false,
     };
-    let redis_key = preimage_redis_key(preimage);
     conn.exists::<_, bool>(&redis_key).unwrap_or(false)
+}
+
+// Per-worker replay cache, used when Redis is not configured. Redis is the
+// authoritative cross-worker gate; this is the single-worker fallback the docs
+// promise operators who run without it. Mirrors the Cashu path's
+// PROCESSED_TOKENS, and holds the hashed key rather than the raw preimage so no
+// payment secret outlives the request.
+thread_local! {
+    static PREIMAGE_CACHE: std::cell::RefCell<ngx_l402_core::ReplayCache> =
+        std::cell::RefCell::new(ngx_l402_core::ReplayCache::default());
+}
+
+/// Warn once per worker that replay protection is degraded, rather than on
+/// every request.
+static NO_REDIS_REPLAY_REPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn warn_replay_is_in_process_only() {
+    if !NO_REDIS_REPLAY_REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        warn!(
+            "⚠️ Redis not configured — preimage replay protection is per-worker, bounded to \
+             {} entries, and lost on reload. Multi-worker deployments require Redis.",
+            ngx_l402_core::DEFAULT_REPLAY_CACHE_CAP
+        );
+    }
 }
 
 /// Why an atomic replay-claim (`store_*_as_used`) did not produce a definitive
@@ -459,18 +484,21 @@ impl std::fmt::Display for ReplayClaimError {
 /// Centralizes the configured-vs-unreachable Redis policy so the auto-detect and
 /// classic verification paths stay consistent:
 ///   - claimed (first use)       -> admit (NGX_DECLINED)
-///   - already claimed (race)    -> reject as replay (401)
-///   - Redis not configured      -> admit; in-process protection only
+///   - already claimed           -> reject as replay (401)
 ///   - Redis configured but down -> fail closed (503) to prevent replay
+///
+/// `store_preimage_as_used` resolves an unconfigured Redis itself, against the
+/// per-worker cache, so `NotConfigured` does not reach here from that path. The
+/// arm remains for other callers of the shared [`ReplayClaimError`].
 fn handle_preimage_claim(result: Result<bool, ReplayClaimError>) -> isize {
     match result {
         Ok(true) => NGX_DECLINED as isize,
         Ok(false) => {
-            warn!("🚨 Preimage already claimed by concurrent worker — replay rejected");
+            warn!("🚨 Preimage already claimed — replay rejected");
             401
         }
         Err(ReplayClaimError::NotConfigured) => {
-            warn!("⚠️ Redis not configured — replay protection is in-process only (single-worker)");
+            warn_replay_is_in_process_only();
             NGX_DECLINED as isize
         }
         Err(ReplayClaimError::Unavailable(e)) => {
@@ -497,13 +525,21 @@ fn store_preimage_as_used(
     preimage: &[u8],
     macaroon_timeout: i64,
 ) -> Result<bool, ReplayClaimError> {
-    let pool = redis_pool().ok_or(ReplayClaimError::NotConfigured)?;
+    let redis_key = preimage_redis_key(preimage);
+
+    // No Redis is an operator's deliberate choice: degrade to per-worker
+    // protection, as the Cashu path does. A *configured* Redis that is
+    // unreachable still fails closed below — that case is attacker-inducible
+    // and must not unlock replay.
+    let Some(pool) = redis_pool() else {
+        warn_replay_is_in_process_only();
+        return Ok(PREIMAGE_CACHE.with(|c| c.borrow_mut().claim(&redis_key)));
+    };
 
     let mut conn = pool
         .get()
         .map_err(|e| ReplayClaimError::Unavailable(format!("connection: {}", e)))?;
 
-    let redis_key = preimage_redis_key(preimage);
     // `None` = store without EX. Never-expiring macaroons need never-expiring
     // markers; the alternative is a guaranteed replay window once the TTL lapses.
     let ttl = if macaroon_timeout > 0 {

@@ -13,9 +13,14 @@ use std::sync::{Arc, OnceLock};
 use tokio::runtime::Runtime;
 use url::Url;
 
-// Thread-local storage to track processed tokens
+// Per-worker replay cache for Cashu tokens, used when Redis is not configured.
+// Shares `ngx_l402_core::ReplayCache` with the preimage path so both credential
+// types get the same bounded, FIFO-evicting protection: dropping the whole set
+// at capacity would let an attacker push `cap` fresh tokens through and then
+// replay an older one.
 thread_local! {
-    static PROCESSED_TOKENS: RefCell<Option<HashSet<String>>> = const { RefCell::new(None) };
+    static PROCESSED_TOKENS: RefCell<ngx_l402_core::ReplayCache> =
+        RefCell::new(ngx_l402_core::ReplayCache::default());
 }
 
 const MSAT_PER_SAT: u64 = 1000;
@@ -193,10 +198,6 @@ async fn get_or_create_wallet(
     let mut guard = cache.write().await;
     Ok(guard.entry(key).or_insert(wallet).clone())
 }
-
-/// Maximum number of entries in the thread-local PROCESSED_TOKENS cache.
-/// When exceeded, the set is cleared. Redis remains the authoritative replay check.
-const MAX_PROCESSED_TOKENS: usize = 10_000;
 
 /// Number of words in a freshly generated wallet mnemonic. 12 words = 128 bits
 /// of entropy (the common Cashu default).
@@ -469,19 +470,11 @@ fn persist_fingerprint(path: &str, fingerprint: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Add token to thread-local cache, clearing if at capacity.
+/// Record a token as spent in the per-worker cache. Eviction is FIFO, so at
+/// capacity only the oldest entry is dropped and recent tokens stay protected.
 fn cache_processed_token(token: &str) {
     PROCESSED_TOKENS.with(|tokens| {
-        if let Some(set) = tokens.borrow_mut().as_mut() {
-            if set.len() >= MAX_PROCESSED_TOKENS {
-                debug!(
-                    "🔄 PROCESSED_TOKENS cache at capacity ({}), clearing",
-                    MAX_PROCESSED_TOKENS
-                );
-                set.clear();
-            }
-            set.insert(token.to_string());
-        }
+        tokens.borrow_mut().claim(token);
     });
 }
 
@@ -583,10 +576,8 @@ pub fn initialize_ln_client(client_type: String) -> Result<(), String> {
 }
 
 pub fn initialize_cashu(db_url: &str) -> Result<(), String> {
-    // Initialize PROCESSED_TOKENS with empty HashSet
-    PROCESSED_TOKENS.with(|tokens| {
-        *tokens.borrow_mut() = Some(HashSet::new());
-    });
+    // PROCESSED_TOKENS needs no init — the thread-local is created empty on
+    // first use in whichever worker touches it.
 
     // Set Cashu eCash enabled flag
     let _ = CASHU_ECASH_ENABLED.set(true);
@@ -1025,13 +1016,7 @@ pub async fn verify_cashu_token(
     debug!("🔍 Verifying Cashu token, checking database connection...");
 
     // Check thread-local memory cache first (fastest path — no I/O)
-    let token_already_processed = PROCESSED_TOKENS.with(|tokens| {
-        if let Some(set) = tokens.borrow().as_ref() {
-            set.contains(token)
-        } else {
-            false
-        }
-    });
+    let token_already_processed = PROCESSED_TOKENS.with(|tokens| tokens.borrow().contains(token));
 
     if token_already_processed {
         warn!("🚨 Replay attack detected: Cashu token already used (memory cache)");
@@ -1214,12 +1199,7 @@ pub async fn verify_cashu_token_p2pk(
     info!("🔐 P2PK mode: Optimized token verification");
 
     // Check thread-local memory cache first (fastest path — no I/O)
-    let token_seen = PROCESSED_TOKENS.with(|tokens| {
-        tokens
-            .borrow()
-            .as_ref()
-            .is_some_and(|set| set.contains(token))
-    });
+    let token_seen = PROCESSED_TOKENS.with(|tokens| tokens.borrow().contains(token));
 
     if token_seen {
         warn!("🚨 Replay attack detected: Cashu token already used (memory cache)");

@@ -25,9 +25,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
 
-      - name: Start a Docker daemon inside the job
-        run: bash .ngit/act/lib/docker-in-job.sh
-
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:

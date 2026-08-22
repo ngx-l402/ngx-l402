@@ -30,50 +30,52 @@ and it is why a proposal cannot go green on Nostr and red on GitHub.
     workflows/nginx-compat.yml    the nginx version matrix
     workflows/lint.yml            fmt, clippy, and the sync check
     workflows/audit.yml           cargo audit
-    lib/docker-in-job.sh          the only ngit-specific code here
 
-## The two transforms sync.sh applies
+That is the whole directory. There is no CI infrastructure here — no shell, no
+Docker bootstrap, no second copy of any test.
 
-**1. It adds a step that starts a Docker daemon.** A GitHub runner provides
-one; an act job container does not, and this suite reaches its services over
-published ports (`curl http://0.0.0.0:8000/`) and with `docker exec` — both of
-which only behave like GitHub if the daemon shares the job's network namespace.
-So `tests.yml` and `nginx-compat.yml` gain one step after their checkout:
+## The one transform sync.sh applies
 
-    - name: Start a Docker daemon inside the job
-      run: bash .ngit/act/lib/docker-in-job.sh
-
-`docker-in-job.sh` handles what docker-in-docker then needs, each of which was
-a failure first: a loopback ext4 data root (overlay2 refuses to stack on the
-job's overlayfs and silently degrades to vfs), iptables (no NAT rules means no
-published ports), buildx (the Dockerfile's cache mounts are rejected by the
-legacy builder), and pinned checksummed tarballs rather than apt (installing
-`docker.io` over the act image's CLI fails on a dpkg file conflict).
-
-**2. It drops every job that declares a job-level `uses:`.** ngit-ci refuses a
+It **drops every job that declares a job-level `uses:`.** ngit-ci refuses a
 workflow file containing one, because it cannot statically verify the container
 declarations of a reusable workflow it has not fetched. In `tests.yml` that is
 the tag-gated release fan-out — `publish`, `publish-image` and `publish-docs`,
-which call `release-workflow.yml`, `ghcr-workflow.yml` and `docs.yml`. All
-three are gated on `refs/tags/v*` and would never run on a proposal.
+which call `release-workflow.yml`, `ghcr-workflow.yml` and `docs.yml`. All three
+are gated on `refs/tags/v*` and would never run on a proposal.
 
 Everything else is copied verbatim: of `tests.yml`'s 2945 lines, 2917 are kept
-unchanged.
+unchanged, and the other three workflows are byte-identical.
 
 `docs.yml`, `ghcr-workflow.yml` and `release-workflow.yml` are not mirrored at
 all — they publish to GitHub Pages, GHCR and GitHub Releases.
 
-## What the coordinator has to pass
+## Docker comes from the sandbox
 
-    --act-container-options "--privileged"
+A GitHub runner hands the job a Docker daemon. So does a paygress sandbox — the
+coordinator passes act the sandbox's own socket:
 
-Docker-in-docker needs it. Privileged is host root, which on a shared ngit-ci
-runner would be unacceptable — it is acceptable here only because the job runs
-on a rented sandbox that is destroyed when its lease expires.
+    --act-container-daemon-socket unix:///var/run/docker.sock
 
-The sandbox must also be able to nest containers. On paygress's LXD backend
-that means the provider advertises the `nesting` capability; on the KVM backend
-every sandbox is a full VM and it comes for free.
+`paygress-cli ci up` sets that, along with `--runner socket-adapter` and
+`--adapter-socket`. Nothing here has to know about it.
+
+This is why the directory carries no bootstrap. An earlier revision shipped a
+259-line script that installed a daemon inside the job container, because
+ngit-ci defaults that flag to `-` (mount nothing) and the sandbox's own daemon
+could not start a container anyway. Both halves of that are fixed on the
+paygress side: a provider advertising the `docker` capability launches the
+workload so its daemon works, and `ci up` passes the socket through.
+
+The provider must advertise `docker`. `ci up` requires it before spending
+anything, so a provider that cannot serve CI costs a search rather than a lease.
+
+## Running it
+
+    paygress-cli ci up --repo naddr1... --provider <name> --mint https://...
+
+That is the whole setup. No coordinator flags to remember and nothing
+privileged: the job talks to the sandbox's daemon over a socket rather than
+starting one of its own.
 
 ## Cost
 
@@ -90,7 +92,7 @@ is free parallelism, here it is a fifth sandbox.
 Any of these runs locally with [act](https://github.com/nektos/act), which is
 what the coordinator does:
 
-    act -W .github/workflows/tests.yml --container-options "--privileged"
+    act -W .github/workflows/tests.yml
 
 The sandbox is x86. Two images are not portable to arm64: CLN's compose
 entrypoint downloads an `x86_64-linux-gnu` nip47 plugin, and

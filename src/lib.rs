@@ -407,8 +407,8 @@ pub async fn get_or_create_lnurl_client(
             Ok(client_arc)
         }
         Err(e) => {
-            error!("❌ Failed to create LNURL client for {}: {:?}", addr, e);
-            Err(format!("Failed to create LNURL client: {:?}", e))
+            error!("❌ Failed to create LNURL client for {}: {}", addr, e);
+            Err(format!("Failed to create LNURL client: {}", e))
         }
     }
 }
@@ -1041,7 +1041,7 @@ impl L402Module {
                     match ln_client_conn.generate_invoice(ln_invoice).await {
                         Ok(result) => result,
                         Err(e) => {
-                            error!("❌ Error generating invoice via LNURL {}: {:?}", addr, e);
+                            error!("❌ Error generating invoice via LNURL {}: {}", addr, e);
                             return None;
                         }
                     }
@@ -1078,7 +1078,7 @@ impl L402Module {
             match ln_client_conn.generate_invoice(ln_invoice).await {
                 Ok(result) => result,
                 Err(e) => {
-                    error!("❌ Error generating invoice: {:?}", e);
+                    error!("❌ Error generating invoice: {}", e);
                     return None;
                 }
             }
@@ -2420,7 +2420,7 @@ pub fn l402_access_handler(
                         ));
                     }
                     Err(e) => {
-                        warn!("⚠️ L402 auto-detect verification failed: {:?}", e);
+                        warn!("⚠️ L402 auto-detect verification failed: {}", e);
                         return 401;
                     }
                 }
@@ -2461,13 +2461,13 @@ pub fn l402_access_handler(
                             ));
                         }
                         Err(e) => {
-                            warn!("⚠️ L402 verification failed: {:?}", e);
+                            warn!("⚠️ L402 verification failed: {}", e);
                             return 401;
                         }
                     }
                 }
                 Err(e) => {
-                    warn!("⚠️ Failed to parse L402 header: {:?}", e);
+                    warn!("⚠️ Failed to parse L402 header: {}", e);
                     return 401;
                 }
             }
@@ -2521,7 +2521,7 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
     // libsodium's RNG is only thread-safe once initialised, and every 402 mints
     // a macaroon from multiple workers at once. Done here, before nginx forks.
     if let Err(e) = macaroon::initialize() {
-        error!("❌ Failed to initialize macaroon crypto: {:?}", e);
+        error!("❌ Failed to initialize macaroon crypto: {}", e);
         return -1;
     }
 

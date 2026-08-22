@@ -979,7 +979,9 @@ impl L402Module {
             Arc::new(|req| vec![format!("RequestPath = {}", req.uri().path())]),
         )
         .await
-        .map_err(|e| format!("Failed to create L402 middleware: {:?}", e))?;
+        // Display, not Debug: this call receives a config holding root_key, and
+        // Debug would print it if an error ever captured one.
+        .map_err(|e| format!("Failed to create L402 middleware: {}", e))?;
 
         let _ = LN_CLIENT_CONFIG.set(ln_client_config);
         Ok(Self { middleware })

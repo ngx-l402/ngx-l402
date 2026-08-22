@@ -1,0 +1,44 @@
+# Compatibility — every supported nginx version.
+#
+# The GitHub mirror runs these as a parallel matrix. Here they share one job on
+# one lease, because a workflow file is a leased sandbox: five files meant five
+# sandboxes and five full dependency compiles. Sharing the daemon means the
+# cargo cache mount is reused and only nginx-dependent crates rebuild per
+# version.
+#
+# One workflow per slice, so a failure names an area and each slice publishes
+# its own kind-9841/9842 result. The coordinator runs one job at a time, so
+# the slices queue rather than compete for port 8000.
+#
+# Requires the coordinator to pass --act-container-options "--privileged":
+# the suite reaches services over published ports and with `docker exec`, which
+# only behaves like a GitHub runner when the daemon lives inside the job
+# container. See .ngit/act/lib/docker-in-job.sh.
+
+name: nginx-compat
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  compat:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start a docker daemon inside the job
+        run: bash .ngit/act/lib/docker-in-job.sh
+
+      - name: Build and smoke-test every supported nginx version
+        run: bash .ngit/act/slices/nginx-compat.sh
+
+      - name: Collect diagnostics
+        if: failure()
+        run: bash .ngit/act/lib/diagnose.sh
+
+      - name: Tear down the stack
+        if: always()
+        run: bash .ngit/act/lib/teardown.sh

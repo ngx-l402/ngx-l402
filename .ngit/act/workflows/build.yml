@@ -1,0 +1,82 @@
+# Nostr-native CI, run by an ngit-ci coordinator and published back to Nostr
+# as kind 9841/9842 events (see the ngit-ci NIP). GitHub Actions syntax, but
+# executed by `act`, so nothing here may assume a GitHub-hosted runner:
+# no docker daemon in the job, no GITHUB_TOKEN, no preinstalled toolchain.
+#
+# `.github/workflows/` is deliberately left alone — ngit-ci detects but never
+# runs it, so the GitHub mirror keeps its own pipeline.
+
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # Matches the Dockerfile's default; the version matrix stays on the
+      # GitHub mirror, which has a docker daemon to build images with.
+      NGX_VERSION: "1.28.0"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        # act images run as root and are much thinner than GitHub's runners,
+        # so every package the Dockerfile builder stage installs is repeated.
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential curl pkg-config libssl-dev libclang-dev \
+            protobuf-compiler make libpcre2-dev zlib1g-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Prepare nginx sources
+        # `--with-compat` only generates the headers the ngx crate binds
+        # against; nginx itself is never built here.
+        run: |
+          curl -fsSL "https://nginx.org/download/nginx-${NGX_VERSION}.tar.gz" | tar -xz
+          cd "nginx-${NGX_VERSION}" && ./configure --with-compat
+          echo "NGINX_SOURCE_DIR=$PWD" >> "$GITHUB_ENV"
+
+      - name: Run clippy
+        # Same invocation as .github/workflows/lint.yml: the two gates have to
+        # agree, or a proposal goes green here and red on the GitHub mirror.
+        # Deliberately not --release or --features, for the same reason.
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run unit tests (ngx_l402_core)
+        # Fast, nginx-free pure-logic tests (wallet-seed derivation, etc.).
+        # Ahead of the integration slices, which each cost a lease: a
+        # wallet-seed regression that would strand funds fails here in seconds
+        # instead of after a sandbox has been bought.
+        run: cargo test -p ngx_l402_core --verbose
+
+      - name: Build module
+        run: cargo build --release --features export-modules
+
+      - name: Verify the module was produced
+        run: test -f target/release/libngx_l402_lib.so
+
+      - name: Install cargo-audit
+        # --locked so the audit tool itself cannot drift between runs.
+        run: cargo install cargo-audit --locked
+
+      - name: Run cargo audit
+        # The mirror keeps this in its own workflow because parallel runners are
+        # free there. Here a workflow file is a leased sandbox, so a separate
+        # one would buy provisioning and an image pull for a dependency scan
+        # that needs nothing this job has not already installed.
+        #
+        # Same bare invocation as audit.yml: if the two disagree, a proposal
+        # goes green here and red on GitHub.
+        run: cargo audit

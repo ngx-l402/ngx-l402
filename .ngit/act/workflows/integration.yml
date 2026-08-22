@@ -1,0 +1,45 @@
+# The whole integration suite, in one job on one lease.
+#
+# One workflow file is one WorkflowPlan is one dispatch is one leased sandbox.
+# Splitting the suite across files therefore bought per-area result events at
+# the price of a fresh sandbox — and a fresh ~400-crate compile — per area. On
+# a 4 vCPU box that is hours instead of minutes, so the suite runs together and
+# shares the daemon, the image build and the regtest backbone.
+#
+# The per-slice scripts are unchanged and still runnable one at a time:
+#   .ngit/act/slices/lnd.sh
+# Split this back into per-slice files once ngit-ci publishes per-job results
+# (kind 9841); until then a split costs money and buys only log separation.
+#
+# Requires the coordinator to pass --act-container-options "--privileged":
+# the suite reaches services over published ports and with `docker exec`, which
+# only behaves like a GitHub runner when the daemon lives inside the job
+# container. See .ngit/act/lib/docker-in-job.sh.
+
+name: integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start a docker daemon inside the job
+        run: bash .ngit/act/lib/docker-in-job.sh
+
+      - name: Integration suite (all slices)
+        run: bash .ngit/act/slices/all.sh
+
+      - name: Collect diagnostics
+        if: failure()
+        run: bash .ngit/act/lib/diagnose.sh
+
+      - name: Tear down the stack
+        if: always()
+        run: bash .ngit/act/lib/teardown.sh

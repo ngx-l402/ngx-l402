@@ -42,9 +42,12 @@ jobs:
         with:
           components: clippy
 
-      # tonic's build script shells out to protoc; not present on clean runners.
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      # tonic's build script shells out to protoc, and nginx-sys binds through
+      # bindgen, which needs libclang. GitHub's runner image happens to carry
+      # libclang; leaner ones (the act images ngit-ci runs on) do not, and the
+      # failure there is a bindgen panic that reads like a code fault.
+      - name: Install protoc and libclang
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libclang-dev
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2

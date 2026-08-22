@@ -30,7 +30,24 @@ unfilter_pull_request() {
   '
 }
 
-# 2. Drop every job whose body declares a job-level `uses:`, with the comments
+# 2. Serialise matrix jobs.
+#
+# On GitHub each matrix job gets its own runner and its own Docker daemon, so
+# five nginx versions build in parallel and share nothing. Here they share the
+# sandbox's one daemon -- and therefore one BuildKit cache mount. Run together
+# they corrupt each other's cargo registry unpack (`File exists (os error 17)`)
+# and publish to the same host ports. Measured: two of five survived.
+#
+# max-parallel is the smallest change that restores the isolation the workflow
+# was written against. It costs wall-clock, not correctness.
+serialise_matrix() {
+  awk '
+    /^    strategy:[[:space:]]*$/ { print; print "      max-parallel: 1"; next }
+    { print }
+  '
+}
+
+# 3. Drop every job whose body declares a job-level `uses:`, with the comments
 # and blank lines that introduce it.
 #
 # ngit-ci refuses a workflow file containing one, because it cannot verify the
@@ -51,6 +68,7 @@ drop_reusable_jobs() {
 }
 
 for f in nginx-compat.yml lint.yml audit.yml; do
-  unfilter_pull_request < "$src/$f" > "$out/$f"
+  unfilter_pull_request < "$src/$f" | serialise_matrix > "$out/$f"
 done
-unfilter_pull_request < "$src/tests.yml" | drop_reusable_jobs > "$out/tests.yml"
+unfilter_pull_request < "$src/tests.yml" | serialise_matrix | drop_reusable_jobs \
+  > "$out/tests.yml"

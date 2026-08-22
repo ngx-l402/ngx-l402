@@ -10,6 +10,7 @@ jobs:
   build-and-verify:
     runs-on: ubuntu-latest
     strategy:
+      max-parallel: 1
       fail-fast: false
       matrix:
         nginx_version: ["1.28.0", "1.28.3", "1.29.8", "1.30.3", "1.31.2"]

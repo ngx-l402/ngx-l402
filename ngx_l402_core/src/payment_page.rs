@@ -1,10 +1,12 @@
 //! Payment page HTML renderer for the L402 402-challenge response.
 //!
-//! Separated from `lib.rs` to keep the core module focused on Nginx plumbing.
-//! This module owns all HTML, CSS, and JavaScript that is sent to the browser
-//! when a protected resource requires payment.
+//! Owns all HTML, CSS and JavaScript sent to the browser when a protected
+//! resource requires payment. It touches no nginx types, so it lives here
+//! rather than in the `cdylib` — where `test = false` means a `#[test]` block
+//! could never run, and the escaping and auto-detect wiring would go
+//! unverified.
 
-use ngx_l402_core::html_escape;
+use crate::escaping::html_escape;
 
 /// Serialise a value as a JSON literal safe to inline in a `<script>` block.
 ///
@@ -399,4 +401,149 @@ document.getElementById('preimage-section').classList.remove('hidden')\">Enter p
         macaroon_json = script_json_literal(macaroon_b64),
         auto_detect_js = auto_detect_js,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const INVOICE: &str = "lnbc100n1pjabcdefgqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
+    const MACAROON: &str = "AgELbmd4X2w0MDIuaW8CQgAA";
+
+    fn render(auto_detect: bool, cashu_enabled: bool, cashu_req: Option<&str>) -> String {
+        render_payment_page(
+            INVOICE,
+            10_000,
+            MACAROON,
+            auto_detect,
+            cashu_enabled,
+            cashu_req,
+        )
+    }
+
+    #[test]
+    fn auto_detect_on_polls_and_hides_manual_entry() {
+        let html = render(true, false, None);
+        assert!(
+            html.contains("startPolling()"),
+            "polling JS must be injected"
+        );
+        assert!(
+            html.contains("id=\"auto-status\""),
+            "the waiting spinner must be present"
+        );
+        // The manual field still exists — the fallback below reveals it — but it
+        // starts hidden so the two flows are not offered at once.
+        assert!(
+            html.contains("id=\"preimage-section\" class=\"hidden\""),
+            "manual preimage entry must start hidden while polling"
+        );
+    }
+
+    #[test]
+    fn auto_detect_off_shows_manual_entry_and_no_polling() {
+        let html = render(false, false, None);
+        assert!(
+            !html.contains("startPolling"),
+            "no polling JS without auto-detect"
+        );
+        assert!(
+            !html.contains("id=\"auto-status\""),
+            "no spinner without auto-detect"
+        );
+        assert!(
+            html.contains("id=\"preimage-input\""),
+            "manual preimage entry must be offered"
+        );
+        assert!(
+            !html.contains("id=\"preimage-section\" class=\"hidden\""),
+            "manual entry must be visible, not hidden"
+        );
+    }
+
+    /// After MAX_POLL attempts the spinner is dismissed and manual entry is
+    /// revealed, so a stalled detector never leaves the payer stuck.
+    #[test]
+    fn poll_fallback_reveals_manual_entry() {
+        let html = render(true, false, None);
+        assert!(html.contains("MAX_POLL"), "a poll ceiling must exist");
+        assert!(
+            html.contains("pollAttempts++ > MAX_POLL"),
+            "the ceiling must be enforced"
+        );
+        assert!(
+            html.contains("document.getElementById('preimage-section').classList.remove('hidden')"),
+            "hitting the ceiling must reveal manual preimage entry"
+        );
+    }
+
+    #[test]
+    fn cashu_tab_appears_only_when_enabled() {
+        let with = render(false, true, None);
+        assert!(
+            with.contains("id=\"tab-ecash\""),
+            "Cashu panel when enabled"
+        );
+        assert!(
+            with.contains("id=\"cashu-token\""),
+            "Cashu input when enabled"
+        );
+
+        let without = render(false, false, None);
+        assert!(
+            !without.contains("id=\"tab-ecash\""),
+            "no Cashu panel when off"
+        );
+        assert!(
+            !without.contains("id=\"cashu-token\""),
+            "no Cashu input when off"
+        );
+    }
+
+    #[test]
+    fn cashu_payment_request_is_shown_only_when_supplied() {
+        let with = render(false, true, Some("creqAxyz123"));
+        assert!(
+            with.contains("creqAxyz123"),
+            "the request must be previewed"
+        );
+        assert!(
+            with.contains("Payment Request"),
+            "the preview box must render"
+        );
+
+        // The `payment-req-*` classes are always in the stylesheet, so assert on
+        // the rendered box instead of the class name.
+        let without = render(false, true, None);
+        assert!(
+            !without.contains("Payment Request"),
+            "no preview box without a request"
+        );
+        assert!(!without.contains("creqA"));
+    }
+
+    /// The invoice and macaroon are interpolated into an inline <script>. A
+    /// value containing `</script>` must not be able to close the element —
+    /// the tokenizer ends it at the first literal `</script`, whatever the JS
+    /// string context.
+    #[test]
+    fn script_context_cannot_be_broken_out_of() {
+        let hostile = "</script><img src=x onerror=alert(1)>";
+        let html = render_payment_page(hostile, 10_000, hostile, true, true, Some(hostile));
+        assert!(
+            !html.to_ascii_lowercase().contains("</script><img"),
+            "a script-closing sequence survived into the page"
+        );
+        assert!(
+            !html.contains("onerror=alert(1)>"),
+            "unescaped attacker markup reached the output"
+        );
+    }
+
+    #[test]
+    fn amount_is_rendered_in_sats() {
+        // 10_000 msat = 10 sat.
+        let html = render(false, false, None);
+        assert!(html.contains(">10<") || html.contains("10 sat") || html.contains("10</"));
+    }
 }

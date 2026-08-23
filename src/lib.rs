@@ -39,7 +39,6 @@ mod cashu;
 mod cashu_redemption_logger;
 mod manifest;
 mod metrics;
-mod payment_page;
 
 static MODULE: OnceLock<L402Module> = OnceLock::new();
 
@@ -2195,7 +2194,7 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
                     } else {
                         None
                     };
-                    let html = payment_page::render_payment_page(
+                    let html = ngx_l402_core::render_payment_page(
                         &invoice,
                         final_amount,
                         &macaroon_b64,

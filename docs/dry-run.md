@@ -123,15 +123,22 @@ sudo tail -f /var/log/nginx/error.log \
 The `l402_metrics` directive turns a location into a Prometheus scrape
 endpoint. It serves counters in text exposition format v0.0.4.
 
+The shipped `nginx.conf` closes it to everything but localhost, because the
+counters carry invoice volume and revenue signals and that file ships inside the
+Docker image. Widen `allow` to reach it from your scrape host:
+
 ```nginx
 location = /metrics {
-    l402_metrics;
-
-    # Production: restrict to your scrape network.
-    allow 10.0.0.0/8;
+    allow 127.0.0.1;
+    allow ::1;
+    allow 10.0.0.0/8;      # your Prometheus host or monitoring subnet
     deny  all;
+    l402_metrics;
 }
 ```
+
+Scraping from another container puts the request on the Docker bridge, not
+loopback — allow that network rather than removing `deny all`.
 
 Scrape it with a standard Prometheus config:
 

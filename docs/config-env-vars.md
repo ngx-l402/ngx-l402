@@ -285,6 +285,37 @@ These are set inside `location {}` blocks in `nginx.conf` (not environment varia
 
 > ¹ **Boolean directives** accept: `on` / `off` / `true` / `false` / `1` / `0` / `yes` / `no` (case-insensitive).
 
+### Rate limiting behind a proxy
+
+`l402_invoice_rate_limit` buckets by the **connection's** source address. It
+deliberately ignores `X-Real-IP` and `X-Forwarded-For`, because a client can set
+those itself — keying on one would let anyone mint a fresh bucket per request
+and bypass the limit entirely.
+
+If nginx sits behind a load balancer or CDN, every request arrives from the
+proxy's address and would share a single bucket. Configure nginx's own realip
+module so the real client address is substituted before the L402 access phase
+runs:
+
+```nginx
+set_real_ip_from  10.0.0.0/8;      # your proxy's range — and only your proxy's
+real_ip_header    X-Real-IP;       # or X-Forwarded-For
+```
+
+Listing the trusted ranges is what makes the header safe to believe, and it
+keeps that decision with the operator, who knows the topology.
+
+If a rate-limited request arrives carrying an `X-Real-IP` that does not match
+the connection address, the module logs this once per worker so the
+misconfiguration is visible before users start hitting limits they shouldn't:
+
+```
+l402_invoice_rate_limit is bucketing by connection address 10.0.0.7, but this
+request carried X-Real-IP: 203.0.113.5. If 10.0.0.7 is your proxy, configure
+`set_real_ip_from 10.0.0.7;` — otherwise every client behind it shares one
+bucket.
+```
+
 ### Realm-scoped access
 
 By default a macaroon is bound to the exact path it was minted for: paying for

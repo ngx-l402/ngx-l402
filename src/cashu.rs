@@ -18,7 +18,8 @@ thread_local! {
     static PROCESSED_TOKENS: RefCell<Option<HashSet<String>>> = const { RefCell::new(None) };
 }
 
-const MSAT_PER_SAT: u64 = 1000;
+// Single definition, shared with `sat_to_msat` so the two can never disagree.
+use ngx_l402_core::MSAT_PER_SAT;
 
 // Database singleton using cdk-sqlite. Opened in the master; `CASHU_DB_PID`
 // records who opened it so a forked worker knows to open its own instead of
@@ -840,6 +841,13 @@ fn set_proof_to_lnurl(
         .get()
         .map_err(|e| format!("Failed to get redis connection from pool: {}", e))?;
 
+    // Mappings are normally deleted once their proofs melt, but a proof that
+    // never redeems — redemption disabled, a mint permanently unreachable, a
+    // melt that keeps failing — would otherwise leave its key in Redis forever.
+    // Expire well past the redemption interval so a live mapping is never lost
+    // while an abandoned one still goes away on its own.
+    let ttl = proof_lnurl_ttl_secs();
+
     for proof in proofs {
         let secret = proof.secret.to_string();
 
@@ -849,11 +857,28 @@ fn set_proof_to_lnurl(
         let proof_hash = hex::encode(hasher.finalize());
 
         let redis_key = format!("cashu:proof_lnurl:{}", proof_hash);
-        conn.set::<_, _, ()>(&redis_key, &lnurl)
+        conn.set_ex::<_, _, ()>(&redis_key, &lnurl, ttl)
             .map_err(|e| format!("Failed to set proof mapping: {}", e))?;
     }
 
     Ok(())
+}
+
+/// Lifetime of a proof-to-LNURL mapping, in seconds.
+///
+/// Sized from the redemption interval so a mapping always outlives the cycle
+/// that would consume it: 20 intervals, floored at 24h and capped at 30 days.
+/// A mapping that expires early would send that tenant's proofs to the default
+/// address, so the floor matters more than the ceiling.
+fn proof_lnurl_ttl_secs() -> u64 {
+    const DAY: u64 = 86_400;
+    let interval = std::env::var("CASHU_REDEMPTION_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(3600);
+
+    interval.saturating_mul(20).clamp(DAY, 30 * DAY)
 }
 
 /// Remove proof-to-lnurl mappings from Redis after proofs have been melted
@@ -890,10 +915,23 @@ fn group_proofs_by_lnurl(
         .map_err(|_| "LNURL_ADDRESS is required for multi-tenant mode".to_string())?;
 
     for proof in proofs {
-        let lnurl = get_lnurl_from_proof(&proof)
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| default_lnurl.clone());
+        // Distinguish "no mapping recorded" from "could not read the mapping".
+        // Only the first may fall back to the default address: on a Redis
+        // failure the tenant's mapping still exists and is simply unreadable,
+        // so paying its proofs to LNURL_ADDRESS would melt their funds into the
+        // operator's wallet. Abort the cycle instead — the proofs stay unspent
+        // and the next run redeems them to the right place.
+        let lnurl = match get_lnurl_from_proof(&proof) {
+            Ok(Some(mapped)) => mapped,
+            Ok(None) => default_lnurl.clone(),
+            Err(e) => {
+                return Err(format!(
+                    "cannot read the proof-to-LNURL mapping, refusing to redeem to the \
+                     default address and misroute tenant funds: {}",
+                    e
+                ));
+            }
+        };
 
         if lnurl.is_empty() {
             continue;
@@ -1590,10 +1628,10 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
     // Captured at init: this runs in a worker, with no environment to read.
     let melt = melt_config();
     let min_balance_sats = melt.min_balance_sats;
-    let minimum_for_redemption_msat = min_balance_sats * MSAT_PER_SAT;
+    let minimum_for_redemption_msat = ngx_l402_core::sat_to_msat(min_balance_sats);
     let fee_reserve_percent = melt.fee_reserve_percent;
     let min_fee_reserve_sats = melt.min_fee_reserve_sats;
-    let min_fee_reserve_msat = min_fee_reserve_sats * MSAT_PER_SAT;
+    let min_fee_reserve_msat = ngx_l402_core::sat_to_msat(min_fee_reserve_sats);
     let max_proofs_per_melt = melt.max_proofs_per_melt;
 
     let msg = if max_proofs_per_melt > 0 {
@@ -1766,9 +1804,10 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                                             if let Some(min_amount) =
                                                 method.get("min_amount").and_then(|m| m.as_u64())
                                             {
+                                                // min_amount is mint-supplied.
                                                 current_minimum_for_redemption_msat =
                                                     if unit == "sat" {
-                                                        min_amount * MSAT_PER_SAT
+                                                        ngx_l402_core::sat_to_msat(min_amount)
                                                     } else {
                                                         min_amount
                                                     };
@@ -1822,8 +1861,9 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                                         if let Some(min_fee) =
                                             entry.get("min").and_then(|m| m.as_u64())
                                         {
+                                            // min_fee is mint-supplied.
                                             current_min_fee_reserve_msat = if unit == "sat" {
-                                                min_fee * MSAT_PER_SAT
+                                                ngx_l402_core::sat_to_msat(min_fee)
                                             } else {
                                                 min_fee
                                             };
@@ -1877,7 +1917,7 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                 .map(|p| {
                     let amount: u64 = p.amount.into();
                     if wallet.unit == cdk::nuts::CurrencyUnit::Sat {
-                        amount * MSAT_PER_SAT
+                        ngx_l402_core::sat_to_msat(amount)
                     } else {
                         amount
                     }
@@ -1908,7 +1948,7 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                         .map(|p| {
                             let amount: u64 = p.amount.into();
                             if wallet.unit == cdk::nuts::CurrencyUnit::Sat {
-                                amount * MSAT_PER_SAT
+                                ngx_l402_core::sat_to_msat(amount)
                             } else {
                                 amount
                             }
@@ -2067,15 +2107,15 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                 Ok(q) => {
                     let actual_fee_reserve_sats: u64 = q.fee_reserve.into();
                     let amount_sats: u64 = q.amount.into();
-                    // Saturating conversion: these amounts come from the mint, so
-                    // a buggy/hostile quote must not overflow the sat->msat math.
-                    // An absurd value saturates to u64::MAX and is rejected by the
-                    // balance check below rather than wrapping to a small number.
+                    // These amounts come from the mint: a buggy or hostile quote
+                    // must not overflow the sat->msat math. sat_to_msat
+                    // saturates, so an absurd value is rejected by the balance
+                    // check below rather than wrapping to a small number.
                     let (actual_fee_reserve_msat, amount_msat) =
                         if wallet.unit == cdk::nuts::CurrencyUnit::Sat {
                             (
-                                actual_fee_reserve_sats.saturating_mul(MSAT_PER_SAT),
-                                amount_sats.saturating_mul(MSAT_PER_SAT),
+                                ngx_l402_core::sat_to_msat(actual_fee_reserve_sats),
+                                ngx_l402_core::sat_to_msat(amount_sats),
                             )
                         } else {
                             (actual_fee_reserve_sats, amount_sats)
@@ -2118,11 +2158,29 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                         client_id
                     );
 
+                    // An unsigned proof cannot melt, so submitting the batch
+                    // anyway just burns the quote and surfaces a local signing
+                    // failure as an opaque mint rejection. Stop at the first
+                    // one and say which proof failed.
                     let mut signed_proofs = proofs_to_melt.clone();
-                    for proof in &mut signed_proofs {
+                    let mut signing_error = None;
+                    for (i, proof) in signed_proofs.iter_mut().enumerate() {
                         if let Err(e) = proof.sign_p2pk(private_key.clone()) {
-                            error!("❌ Failed to sign proof: {}", e);
+                            signing_error = Some(format!(
+                                "failed to sign P2PK proof {} of {}: {}",
+                                i + 1,
+                                proofs_to_melt.len(),
+                                e
+                            ));
+                            break;
                         }
+                    }
+
+                    if let Some(msg) = signing_error {
+                        let msg = format!("❌ Not melting for {}: {}", client_id, msg);
+                        error!("{}", msg);
+                        cashu_redemption_logger::log_redemption(&msg);
+                        continue;
                     }
 
                     wallet_clone.melt_proofs(&quote.id, signed_proofs).await
@@ -2140,9 +2198,11 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                     info!("{}", result_msg);
                     cashu_redemption_logger::log_redemption(&result_msg);
 
+                    // fee_reserve is mint-supplied — the same value guarded with
+                    // saturating_mul when the quote was validated above.
                     let actual_fees_sats: u64 = quote.fee_reserve.into();
                     let actual_fees_msat = if wallet.unit == cdk::nuts::CurrencyUnit::Sat {
-                        actual_fees_sats * MSAT_PER_SAT
+                        ngx_l402_core::sat_to_msat(actual_fees_sats)
                     } else {
                         actual_fees_sats
                     };

@@ -54,11 +54,20 @@ services:
       - ROOT_KEY=${ROOT_KEY}
       - REDIS_URL=redis://redis:6379
       - DOMAIN=${DOMAIN}
+      # Cashu ecash (optional): also accept NUT-24 X-Cashu tokens. Values come
+      # from .env; empty CASHU_ECASH_SUPPORT keeps the server L402-only. The
+      # wallet db persists in the cashu volume.
+      - CASHU_ECASH_SUPPORT=${CASHU_ECASH_SUPPORT:-}
+      - CASHU_WHITELISTED_MINTS=${CASHU_WHITELISTED_MINTS:-}
+      - CASHU_WALLET_MNEMONIC=${CASHU_WALLET_MNEMONIC:-}
+      - CASHU_REDEEM_ON_LIGHTNING=${CASHU_REDEEM_ON_LIGHTNING:-true}
+      - CASHU_DB_PATH=/cashu/wallet.db
     ports:
       - "443:443"
     volumes:
       - ./nginx.conf.template:/etc/nginx/nginx.conf.template:ro
       - ./certbot/conf:/etc/letsencrypt:ro
+      - cashu-data:/cashu
     depends_on:
       redis:
         condition: service_started
@@ -76,3 +85,4 @@ services:
 volumes:
   redis-data:
   blossom-data:
+  cashu-data:

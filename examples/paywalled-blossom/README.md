@@ -84,6 +84,44 @@ curl -i -H "Authorization: L402 <macaroon>:<preimage>" \
 #   expect: HTTP/2 200 — the realm token covers every blob here
 ```
 
+## Enable Cashu (optional)
+
+To accept **Cashu ecash** alongside Lightning, fill the `CASHU_*` block in `.env`
+(already in `.env.example` and wired into the `nginx-l402` service). The download
+paywall then returns an `X-Cashu` NUT-24 payment request on its `402` **in addition
+to** `WWW-Authenticate: L402`, and a client that speaks either can pay. No
+`nginx.conf.template` change is needed: the existing `l402 on` location advertises
+both once ecash is on.
+
+The keys that matter:
+
+- `CASHU_ECASH_SUPPORT=true` turns it on (empty keeps the server L402-only).
+- `CASHU_WHITELISTED_MINTS` — comma-separated mints whose tokens you accept, and
+  **required**: with no whitelist the server won't advertise a Cashu challenge,
+  because accepting an arbitrary mint would let a forged mint pay. The example
+  ships the Minibits (`https://mint.minibits.cash/Bitcoin`) and Coinos
+  (`https://mint.coinos.io`) mints.
+- `CASHU_WALLET_MNEMONIC` — the server's own ecash wallet seed (12 BIP39 words); it
+  receives the tokens. Pin and back it up; it controls the funds.
+- `CASHU_REDEEM_ON_LIGHTNING=true` melts received ecash to your configured
+  Lightning backend (the LNURL address, in this example).
+
+Verify the challenge before pointing a client at it:
+
+```bash
+curl -si https://blossom.YOURDOMAIN/<64-hex> \
+  | grep -iE "HTTP/|x-cashu|www-authenticate"
+#   expect a 402 with BOTH an `x-cashu: creqA…` and a `www-authenticate: L402 …` line
+```
+
+**Testing with free ecash.** Point the whitelist at a test mint and turn melting
+off (fake ecash can't be melted to real Lightning), so no real sats move:
+
+```
+CASHU_WHITELISTED_MINTS=https://testnut.cashu.space
+CASHU_REDEEM_ON_LIGHTNING=false
+```
+
 ## Notes
 
 - **blossom-server config** — base `blossom-config.yml` on the upstream example;
@@ -111,8 +149,9 @@ curl -i -H "Authorization: L402 <macaroon>:<preimage>" \
   upload route: realms are matched exactly, and the method binding rules it out
   independently. Uploads stay per-blob on purpose (each one holds disk for 90 days);
   see `nginx.conf.template` for how to opt into a write realm instead.
-- **Cashu** (optional) — to also accept ecash, add the `CASHU_*` env from the
-  ngx_l402 `.env.example` to the `nginx-l402` service.
+- **Cashu** (optional) — see [Enable Cashu](#enable-cashu-optional) above; the
+  `CASHU_*` env is already wired into `.env.example` and the `nginx-l402` service,
+  defaulting to the Minibits and Coinos mints.
 
 ### Sizing the realm window
 

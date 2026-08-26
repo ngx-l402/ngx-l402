@@ -103,7 +103,7 @@ Fields:
 | `price_msat` | Effective price in millisatoshis. |
 | `price_source` | `static` (from `nginx.conf`) or `dynamic` (from Redis). |
 | `backend` | LN backend type snapshot: `LND`, `LNURL`, `NWC`, `CLN`, `BOLT12`, `ECLAIR`. |
-| `client_ip` | From `X-Real-IP` → `X-Forwarded-For` → socket address. |
+| `client_ip` | The connection's source address. Proxy headers are not trusted; configure nginx's realip module to substitute the real client address. |
 | `auth_state` | `missing`, `valid`, or `invalid`. |
 | `would_return` | HTTP status enforce mode *would* have used (`200`, `401`, `402`). |
 | `rate_limited` | `true` when `l402_invoice_rate_limit` would have produced a `429` — challenge synthesis was skipped to protect the LN backend. |

@@ -80,8 +80,21 @@ a lease.
 
     paygress-cli ci up --repo naddr1... --provider <name> --mint https://...
 
-To run a workflow yourself, see [Running the CI suite
-locally](../../CONTRIBUTING.md#running-the-ci-suite-locally).
+Any workflow also runs locally under [act](https://github.com/nektos/act), which
+is what the coordinator does:
+
+    act -W .github/workflows/tests.yml
+
+The sandbox is x86, and two images are not portable to arm64: CLN's compose
+entrypoint downloads an `x86_64-linux-gnu` nip47 plugin, and
+`acinq/eclair:release-0.8.0` publishes no arm64 build. On an Apple Silicon Mac,
+register qemu and pin those two services — binfmt alone is not enough, since an
+arm64 CLN container has no x86 loader for the plugin and takes the node down
+with it:
+
+    docker run --privileged --rm tonistiigi/binfmt --install amd64
+    printf 'services:\n  cln:\n    platform: linux/amd64\n  eclair:\n    platform: linux/amd64\n' > /tmp/arm64.yml
+    export COMPOSE_FILE=docker-compose.yml:/tmp/arm64.yml
 
 ## Cost
 

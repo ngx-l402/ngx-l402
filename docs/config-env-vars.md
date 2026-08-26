@@ -305,16 +305,24 @@ real_ip_header    X-Real-IP;       # or X-Forwarded-For
 Listing the trusted ranges is what makes the header safe to believe, and it
 keeps that decision with the operator, who knows the topology.
 
-If a rate-limited request arrives carrying an `X-Real-IP` that does not match
-the connection address, the module logs this once per worker so the
-misconfiguration is visible before users start hitting limits they shouldn't:
+If a rate-limited request arrives carrying an `X-Real-IP` (or an
+`X-Forwarded-For` whose leftmost entry) that does not match the connection
+address, the module logs this once per worker so the misconfiguration is visible
+before users start hitting limits they shouldn't:
 
 ```
 l402_invoice_rate_limit is bucketing by connection address 10.0.0.7, but this
 request carried X-Real-IP: 203.0.113.5. If 10.0.0.7 is your proxy, configure
-`set_real_ip_from 10.0.0.7;` — otherwise every client behind it shares one
-bucket.
+`set_real_ip_from 10.0.0.7;` with `real_ip_header X-Real-IP;` — otherwise every
+client behind it shares one bucket. If nothing proxies to you, a client set that
+header itself and this is safe to ignore; the header is never trusted directly,
+which is why you are seeing this. Logged once per worker.
 ```
+
+On a server with no proxy in front of it anyone can trigger that line by sending
+the header, and it names their address rather than a proxy's — so treat it as a
+prompt to check your topology, not as a `set_real_ip_from` value to paste. If
+you are not behind a proxy, ignore it: the rate limit is already keyed correctly.
 
 ### Realm-scoped access
 

@@ -3748,11 +3748,16 @@ fn get_client_ip(request: *mut ngx_http_request_t) -> String {
 /// Warn once if this request looks proxied but realip did not rewrite the
 /// connection address.
 ///
-/// The signal: an `X-Real-IP` header that differs from `addr_text`. Either
-/// `set_real_ip_from` is missing, or it does not list this peer — and in both
+/// The signal: a forwarded-client header — `X-Real-IP`, or the leftmost entry
+/// of `X-Forwarded-For` — that differs from `addr_text`. Either
+/// `set_real_ip_from` is missing, or it does not list this peer, and in both
 /// cases every client behind that proxy shares a single rate-limit bucket.
 /// Without this the misconfiguration is invisible until users start hitting
 /// limits they should not.
+///
+/// A client sending the header at a server with no proxy at all produces the
+/// identical signal, and nothing here can tell the two apart, so the message
+/// gives both readings rather than assuming the peer is a proxy.
 ///
 /// # Safety
 /// `request` must be the valid, non-null pointer nginx passes to the access
@@ -3763,18 +3768,37 @@ unsafe fn warn_if_proxy_header_ignored(request: *mut ngx_http_request_t, bucket_
         return;
     }
 
-    // SAFETY: caller guarantees `request` is valid; `x_real_ip` may be null.
-    let header = unsafe {
-        let r = &*request;
-        if r.headers_in.x_real_ip.is_null() {
+    // SAFETY: caller guarantees `request` is valid; either header may be null.
+    let (name, header) = unsafe {
+        let h = &(*request).headers_in;
+        if !h.x_real_ip.is_null() {
+            (
+                "X-Real-IP",
+                (*h.x_real_ip)
+                    .value
+                    .to_str()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+            )
+        } else if !h.x_forwarded_for.is_null() {
+            // "client, proxy1, proxy2" — the leftmost entry is the origin, and
+            // the one realip would have substituted.
+            (
+                "X-Forwarded-For",
+                (*h.x_forwarded_for)
+                    .value
+                    .to_str()
+                    .unwrap_or_default()
+                    .split(',')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+            )
+        } else {
             return;
         }
-        (*r.headers_in.x_real_ip)
-            .value
-            .to_str()
-            .unwrap_or_default()
-            .trim()
-            .to_string()
     };
 
     // Equal means realip already substituted it — correctly configured.
@@ -3785,10 +3809,13 @@ unsafe fn warn_if_proxy_header_ignored(request: *mut ngx_http_request_t, bucket_
     if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         warn!(
             "⚠️ l402_invoice_rate_limit is bucketing by connection address {addr}, but this \
-             request carried X-Real-IP: {hdr}. If {addr} is your proxy, configure \
-             `set_real_ip_from {addr};` — otherwise every client behind it shares one bucket. \
-             The header is not trusted directly because a client can set it.",
+             request carried {name}: {hdr}. If {addr} is your proxy, configure \
+             `set_real_ip_from {addr};` with `real_ip_header {name};` — otherwise every client \
+             behind it shares one bucket. If nothing proxies to you, a client set that header \
+             itself and this is safe to ignore; the header is never trusted directly, which is \
+             why you are seeing this. Logged once per worker.",
             addr = bucket_addr,
+            name = name,
             hdr = ngx_l402_core::escape_json(&header),
         );
     }

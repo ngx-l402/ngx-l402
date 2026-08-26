@@ -16,11 +16,17 @@ jobs:
         uses: actions/checkout@v5
 
       - name: The ngit CI mirrors must be in sync
+        # Stage before diffing: `git diff` compares the worktree to the index and
+        # cannot see an untracked path, so a mirror sync.sh newly emits for a
+        # workflow nobody has committed a mirror for would pass green. `--cached`
+        # asks "does the tree match the commit?", which is the question. Nothing
+        # is committed -- the checkout is throwaway.
         run: |
           ./.ngit/act/sync.sh
-          git diff --exit-code -- .ngit/act/workflows && exit 0
+          git add -A -- .ngit/act/workflows
+          git diff --cached --exit-code -- .ngit/act/workflows && exit 0
           echo "::error::.ngit/act/workflows is stale"
-          echo "fix with: ./.ngit/act/sync.sh && git add .ngit/act/workflows"
+          echo "fix with: ./.ngit/act/sync.sh && git add -A .ngit/act/workflows"
           exit 1
 
       - name: Set up Rust

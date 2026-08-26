@@ -2,7 +2,7 @@
 # Regenerate .ngit/act/workflows/ from .github/workflows/.
 # Run after editing a GitHub workflow; lint.yml fails if you forget.
 #
-# .github/workflows/ is deliberately left alone, so the two transforms a Nostr
+# .github/workflows/ is deliberately left alone, so the three transforms a Nostr
 # run needs are made here.
 
 set -eu
@@ -10,7 +10,14 @@ cd "$(dirname "$0")/../.."
 
 src=.github/workflows
 out=.ngit/act/workflows
-mkdir -p "$out"
+
+# Every workflow file is mirrored except the ones named here. An exclusion is a
+# deliberate decision; a new workflow file is mirrored by default, so it cannot
+# silently go unrun on Nostr while the lint check stays green.
+#
+# These three publish to GitHub Pages, GHCR and GitHub Releases. A Nostr run has
+# nothing to publish to any of them.
+not_mirrored="docs.yml ghcr-workflow.yml release-workflow.yml"
 
 # 1. Unfilter the pull_request trigger.
 #
@@ -21,7 +28,10 @@ mkdir -p "$out"
 # reading that preserves the intent: on GitHub these run for every PR to main,
 # and on Nostr `main` is the only thing a proposal ever targets.
 #
-# `push: branches:` is left alone -- there the ref really is the ref.
+# `push: branches:` is left alone. The pull_request behaviour above was observed
+# on a real run; that push matches on the ref it names is inferred, not
+# confirmed -- but it fails safe either way, since the failure mode is a
+# workflow that does not fire rather than one that passes without running.
 unfilter_pull_request() {
   awk '
     /^  pull_request:[[:space:]]*$/ { print; skipping = 1; next }
@@ -53,7 +63,11 @@ serialise_matrix() {
 # ngit-ci refuses a workflow file containing one, because it cannot verify the
 # container declarations of a reusable workflow it has not fetched. In
 # tests.yml they are the tag-gated release fan-out, which never runs on a
-# proposal.
+# proposal. It is a no-op on a file that has none, so every mirror gets it.
+#
+# `pre` holds comments and blank lines seen since the last body line: they
+# belong to whichever job comes next, so they are held until that job is known
+# to survive. The END flush emits what trails the final job.
 drop_reusable_jobs() {
   awk '
     !injobs { print; if ($0 ~ /^jobs:[[:space:]]*$/) injobs = 1; next }
@@ -62,13 +76,19 @@ drop_reusable_jobs() {
     }
     /^[[:space:]]*(#|$)/ { pre = pre $0 "\n"; next }
     { buf = buf pre $0 "\n"; pre = ""; if ($0 ~ /^    uses:/) uses = 1 }
-    END { flush() }
+    END { flush(); printf "%s", pre }
     function flush() { if (buf != "" && !uses) printf "%s", buf; buf = "" }
   '
 }
 
-for f in nginx-compat.yml lint.yml audit.yml; do
-  unfilter_pull_request < "$src/$f" | serialise_matrix > "$out/$f"
+# Rebuild from scratch, so a workflow deleted or newly excluded upstream leaves
+# no mirror behind still running on Nostr.
+rm -rf "$out"
+mkdir -p "$out"
+
+for path in "$src"/*.yml "$src"/*.yaml; do
+  [ -e "$path" ] || continue
+  f=$(basename "$path")
+  case " $not_mirrored " in *" $f "*) continue ;; esac
+  unfilter_pull_request < "$path" | serialise_matrix | drop_reusable_jobs > "$out/$f"
 done
-unfilter_pull_request < "$src/tests.yml" | serialise_matrix | drop_reusable_jobs \
-  > "$out/tests.yml"

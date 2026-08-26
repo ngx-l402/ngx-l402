@@ -221,149 +221,39 @@ let h = ngx_array_push(&mut handlers);           // Could be null!
 
 ## Testing Guidelines
 
-### Where tests live
-
 | Kind | Location | Run with |
 |------|----------|----------|
-| **Unit** — pure logic, no nginx, no network | `#[cfg(test)] mod tests` in `ngx_l402_core/src/*.rs` | `cargo test -p ngx_l402_core` |
-| **Integration** — the real module, in nginx, against a real backend | steps in `.github/workflows/tests.yml` | see [Running the CI suite locally](#running-the-ci-suite-locally) |
+| **Unit** — pure logic, no nginx | `#[cfg(test)] mod tests` in `ngx_l402_core/src/*.rs` | `cargo test -p ngx_l402_core` |
+| **Integration** — the real module in nginx, against a real backend | `.github/workflows/tests.yml` | `act -W .github/workflows/tests.yml` |
 
-There is no separate test harness. The integration suite *is* `tests.yml`: one
-`test` job that brings up regtest bitcoind, a Lightning node, Redis and a Cashu
-mint via `docker-compose.yml`, then walks each backend in turn.
-
-Prefer a unit test when the behaviour can be reached without nginx. They run in
-seconds and gate the Docker steps, so a logic regression fails the build before
-anything is built.
-
-### Adding a unit test
-
-Put it next to the code, in the same file:
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rejects_a_macaroon_with_no_caveats() {
-        assert!(parse_l402_header("L402 :deadbeef").is_err());
-    }
-}
-```
-
-Anything with no nginx dependency belongs in `ngx_l402_core` rather than `src/`,
-where it can be tested this way.
+There is no separate harness. The integration suite *is* `tests.yml`: one `test`
+job that brings up regtest bitcoind, a Lightning node, Redis and a Cashu mint via
+`docker-compose.yml`, then walks each backend in turn.
 
 ### Adding an integration test case
 
-Integration cases are steps in the single `test` job, named
-`Run Integration Tests - <Backend>`. The job is sequential and stateful: each
-backend section starts its containers, asserts, then stops them, because they
-all bind port 8000.
+Cases are steps in that job, named `Run Integration Tests - <Backend>`. Add to
+the section for the backend you are testing; only add a new section for a new
+backend. The job is sequential and stateful, so:
 
-**Add to an existing section** whenever the case fits a backend already covered.
-Only add a new section for a new backend.
+- **Poll, don't sleep.** `source .github/scripts/ci-wait.sh` and use `wait_http`,
+  `wait_log`, `wait_container`, or `curl_until` — a fixed `sleep` is a bet on a
+  loaded runner that eventually loses and fails the whole job.
+- **Dump logs before exiting.** `docker logs <container>` ahead of every `exit 1`.
+- **Flush Redis** (`docker exec redis redis-cli flushall`) if your case replays a
+  preimage — replay protection is persistent across sections.
+- **Stop what you started.** Every `nginx-*` service binds port 8000, so a new
+  section must stop its containers before the next one runs.
 
-The conventions every case follows — a reviewer will ask for all of these:
+A new protected route also needs a `location` block in `nginx.conf` **and** a
+`COPY index.html /usr/share/nginx/html/<route>/index.html` line in the
+`Dockerfile`, or it 404s before the module ever runs.
 
-**1. Poll for readiness. Never `sleep` and assert.** Source the helpers and use
-them; a fixed sleep is a bet on a loaded runner that eventually loses and takes
-the whole job down.
+### Never hand-edit `.ngit/act/workflows/`
 
-```bash
-source .github/scripts/ci-wait.sh
-
-wait_http http://0.0.0.0:8000/ 200 90 || { docker logs nginx-lnd; exit 1; }
-wait_log  nginx-lnd "start worker processes" 90
-wait_container lndnode 90
-```
-
-**2. Assert on the status code, and dump logs before exiting.** A bare
-`exit 1` tells the next person nothing:
-
-```bash
-response=$(curl -s -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/protected) || true
-status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
-if [ "$status_code" -ne 402 ]; then
-  echo "Error: /protected returned $status_code, expected 402"
-  docker logs nginx-lnd
-  exit 1
-fi
-```
-
-Use `curl_until <status> <curl args...>` instead for a route that mints an
-invoice from a third party — it retries and sets `response` and `status_code`
-for you, so the assertion above is unchanged.
-
-**3. Flush Redis when the case replays a preimage.** Replay protection is
-persistent, so a preimage a previous section already spent returns 401 for
-reasons that have nothing to do with your case:
-
-```bash
-docker exec redis redis-cli flushall
-```
-
-**4. Assert the negative cases, not just the happy path.** A case that only
-proves a 200 does not prove the module rejects anything. Cover missing header,
-malformed macaroon, wrong preimage, and expiry where the route sets a timeout.
-
-**5. Leave the stack as you found it.** End a new backend section by stopping
-what it started, so the next section gets port 8000:
-
-```bash
-docker-compose -f docker-compose.yml stop nginx-<backend>
-```
-
-**6. `assert_no_crash` catches what a status code cannot.** nginx restarts a
-crashed worker, so a segfault can surface as a passing request. The final
-`Check for worker crashes` step covers every container the job touched — add
-yours to it.
-
-### Wiring a new route or backend
-
-A case that needs something not already in the stack touches more than
-`tests.yml`:
-
-| You need | Also edit |
-|----------|-----------|
-| A new protected route | `nginx.conf` (the `location` block) **and** `Dockerfile` — every protected location needs its own `COPY index.html /usr/share/nginx/html/<route>/index.html`, or it 404s before the module ever runs |
-| A new Lightning backend | `docker-compose.yml` — a `nginx-<backend>` service on port 8000 with the right `LN_CLIENT_TYPE`, plus the node service itself |
-| Log assertions | `RUST_LOG=info` on the nginx service; `info!` lines are filtered out by default and your `grep` will never match |
-
-### Running the CI suite locally
-
-The suite runs under [act](https://github.com/nektos/act), which is what the
-Nostr coordinator does:
-
-```bash
-act -W .github/workflows/tests.yml
-```
-
-The suite is written for x86. Two images are not portable to arm64: CLN's
-compose entrypoint downloads an `x86_64-linux-gnu` nip47 plugin, and
-`acinq/eclair:release-0.8.0` publishes no arm64 build. On an Apple Silicon Mac,
-register qemu and pin those two services:
-
-```bash
-docker run --privileged --rm tonistiigi/binfmt --install amd64
-printf 'services:\n  cln:\n    platform: linux/amd64\n  eclair:\n    platform: linux/amd64\n' > /tmp/arm64.yml
-export COMPOSE_FILE=docker-compose.yml:/tmp/arm64.yml
-```
-
-binfmt alone is not enough: qemu will dispatch the x86 plugin, but an arm64 CLN
-container has no x86 loader to run it with, and the plugin dies in a way that
-surfaces as `lightningd: --nip47-relays: unknown option` and takes the node down
-with it. The service has to be x86 end to end.
-
-For iterating on a single backend, skip act and drive compose directly — see
-[docs/macos-setup.md](docs/macos-setup.md).
-
-### After editing a workflow
-
-CI runs on **both** GitHub Actions and [Nostr](https://gitworkshop.dev), from
-the same workflow definitions. `.ngit/act/workflows/` is generated from
-`.github/workflows/` and is never hand-edited. Regenerate it in the same commit:
+CI runs on both GitHub Actions and [Nostr](https://gitworkshop.dev) from the same
+definitions. `.ngit/act/workflows/` is **generated** from `.github/workflows/`.
+After editing a workflow, regenerate it in the same commit:
 
 ```bash
 ./.ngit/act/sync.sh
@@ -371,12 +261,7 @@ git add -A .ngit/act/workflows
 ```
 
 The `fmt` job fails on both pipelines if you forget. See
-[.ngit/act/README.md](.ngit/act/README.md) for what the sync transforms and why.
-
-One thing to know before adding a **new workflow file**: on GitHub a fifth file
-is free parallelism, on Nostr it is a fifth leased sandbox recompiling ~400
-crates from cold. Add a job or a step to an existing file unless the work
-genuinely needs its own file.
+[.ngit/act/README.md](.ngit/act/README.md) for what the sync transforms.
 
 ---
 

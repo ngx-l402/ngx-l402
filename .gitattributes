@@ -6,3 +6,12 @@
 # historically committed with CRLF, and forcing eol=lf on it would trigger a
 # mass renormalization unrelated to any current change.
 *.rs    text eol=lf
+
+# .ngit/act/workflows/ is generated from .github/workflows/ by .ngit/act/sync.sh
+# and is never hand-edited. Marking it generated collapses it in GitHub's
+# Files-changed view, so a reviewer sees the lines that need judgement rather
+# than a few thousand mirrored ones.
+#
+# A new line on a new path pattern: it does not widen the *.rs eol=lf scope
+# above, so it triggers none of the renormalization that comment warns about.
+.ngit/act/workflows/**   linguist-generated=true

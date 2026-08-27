@@ -2154,6 +2154,33 @@ jobs:
           fi
           echo "PASS: Retry-After header present in 429 response"
 
+          # The bucket must key on the connection, never on a client-set header.
+          # Before this was fixed each fresh value minted a fresh bucket, so
+          # these two came back 402 and the limit was bypassable with one flag.
+          echo "Request 4, spoofed X-Real-IP (expect 429 - header ignored)..."
+          r4=$(curl -s -w "\n%{http_code}" --max-time 30 \
+            -H "X-Real-IP: 203.0.113.$((RANDOM % 254 + 1))" \
+            http://0.0.0.0:8000/rate-limited) || true
+          sc4=$(echo "$r4" | tail -n1)
+          if [ "$sc4" -ne 429 ]; then
+            echo "FAIL: spoofed X-Real-IP returned $sc4, expected 429 — limit is keyed on a client header"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "PASS: spoofed X-Real-IP still 429"
+
+          echo "Request 5, spoofed X-Forwarded-For (expect 429)..."
+          r5=$(curl -s -w "\n%{http_code}" --max-time 30 \
+            -H "X-Forwarded-For: 198.51.100.$((RANDOM % 254 + 1)), 10.0.0.1" \
+            http://0.0.0.0:8000/rate-limited) || true
+          sc5=$(echo "$r5" | tail -n1)
+          if [ "$sc5" -ne 429 ]; then
+            echo "FAIL: spoofed X-Forwarded-For returned $sc5, expected 429"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "PASS: spoofed X-Forwarded-For still 429"
+
           # Rate limit counter must be persisted in Redis
           RATE_KEYS=$(docker exec redis redis-cli keys "l402:invoice_rate:*" | wc -l)
           echo "Found $RATE_KEYS rate limit key(s) in Redis"

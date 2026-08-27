@@ -2718,6 +2718,32 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
             log,
             "Automatic Cashu redemption enabled (starts in a worker)"
         );
+
+        // Redemption melts ecash to the configured LN client (LND, CLN, NWC,
+        // BOLT12, ECLAIR, or LNURL), which generates the destination invoice. A
+        // node backend always has one; only LNURL mode needs an address. So the
+        // single static misconfiguration is LNURL mode (the default) with no LNURL
+        // address anywhere — warn at boot rather than fail silently here and
+        // noisily every redemption cycle.
+        let backend = std::env::var("LN_CLIENT_TYPE")
+            .unwrap_or_else(|_| "LNURL".to_string())
+            .trim()
+            .to_uppercase();
+        if backend == "LNURL" {
+            let has_lnurl_dest = std::env::var("LNURL_ADDRESS")
+                .map(|a| !a.trim().is_empty())
+                .unwrap_or(false)
+                || collect_route_snapshots()
+                    .iter()
+                    .any(|s| s.lnurl_addr.as_deref().map(|a| !a.trim().is_empty()).unwrap_or(false));
+            if !has_lnurl_dest {
+                ngx_log_error!(
+                    NGX_LOG_WARN,
+                    log,
+                    "CASHU_REDEEM_ON_LIGHTNING is on in LNURL mode but no LNURL address is configured (no LNURL_ADDRESS and no l402_lnurl_addr); received ecash will accumulate and cannot be melted. Set an LNURL address, use a node LN_CLIENT_TYPE, or set CASHU_REDEEM_ON_LIGHTNING=false."
+                );
+            }
+        }
     }
 
     0

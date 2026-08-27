@@ -9,7 +9,8 @@ use ngx::ffi::{
     ngx_http_discard_request_body, ngx_http_finalize_request, ngx_http_handler_pt,
     ngx_http_module_t, ngx_http_phases_NGX_HTTP_ACCESS_PHASE, ngx_http_request_t, ngx_int_t,
     ngx_log_s, ngx_module_t, ngx_shared_memory_add, ngx_shm_zone_t, ngx_slab_alloc,
-    ngx_slab_pool_t, ngx_str_t, ngx_test_config, ngx_uint_t, NGX_CONF_NOARGS, NGX_CONF_TAKE1,
+    ngx_slab_pool_t, ngx_str_t, ngx_test_config, ngx_uint_t, NGX_CONF_1MORE, NGX_CONF_NOARGS,
+    NGX_CONF_TAKE1,
     NGX_DECLINED, NGX_DONE, NGX_ERROR, NGX_HTTP_COPY, NGX_HTTP_DELETE, NGX_HTTP_GET, NGX_HTTP_HEAD,
     NGX_HTTP_INTERNAL_SERVER_ERROR, NGX_HTTP_LOCK, NGX_HTTP_LOC_CONF, NGX_HTTP_LOC_CONF_OFFSET,
     NGX_HTTP_MAIN_CONF, NGX_HTTP_MKCOL, NGX_HTTP_MODULE, NGX_HTTP_MOVE, NGX_HTTP_NOT_ALLOWED,
@@ -1336,6 +1337,11 @@ unsafe impl HttpModuleServerConf for L402Module {
 #[derive(Debug, Default)]
 pub struct ModuleConfig {
     enable: bool,
+    // HTTP methods (uppercase) exempt from the paywall for this location, set via
+    // `l402_exempt_methods HEAD;`. Exempt requests pass through unpaywalled — e.g.
+    // a Blossom has-blob `HEAD /<sha>` should not require payment (BUD-07: HEAD
+    // endpoints are informational). Empty = every method is paywalled as before.
+    exempt_methods: Vec<String>,
     amount_msat: i64,
     macaroon_timeout: i64,
     // Opt-in location-scoped ("realm") caveat. When set via `l402_realm "name"`,
@@ -1369,7 +1375,7 @@ pub struct ModuleConfig {
     manifest_hidden: bool,
 }
 
-pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 14] = [
+pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 15] = [
     ngx_command_t {
         name: ngx_string!("l402"),
         type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1) as ngx_uint_t,
@@ -1475,6 +1481,14 @@ pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 14] = [
         offset: 0,
         post: std::ptr::null_mut(),
     },
+    ngx_command_t {
+        name: ngx_string!("l402_exempt_methods"),
+        type_: (NGX_HTTP_LOC_CONF | NGX_CONF_1MORE) as ngx_uint_t,
+        set: Some(ngx_http_l402_exempt_methods_set),
+        conf: NGX_HTTP_LOC_CONF_OFFSET,
+        offset: 0,
+        post: std::ptr::null_mut(),
+    },
     ngx_command_t::empty(),
 ];
 
@@ -1558,6 +1572,9 @@ impl Merge for ModuleConfig {
         }
         if self.log_format_json.is_none() {
             self.log_format_json = prev.log_format_json;
+        }
+        if self.exempt_methods.is_empty() && !prev.exempt_methods.is_empty() {
+            self.exempt_methods = prev.exempt_methods.clone();
         }
         if prev.manifest_hidden {
             self.manifest_hidden = true;
@@ -1798,6 +1815,16 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         if !conf.enable {
             ngx_log_error!(NGX_LOG_INFO, log_ref, "L402 is disabled for this location");
             return NGX_DECLINED as isize;
+        }
+
+        // Methods the operator marked exempt (e.g. a Blossom has-blob `HEAD`) skip
+        // the paywall entirely and pass through like a free location.
+        if !conf.exempt_methods.is_empty() {
+            let m = method_caveat_value(method);
+            if conf.exempt_methods.iter().any(|em| em.as_str() == m) {
+                ngx_log_error!(NGX_LOG_INFO, log_ref, "L402 exempt method; passing through");
+                return NGX_DECLINED as isize;
+            }
         }
 
         let amount_msat = conf.amount_msat;
@@ -3726,6 +3753,37 @@ pub unsafe extern "C" fn ngx_http_l402_realm_set(
             "⚙️ l402_realm = \"{}\" — one payment authorizes this whole location",
             val
         );
+    }
+
+    std::ptr::null_mut()
+}
+
+/// `l402_exempt_methods HEAD [GET ...];` — HTTP methods that skip the paywall for
+/// this location. Stored uppercase; the access handler lets matching requests
+/// through unpaywalled (e.g. a Blossom has-blob `HEAD /<sha>`).
+pub unsafe extern "C" fn ngx_http_l402_exempt_methods_set(
+    cf: *mut ngx_conf_t,
+    _cmd: *mut ngx_command_t,
+    conf: *mut c_void,
+) -> *mut c_char {
+    // SAFETY: `cf`, `conf`, and `(*cf).args` are valid during config parsing;
+    // NGX_CONF_1MORE guarantees at least one argument after the directive name.
+    unsafe {
+        let conf = &mut *(conf as *mut ModuleConfig);
+        let args_arr = &*(*cf).args;
+        let args = args_arr.elts as *mut ngx_str_t;
+        let mut methods = Vec::new();
+        for i in 1..(args_arr.nelts as usize) {
+            let v = (*args.add(i)).to_str().unwrap_or_default().trim().to_uppercase();
+            if !v.is_empty() {
+                methods.push(v);
+            }
+        }
+        info!(
+            "⚙️ l402_exempt_methods = {:?} — these methods skip the paywall here",
+            methods
+        );
+        conf.exempt_methods = methods;
     }
 
     std::ptr::null_mut()

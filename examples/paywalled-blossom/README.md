@@ -144,9 +144,13 @@ CASHU_REDEEM_ON_LIGHTNING=false
   crosses the wire **twice** unless it pre-pays via a `HEAD /upload` (BUD-06)
   preflight. Cashu is the clean path: `X-Cashu` rides its own header, so it
   coexists with a BUD-02 upload auth; L402 rides `Authorization` and only works
-  when the upload carries no auth (this example's `requireAuth: false`). Storage is a flat
-  90 days regardless of amount — pricing *by* payment would need ngx_l402 to pass
-  a TTL to the storage layer, which it can't today.
+  when the upload carries no auth (this example's `requireAuth: false`). A
+  `HEAD /<sha>` presence check is free for any client (`l402_exempt_methods HEAD`
+  on the download location), so a publisher that only references already-stored
+  blobs never PUTs: pay-upload them with payblob, then publish. Storage is a flat
+  90 days regardless of amount — pricing
+  *by* payment would need ngx_l402 to pass a TTL to the storage layer, which it
+  can't today.
 - **Pricing is flat per blob** — a 1 KB blob and a 1 GB blob both cost 10 sats,
   and uploads are uncapped (`client_max_body_size 0`). Simple, and fine when your
   blobs are roughly one size or you trust who's paying. Set `client_max_body_size`

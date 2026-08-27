@@ -182,6 +182,48 @@ jobs:
 
           echo "✅ Multi-tenant LNURL Lightning integration tests completed!"
 
+      - name: Run Integration Tests - Exempt Methods
+        run: |
+          source .github/scripts/ci-wait.sh
+          echo "Testing l402_exempt_methods on /exempt-head (HEAD exempt, GET paid)..."
+
+          # HEAD is exempt: the access handler declines before minting a
+          # challenge, so the request reaches the file handler and returns 200,
+          # never 402. No LN backend is touched (no invoice), so polling is safe.
+          echo "HEAD /exempt-head (expect 200, must not be 402)..."
+          head_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 -I http://0.0.0.0:8000/exempt-head) || head_code="000"
+          if [ "$head_code" -eq 402 ]; then
+            echo "FAIL: HEAD /exempt-head returned 402 — an exempt method was paywalled"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+          if [ "$head_code" -ne 200 ]; then
+            echo "FAIL: HEAD /exempt-head returned $head_code, expected 200 (exempt → served)"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+          echo "PASS: HEAD /exempt-head returned 200 (exempt, not paywalled)"
+
+          # GET on the SAME location is not exempt: it still returns 402 with an
+          # L402 challenge. curl_until (3 tries) avoids hammering the external
+          # LNURL provider that mints the invoice.
+          echo "GET /exempt-head (expect 402 with L402 challenge)..."
+          curl_until 402 -L http://0.0.0.0:8000/exempt-head
+          if [ "$status_code" -ne 402 ]; then
+            echo "FAIL: GET /exempt-head returned $status_code, expected 402 (non-exempt method must be paid)"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+          if ! echo "$response" | grep -q 'WWW-Authenticate: L402 macaroon='; then
+            echo "FAIL: GET /exempt-head 402 is missing the WWW-Authenticate: L402 challenge"
+            echo "$response"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+          echo "PASS: GET /exempt-head returned 402 with an L402 challenge"
+
+          echo "✅ l402_exempt_methods integration tests completed!"
+
       - name: Run Integration Tests - Dry-Run (Shadow) Mode & Metrics
         run: |
           echo "Testing l402_dry_run shadow mode and l402_metrics endpoint..."

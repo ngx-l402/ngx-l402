@@ -2733,9 +2733,12 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
             let has_lnurl_dest = std::env::var("LNURL_ADDRESS")
                 .map(|a| !a.trim().is_empty())
                 .unwrap_or(false)
-                || collect_route_snapshots()
-                    .iter()
-                    .any(|s| s.lnurl_addr.as_deref().map(|a| !a.trim().is_empty()).unwrap_or(false));
+                || collect_route_snapshots().iter().any(|s| {
+                    s.lnurl_addr
+                        .as_deref()
+                        .map(|a| !a.trim().is_empty())
+                        .unwrap_or(false)
+                });
             if !has_lnurl_dest {
                 ngx_log_error!(
                     NGX_LOG_WARN,

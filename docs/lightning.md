@@ -104,6 +104,9 @@ When Redis is configured (`REDIS_URL`), settled preimages are cached under the k
 
 ## Wallet Compatibility
 
+> [!NOTE]
+> **NWC works for _accepting_ payments, not just paying.** A common misconception is that Nostr Wallet Connect (NIP-47) is only a spending protocol. `LN_CLIENT_TYPE=NWC` uses the connection to **receive**: it creates each L402 invoice with `make_invoice` and verifies payment with `lookup_invoice`. The catch is that both are **optional** NIP-47 methods — not every wallet implements them, and a given connection secret may be permission-scoped (e.g. pay-only). Use a wallet and connection that grant `make_invoice` **and** `lookup_invoice` (a wallet advertises its supported commands in its NIP-47 info event); a pay-only connection can spend but cannot accept.
+
 > [!WARNING]
 > Some wallets (e.g. [Wallet of Satoshi](https://www.walletofsatoshi.com/)) return **48-byte non-standard preimages**, which are **not compatible** with this module. Use a wallet that returns a standard 32-byte preimage.
 

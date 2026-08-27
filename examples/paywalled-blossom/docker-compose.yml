@@ -54,11 +54,20 @@ services:
       - ROOT_KEY=${ROOT_KEY}
       - REDIS_URL=redis://redis:6379
       - DOMAIN=${DOMAIN}
+      # Cashu ecash (optional): also accept NUT-24 X-Cashu tokens. Values come
+      # from .env; empty CASHU_ECASH_SUPPORT keeps the server L402-only. The
+      # wallet db persists in the cashu volume.
+      - CASHU_ECASH_SUPPORT=${CASHU_ECASH_SUPPORT:-}
+      - CASHU_WHITELISTED_MINTS=${CASHU_WHITELISTED_MINTS:-}
+      - CASHU_WALLET_MNEMONIC=${CASHU_WALLET_MNEMONIC:-}
+      - CASHU_REDEEM_ON_LIGHTNING=${CASHU_REDEEM_ON_LIGHTNING:-true}
+      - CASHU_DB_PATH=/cashu/wallet.db
     ports:
       - "443:443"
     volumes:
       - ./nginx.conf.template:/etc/nginx/nginx.conf.template:ro
       - ./certbot/conf:/etc/letsencrypt:ro
+      - cashu-data:/cashu
     depends_on:
       redis:
         condition: service_started
@@ -66,13 +75,18 @@ services:
         condition: service_started
       certbot:
         condition: service_healthy
-    # Render ${DOMAIN} into the config, then run nginx and reload every 6h so
-    # renewed certs are picked up.
+    # Give the cashu volume to nginx (the image's own chown script is skipped by a
+    # custom command like this one), render ${DOMAIN} into the config, then run
+    # nginx and reload every 6h so renewed certs are picked up. The 6h delay is
+    # safe: Let's Encrypt renews ~30 days before expiry, so nginx never serves an
+    # expired cert while waiting for the next reload (and `nginx -s reload` is
+    # graceful — no dropped connections).
     command:
       - sh
       - -c
-      - "envsubst '$$DOMAIN' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && { while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g 'daemon off;'; }"
+      - "chown -R nginx:nginx /cashu 2>/dev/null; chmod 750 /cashu 2>/dev/null; envsubst '$$DOMAIN' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && { while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g 'daemon off;'; }"
 
 volumes:
   redis-data:
   blossom-data:
+  cashu-data:

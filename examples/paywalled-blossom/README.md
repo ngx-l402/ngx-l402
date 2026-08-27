@@ -106,6 +106,11 @@ The keys that matter:
 - `CASHU_REDEEM_ON_LIGHTNING=true` melts received ecash to your configured
   Lightning backend (the LNURL address, in this example).
 
+The wallet and replay state persist in the `cashu-data` volume. The compose
+`command` chowns it to `nginx` on start (the image's own chown script only runs
+under a plain `nginx` command, which a custom command like this one bypasses); if
+you change the command, keep that chown or the wallet can't be written.
+
 Verify the challenge before pointing a client at it:
 
 ```bash
@@ -134,14 +139,15 @@ CASHU_REDEEM_ON_LIGHTNING=false
   blobs pays once. Note `l402_indefinite_access on` is **required**
   alongside a realm: it disables the single-use preimage check, without which the
   first request claims the preimage and the rest are rejected as replays.
-- **Paid uploads** — two things to know. (1) The uploader must speak **L402**, not
-  vanilla Blossom: it PUTs the blob, gets `402`, then re-sends with payment — so a
-  large blob crosses the wire **twice**. A realm doesn't fix this, since the macaroon
-  binds the HTTP method and a `GET` token can't pre-pay a `PUT`. (2) Payment gates
-  the upload; storage duration is a flat 90 days for everyone. Pricing storage *by*
-  payment amount would need ngx_l402 to pass a TTL to the storage layer, which it
-  can't today.
-- **Pricing is flat per blob** — a 1 KB blob and a 1 GB blob both cost 100 sats,
+- **Paid uploads** — `/upload` and `/mirror` are gated. A paying client
+  (**payblob**) PUTs, gets `402`, and re-sends with payment, so a large blob
+  crosses the wire **twice** unless it pre-pays via a `HEAD /upload` (BUD-06)
+  preflight. Cashu is the clean path: `X-Cashu` rides its own header, so it
+  coexists with a BUD-02 upload auth; L402 rides `Authorization` and only works
+  when the upload carries no auth (this example's `requireAuth: false`). Storage is a flat
+  90 days regardless of amount — pricing *by* payment would need ngx_l402 to pass
+  a TTL to the storage layer, which it can't today.
+- **Pricing is flat per blob** — a 1 KB blob and a 1 GB blob both cost 10 sats,
   and uploads are uncapped (`client_max_body_size 0`). Simple, and fine when your
   blobs are roughly one size or you trust who's paying. Set `client_max_body_size`
   if you'd rather bound what one payment can store.

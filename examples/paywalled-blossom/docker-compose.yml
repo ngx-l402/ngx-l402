@@ -75,12 +75,16 @@ services:
         condition: service_started
       certbot:
         condition: service_healthy
-    # Render ${DOMAIN} into the config, then run nginx and reload every 6h so
-    # renewed certs are picked up.
+    # Give the cashu volume to nginx (the image's own chown script is skipped by a
+    # custom command like this one), render ${DOMAIN} into the config, then run
+    # nginx and reload every 6h so renewed certs are picked up. The 6h delay is
+    # safe: Let's Encrypt renews ~30 days before expiry, so nginx never serves an
+    # expired cert while waiting for the next reload (and `nginx -s reload` is
+    # graceful — no dropped connections).
     command:
       - sh
       - -c
-      - "envsubst '$$DOMAIN' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && { while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g 'daemon off;'; }"
+      - "chown -R nginx:nginx /cashu 2>/dev/null; chmod 750 /cashu 2>/dev/null; envsubst '$$DOMAIN' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && { while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g 'daemon off;'; }"
 
 volumes:
   redis-data:

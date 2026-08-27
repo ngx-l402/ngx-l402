@@ -9,6 +9,7 @@
 - [Manual Install](./install-manual.md)
 - [macOS Setup](./macos-setup.md)
 - [Docker](./install-docker.md)
+- [Production (TLS + Let's Encrypt)](./deploy-tls.md)
 
 # Configuration
 

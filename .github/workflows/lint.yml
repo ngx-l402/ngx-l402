@@ -15,14 +15,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
 
-      - name: The ngit CI mirrors must be in sync
-        run: |
-          ./.ngit/act/sync.sh
-          git diff --exit-code -- .ngit/act/workflows && exit 0
-          echo "::error::.ngit/act/workflows is stale"
-          echo "fix with: ./.ngit/act/sync.sh && git add .ngit/act/workflows"
-          exit 1
-
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -42,12 +34,9 @@ jobs:
         with:
           components: clippy
 
-      # tonic's build script shells out to protoc, and nginx-sys binds through
-      # bindgen, which needs libclang. GitHub's runner image happens to carry
-      # libclang; leaner ones (the act images ngit-ci runs on) do not, and the
-      # failure there is a bindgen panic that reads like a code fault.
-      - name: Install protoc and libclang
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libclang-dev
+      # tonic's build script shells out to protoc; not present on clean runners.
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2

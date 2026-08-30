@@ -819,13 +819,7 @@ jobs:
           source .github/scripts/ci-wait.sh
           echo "Testing with CLN configuration..."
           # Free route first — a 402 needs the CLN socket the chmod unlocks.
-          #
-          # 300s, not the 90 the other gates use: CLN is the only service that
-          # does network work before it serves. Its entrypoint apt-installs wget
-          # and downloads a 4.8 MB nip47 plugin from GitHub releases, and only
-          # then starts lightningd — so this waits on a download, not a boot.
-          # Measured at ~3 minutes from a nested sandbox.
-          wait_http http://0.0.0.0:8000/ 200 300 || { docker logs nginx-cln; docker logs cln; exit 1; }
+          wait_http http://0.0.0.0:8000/ 200 90 || { docker logs nginx-cln; exit 1; }
           docker exec nginx-cln chmod 777 /root /root/.lightning /root/.lightning/regtest
           wait_http http://0.0.0.0:8000/protected 402 60 || { docker logs nginx-cln; exit 1; }
 

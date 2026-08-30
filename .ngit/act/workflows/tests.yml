@@ -7,8 +7,6 @@ on:
     tags:
       - 'v*'
   pull_request:
-    branches:
-      - main
 
 # Least privilege for the test jobs; the two publish jobs below raise their own.
 permissions:
@@ -2989,31 +2987,3 @@ jobs:
           else
             echo "✅ No worker crashes detected"
           fi
-
-  # Both releases are called from here rather than triggered by the tag, so that
-  # they inherit the gate above; their steps stay in their own workflows.
-  publish:
-    name: Publish module binaries
-    needs: test
-    if: startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: write
-    uses: ./.github/workflows/release-workflow.yml
-
-  publish-image:
-    name: Publish Docker image
-    needs: test
-    if: startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: read
-      packages: write
-    uses: ./.github/workflows/ghcr-workflow.yml
-
-  publish-docs:
-    name: Publish documentation
-    needs: test
-    if: startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: write
-    secrets: inherit
-    uses: ./.github/workflows/docs.yml

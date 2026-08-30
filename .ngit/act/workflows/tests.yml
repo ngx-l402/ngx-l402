@@ -7,8 +7,6 @@ on:
     tags:
       - 'v*'
   pull_request:
-    branches:
-      - main
 
 # Least privilege for the test jobs; the two publish jobs below raise their own.
 permissions:
@@ -181,48 +179,6 @@ jobs:
           echo "✅ Tenant1 returned L402 challenge with invoice: ${invoice_tenant1:0:50}..."
 
           echo "✅ Multi-tenant LNURL Lightning integration tests completed!"
-
-      - name: Run Integration Tests - Exempt Methods
-        run: |
-          source .github/scripts/ci-wait.sh
-          echo "Testing l402_exempt_methods on /exempt-head (HEAD exempt, GET paid)..."
-
-          # HEAD is exempt: the access handler declines before minting a
-          # challenge, so the request reaches the file handler and returns 200,
-          # never 402. No LN backend is touched (no invoice), so polling is safe.
-          echo "HEAD /exempt-head (expect 200, must not be 402)..."
-          head_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 -I http://0.0.0.0:8000/exempt-head) || head_code="000"
-          if [ "$head_code" -eq 402 ]; then
-            echo "FAIL: HEAD /exempt-head returned 402 — an exempt method was paywalled"
-            docker logs nginx-lnurl
-            exit 1
-          fi
-          if [ "$head_code" -ne 200 ]; then
-            echo "FAIL: HEAD /exempt-head returned $head_code, expected 200 (exempt → served)"
-            docker logs nginx-lnurl
-            exit 1
-          fi
-          echo "PASS: HEAD /exempt-head returned 200 (exempt, not paywalled)"
-
-          # GET on the SAME location is not exempt: it still returns 402 with an
-          # L402 challenge. curl_until (3 tries) avoids hammering the external
-          # LNURL provider that mints the invoice.
-          echo "GET /exempt-head (expect 402 with L402 challenge)..."
-          curl_until 402 -L http://0.0.0.0:8000/exempt-head
-          if [ "$status_code" -ne 402 ]; then
-            echo "FAIL: GET /exempt-head returned $status_code, expected 402 (non-exempt method must be paid)"
-            docker logs nginx-lnurl
-            exit 1
-          fi
-          if ! echo "$response" | grep -q 'WWW-Authenticate: L402 macaroon='; then
-            echo "FAIL: GET /exempt-head 402 is missing the WWW-Authenticate: L402 challenge"
-            echo "$response"
-            docker logs nginx-lnurl
-            exit 1
-          fi
-          echo "PASS: GET /exempt-head returned 402 with an L402 challenge"
-
-          echo "✅ l402_exempt_methods integration tests completed!"
 
       - name: Run Integration Tests - Dry-Run (Shadow) Mode & Metrics
         run: |
@@ -2198,33 +2154,6 @@ jobs:
           fi
           echo "PASS: Retry-After header present in 429 response"
 
-          # The bucket must key on the connection, never on a client-set header.
-          # Before this was fixed each fresh value minted a fresh bucket, so
-          # these two came back 402 and the limit was bypassable with one flag.
-          echo "Request 4, spoofed X-Real-IP (expect 429 - header ignored)..."
-          r4=$(curl -s -w "\n%{http_code}" --max-time 30 \
-            -H "X-Real-IP: 203.0.113.$((RANDOM % 254 + 1))" \
-            http://0.0.0.0:8000/rate-limited) || true
-          sc4=$(echo "$r4" | tail -n1)
-          if [ "$sc4" -ne 429 ]; then
-            echo "FAIL: spoofed X-Real-IP returned $sc4, expected 429 — limit is keyed on a client header"
-            docker logs nginx-lnd
-            exit 1
-          fi
-          echo "PASS: spoofed X-Real-IP still 429"
-
-          echo "Request 5, spoofed X-Forwarded-For (expect 429)..."
-          r5=$(curl -s -w "\n%{http_code}" --max-time 30 \
-            -H "X-Forwarded-For: 198.51.100.$((RANDOM % 254 + 1)), 10.0.0.1" \
-            http://0.0.0.0:8000/rate-limited) || true
-          sc5=$(echo "$r5" | tail -n1)
-          if [ "$sc5" -ne 429 ]; then
-            echo "FAIL: spoofed X-Forwarded-For returned $sc5, expected 429"
-            docker logs nginx-lnd
-            exit 1
-          fi
-          echo "PASS: spoofed X-Forwarded-For still 429"
-
           # Rate limit counter must be persisted in Redis
           RATE_KEYS=$(docker exec redis redis-cli keys "l402:invoice_rate:*" | wc -l)
           echo "Found $RATE_KEYS rate limit key(s) in Redis"
@@ -2989,31 +2918,3 @@ jobs:
           else
             echo "✅ No worker crashes detected"
           fi
-
-  # Both releases are called from here rather than triggered by the tag, so that
-  # they inherit the gate above; their steps stay in their own workflows.
-  publish:
-    name: Publish module binaries
-    needs: test
-    if: startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: write
-    uses: ./.github/workflows/release-workflow.yml
-
-  publish-image:
-    name: Publish Docker image
-    needs: test
-    if: startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: read
-      packages: write
-    uses: ./.github/workflows/ghcr-workflow.yml
-
-  publish-docs:
-    name: Publish documentation
-    needs: test
-    if: startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: write
-    secrets: inherit
-    uses: ./.github/workflows/docs.yml

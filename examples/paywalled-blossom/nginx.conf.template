@@ -55,6 +55,11 @@ http {
             l402_realm               "blossom-read";
             l402_macaroon_timeout    600;            # one payment → 10 min of pulls
             l402_indefinite_access   on;             # let that token be reused
+            # Has-blob checks (HEAD /<sha>) are informational (BUD-01/BUD-07), so
+            # leave them free; only GET content is paid. This also lets clients
+            # publish here: pre-upload the blobs (paid PUT), then a publisher whose
+            # presence check is a free HEAD skips re-uploading.
+            l402_exempt_methods      HEAD;
 
             # A realm token buys a WINDOW of egress, not one blob — so bound the
             # throughput rather than the clock. Shortening the window instead is a

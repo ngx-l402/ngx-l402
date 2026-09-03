@@ -141,8 +141,10 @@ CASHU_REDEEM_ON_LIGHTNING=false
   first request claims the preimage and the rest are rejected as replays.
 - **Paid uploads** — `/upload` and `/mirror` are gated. A paying client
   (**payblob**) PUTs, gets `402`, and re-sends with payment, so a large blob
-  crosses the wire **twice** unless it pre-pays via a `HEAD /upload` (BUD-06)
-  preflight. Cashu is the clean path: `X-Cashu` rides its own header, so it
+  crosses the wire **twice** (`PUT -> 402 -> re-PUT`). The `HEAD /upload`
+  (BUD-06) preflight is exempt (`l402_exempt_methods HEAD`) and stays free:
+  paying it would be wasted, since macaroons are method-bound and a HEAD token
+  is rejected on the `PUT`. Cashu is the clean path: `X-Cashu` rides its own header, so it
   coexists with a BUD-02 upload auth; L402 rides `Authorization` and only works
   when the upload carries no auth (this example's `requireAuth: false`). A
   `HEAD /<sha>` presence check is free for any client (`l402_exempt_methods HEAD`

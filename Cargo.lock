@@ -2708,6 +2708,8 @@ dependencies = [
  "bip39",
  "cdk",
  "hex",
+ "qrcode-generator",
+ "serde_json",
 ]
 
 [[package]]

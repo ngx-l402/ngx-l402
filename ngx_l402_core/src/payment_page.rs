@@ -1,10 +1,12 @@
 //! Payment page HTML renderer for the L402 402-challenge response.
 //!
-//! Separated from `lib.rs` to keep the core module focused on Nginx plumbing.
-//! This module owns all HTML, CSS, and JavaScript that is sent to the browser
-//! when a protected resource requires payment.
+//! Owns all HTML, CSS and JavaScript sent to the browser when a protected
+//! resource requires payment. It touches no nginx types, so it lives here
+//! rather than in the `cdylib` — where `test = false` means a `#[test]` block
+//! could never run, and the escaping and auto-detect wiring would go
+//! unverified.
 
-use ngx_l402_core::html_escape;
+use crate::escaping::html_escape;
 
 /// Serialise a value as a JSON literal safe to inline in a `<script>` block.
 ///
@@ -32,6 +34,7 @@ fn script_json_literal(s: &str) -> String {
 /// * `auto_detect`           - Whether to poll for automatic payment detection
 /// * `cashu_enabled`         - Whether to show the Cashu/eCash tab
 /// * `cashu_payment_request` - Optional P2PK Cashu payment request string
+/// * `cashu_mints`           - Mints a token may be drawn from; empty means any
 pub fn render_payment_page(
     invoice: &str,
     amount_msat: i64,
@@ -39,6 +42,7 @@ pub fn render_payment_page(
     auto_detect: bool,
     cashu_enabled: bool,
     cashu_payment_request: Option<&str>,
+    cashu_mints: &[String],
 ) -> String {
     // ── QR Code ─────────────────────────────────────────────────────────────
     // Generate at 280 px and inject centering styles into the SVG root so the
@@ -82,18 +86,49 @@ pub fn render_payment_page(
 
     // ── Cashu tab ────────────────────────────────────────────────────────────
     let cashu_tab_html = if cashu_enabled {
+        // The full value is carried alongside the preview so the copy handler
+        // has something to read: a `creq` string is a few hundred characters.
         let payment_req_hint = cashu_payment_request
             .map(|r| {
-                let preview = html_escape(&r.chars().take(60).collect::<String>());
+                let short: String = r.chars().take(48).collect();
                 format!(
-                    "<div class=\"payment-req-box\">\
-<span class=\"payment-req-label\">Payment Request</span>\
-<code class=\"payment-req-code\">{preview}\u{2026}</code>\
-</div>",
-                    preview = preview,
+                    "<div class=\"payment-req-box\" onclick=\"copyPaymentReq()\" \
+title=\"Click to copy the full payment request\">\
+<span class=\"payment-req-label\">Payment Request \u{2014} click to copy</span>\
+<code class=\"payment-req-code\">{short}\u{2026}</code>\
+<span id=\"cashu-preq-full\" hidden>{full}</span>\
+</div>\
+<div class=\"copy-toast\" id=\"preq-toast\">Copied to clipboard!</div>",
+                    short = html_escape(&short),
+                    full = html_escape(r),
                 )
             })
             .unwrap_or_default();
+
+        // Hosts only — a full URL wraps badly on a phone.
+        let mints_hint = if cashu_mints.is_empty() {
+            String::new()
+        } else {
+            let items = cashu_mints
+                .iter()
+                .map(|m| {
+                    let host = m
+                        .trim()
+                        .trim_start_matches("https://")
+                        .trim_start_matches("http://")
+                        .trim_end_matches('/');
+                    format!("<li>{}</li>", html_escape(host))
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            format!(
+                "<div class=\"mints-box\">\
+<span class=\"mints-label\">Tokens accepted from these mints only</span>\
+<ul class=\"mints-list\">{items}</ul>\
+</div>",
+                items = items,
+            )
+        };
         format!(
             "<div id=\"tab-ecash\" class=\"tab-panel hidden\">\
 <div class=\"card\">\
@@ -105,6 +140,7 @@ pub fn render_payment_page(
 </div>\
 </div>\
 {payment_req_hint}\
+{mints_hint}\
 <div class=\"field\">\
 <label for=\"cashu-token\">Cashu Token</label>\
 <textarea id=\"cashu-token\" placeholder=\"cashuA...\" rows=\"4\" spellcheck=\"false\" autocomplete=\"off\"></textarea>\
@@ -114,6 +150,7 @@ pub fn render_payment_page(
 </div>\
 </div>",
             payment_req_hint = payment_req_hint,
+            mints_hint = mints_hint,
         )
     } else {
         String::new()
@@ -252,9 +289,14 @@ document.getElementById('preimage-section').classList.remove('hidden')\">Enter p
   .cashu-icon{{font-size:2rem;line-height:1}}
   .cashu-title{{font-weight:600;font-size:.95rem;color:var(--text);margin-bottom:.15rem}}
   .cashu-subtitle{{font-size:.78rem;color:var(--text-muted)}}
-  .payment-req-box{{background:rgba(245,158,11,.06);border:1px solid rgba(245,158,11,.2);border-radius:.65rem;padding:.65rem .85rem;display:flex;flex-direction:column;gap:.3rem}}
+  .payment-req-box{{background:rgba(245,158,11,.06);border:1px solid rgba(245,158,11,.2);border-radius:.65rem;padding:.65rem .85rem;display:flex;flex-direction:column;gap:.3rem;cursor:pointer}}
+  .payment-req-box:hover{{border-color:rgba(245,158,11,.45)}}
   .payment-req-label{{font-size:.68rem;font-weight:700;letter-spacing:.08em;color:#d97706;text-transform:uppercase}}
   .payment-req-code{{font-family:'JetBrains Mono',monospace;font-size:.7rem;color:var(--text-muted);word-break:break-all;line-height:1.5}}
+  .mints-box{{background:rgba(139,92,246,.06);border:1px solid rgba(139,92,246,.2);border-radius:.65rem;padding:.65rem .85rem;display:flex;flex-direction:column;gap:.35rem}}
+  .mints-label{{font-size:.68rem;font-weight:700;letter-spacing:.08em;color:var(--accent2);text-transform:uppercase}}
+  .mints-list{{margin:0;padding-left:1.1rem;display:flex;flex-direction:column;gap:.2rem}}
+  .mints-list li{{font-family:'JetBrains Mono',monospace;font-size:.72rem;color:var(--text-muted);word-break:break-all}}
   /* Misc */
   .error-msg{{background:rgba(239,68,68,.09);border:1px solid rgba(239,68,68,.22);border-radius:.55rem;padding:.55rem .8rem;font-size:.8rem;color:#f87171}}
   .error-msg.hidden{{display:none}}
@@ -332,6 +374,23 @@ document.getElementById('preimage-section').classList.remove('hidden')\">Enter p
       t.style.opacity = '1'; setTimeout(() => t.style.opacity = '0', 2000);
     }});
   }}
+  // Read from the DOM rather than interpolating into JS: the value is already
+  // escaped into the page, so there is no second escaping context to get wrong.
+  function copyPaymentReq() {{
+    const el = document.getElementById('cashu-preq-full');
+    if (!el) return;
+    const text = el.textContent;
+    const toast = () => {{
+      const t = document.getElementById('preq-toast');
+      t.style.opacity = '1'; setTimeout(() => t.style.opacity = '0', 2000);
+    }};
+    navigator.clipboard.writeText(text).then(toast).catch(() => {{
+      const box = document.createElement('textarea');
+      box.value = text; document.body.appendChild(box); box.select();
+      document.execCommand('copy'); document.body.removeChild(box);
+      toast();
+    }});
+  }}
   function showContent(r) {{
     r.text().then(html => {{ document.open(); document.write(html); document.close(); }});
   }}
@@ -399,4 +458,223 @@ document.getElementById('preimage-section').classList.remove('hidden')\">Enter p
         macaroon_json = script_json_literal(macaroon_b64),
         auto_detect_js = auto_detect_js,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const INVOICE: &str = "lnbc100n1pjabcdefgqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
+    const MACAROON: &str = "AgELbmd4X2w0MDIuaW8CQgAA";
+
+    fn render(auto_detect: bool, cashu_enabled: bool, cashu_req: Option<&str>) -> String {
+        render_with_mints(auto_detect, cashu_enabled, cashu_req, &[])
+    }
+
+    fn render_with_mints(
+        auto_detect: bool,
+        cashu_enabled: bool,
+        cashu_req: Option<&str>,
+        mints: &[String],
+    ) -> String {
+        render_payment_page(
+            INVOICE,
+            10_000,
+            MACAROON,
+            auto_detect,
+            cashu_enabled,
+            cashu_req,
+            mints,
+        )
+    }
+
+    #[test]
+    fn auto_detect_on_polls_and_hides_manual_entry() {
+        let html = render(true, false, None);
+        assert!(
+            html.contains("startPolling()"),
+            "polling JS must be injected"
+        );
+        assert!(
+            html.contains("id=\"auto-status\""),
+            "the waiting spinner must be present"
+        );
+        // The manual field still exists — the fallback below reveals it — but it
+        // starts hidden so the two flows are not offered at once.
+        assert!(
+            html.contains("id=\"preimage-section\" class=\"hidden\""),
+            "manual preimage entry must start hidden while polling"
+        );
+    }
+
+    #[test]
+    fn auto_detect_off_shows_manual_entry_and_no_polling() {
+        let html = render(false, false, None);
+        assert!(
+            !html.contains("startPolling"),
+            "no polling JS without auto-detect"
+        );
+        assert!(
+            !html.contains("id=\"auto-status\""),
+            "no spinner without auto-detect"
+        );
+        assert!(
+            html.contains("id=\"preimage-input\""),
+            "manual preimage entry must be offered"
+        );
+        assert!(
+            !html.contains("id=\"preimage-section\" class=\"hidden\""),
+            "manual entry must be visible, not hidden"
+        );
+    }
+
+    /// After MAX_POLL attempts the spinner is dismissed and manual entry is
+    /// revealed, so a stalled detector never leaves the payer stuck.
+    #[test]
+    fn poll_fallback_reveals_manual_entry() {
+        let html = render(true, false, None);
+        assert!(html.contains("MAX_POLL"), "a poll ceiling must exist");
+        assert!(
+            html.contains("pollAttempts++ > MAX_POLL"),
+            "the ceiling must be enforced"
+        );
+        assert!(
+            html.contains("document.getElementById('preimage-section').classList.remove('hidden')"),
+            "hitting the ceiling must reveal manual preimage entry"
+        );
+    }
+
+    #[test]
+    fn cashu_tab_appears_only_when_enabled() {
+        let with = render(false, true, None);
+        assert!(
+            with.contains("id=\"tab-ecash\""),
+            "Cashu panel when enabled"
+        );
+        assert!(
+            with.contains("id=\"cashu-token\""),
+            "Cashu input when enabled"
+        );
+
+        let without = render(false, false, None);
+        assert!(
+            !without.contains("id=\"tab-ecash\""),
+            "no Cashu panel when off"
+        );
+        assert!(
+            !without.contains("id=\"cashu-token\""),
+            "no Cashu input when off"
+        );
+    }
+
+    #[test]
+    fn cashu_payment_request_is_shown_only_when_supplied() {
+        let with = render(false, true, Some("creqAxyz123"));
+        assert!(
+            with.contains("creqAxyz123"),
+            "the request must be previewed"
+        );
+        assert!(
+            with.contains("Payment Request"),
+            "the preview box must render"
+        );
+
+        // The `payment-req-*` classes are always in the stylesheet, so assert on
+        // the rendered box instead of the class name.
+        let without = render(false, true, None);
+        assert!(
+            !without.contains("Payment Request"),
+            "no preview box without a request"
+        );
+        assert!(!without.contains("creqA"));
+    }
+
+    /// A truncated request cannot be pasted into a wallet, so the full string
+    /// has to be in the DOM for the copy handler to read.
+    #[test]
+    fn payment_request_is_present_in_full_not_only_previewed() {
+        let long = format!("creqA{}", "x".repeat(400));
+        let html = render(false, true, Some(&long));
+        assert!(
+            html.contains(&long),
+            "the full request must be in the page, not just a preview"
+        );
+        assert!(
+            html.contains("copyPaymentReq()"),
+            "and it must be copyable, like the invoice"
+        );
+    }
+
+    /// Without this the mints reach NUT-24 wallets through the X-Cashu header
+    /// and nobody else: a person pastes a token from an unlisted mint and finds
+    /// out only from the 400.
+    #[test]
+    fn whitelisted_mints_are_listed_for_the_reader() {
+        let mints = vec![
+            "https://mint.example.com".to_string(),
+            "https://other.example.org/".to_string(),
+        ];
+        let html = render_with_mints(false, true, None, &mints);
+        assert!(html.contains("mint.example.com"), "first mint must show");
+        assert!(html.contains("other.example.org"), "second mint must show");
+        assert!(
+            !html.contains("https://mint.example.com"),
+            "hosts only — a full URL wraps badly on a phone"
+        );
+        assert!(html.contains("accepted from these mints only"));
+    }
+
+    /// An empty whitelist means every mint is accepted, so naming none is the
+    /// honest rendering — claiming a restriction that isn't there would be worse
+    /// than saying nothing.
+    #[test]
+    fn no_mint_box_when_the_whitelist_is_empty() {
+        let html = render(false, true, None);
+        // `.mints-box` is always in the stylesheet, so assert on the rendered
+        // element and its copy, as the payment-request test above does.
+        assert!(!html.contains("<div class=\"mints-box\""));
+        assert!(!html.contains("accepted from these mints only"));
+    }
+
+    #[test]
+    fn mint_urls_are_escaped() {
+        let mints = vec!["https://evil.example/<img src=x onerror=alert(1)>".to_string()];
+        let html = render_with_mints(false, true, None, &mints);
+        assert!(!html.contains("<img src=x"), "mint URLs must be escaped");
+        assert!(html.contains("&lt;img"));
+    }
+
+    /// The invoice and macaroon are interpolated into an inline <script>. A
+    /// value containing `</script>` must not be able to close the element —
+    /// the tokenizer ends it at the first literal `</script`, whatever the JS
+    /// string context.
+    #[test]
+    fn script_context_cannot_be_broken_out_of() {
+        let hostile = "</script><img src=x onerror=alert(1)>";
+        let hostile_mints = vec![hostile.to_string()];
+        let html = render_payment_page(
+            hostile,
+            10_000,
+            hostile,
+            true,
+            true,
+            Some(hostile),
+            &hostile_mints,
+        );
+        assert!(
+            !html.to_ascii_lowercase().contains("</script><img"),
+            "a script-closing sequence survived into the page"
+        );
+        assert!(
+            !html.contains("onerror=alert(1)>"),
+            "unescaped attacker markup reached the output"
+        );
+    }
+
+    #[test]
+    fn amount_is_rendered_in_sats() {
+        // 10_000 msat = 10 sat.
+        let html = render(false, false, None);
+        assert!(html.contains(">10<") || html.contains("10 sat") || html.contains("10</"));
+    }
 }

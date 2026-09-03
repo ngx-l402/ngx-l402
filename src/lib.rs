@@ -40,7 +40,6 @@ mod cashu;
 mod cashu_redemption_logger;
 mod manifest;
 mod metrics;
-mod payment_page;
 
 static MODULE: OnceLock<L402Module> = OnceLock::new();
 
@@ -2291,13 +2290,27 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
                     } else {
                         None
                     };
-                    let html = payment_page::render_payment_page(
+                    let cashu_mint_list: Vec<String> = if cashu_en {
+                        cashu::get_whitelisted_mints()
+                            .map(|m| {
+                                // Sorted: HashSet iteration order is not stable,
+                                // so the list would otherwise reshuffle per request.
+                                let mut v: Vec<String> = m.iter().cloned().collect();
+                                v.sort();
+                                v
+                            })
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    let html = ngx_l402_core::render_payment_page(
                         &invoice,
                         final_amount,
                         &macaroon_b64,
                         auto_detect_payment,
                         cashu_en,
                         cashu_pr_owned.as_deref(),
+                        &cashu_mint_list,
                     );
                     return unsafe { send_html_response(request, 402, html) };
                 }

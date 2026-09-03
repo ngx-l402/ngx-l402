@@ -34,6 +34,7 @@ fn script_json_literal(s: &str) -> String {
 /// * `auto_detect`           - Whether to poll for automatic payment detection
 /// * `cashu_enabled`         - Whether to show the Cashu/eCash tab
 /// * `cashu_payment_request` - Optional P2PK Cashu payment request string
+/// * `cashu_mints`           - Mints a token may be drawn from; empty means any
 pub fn render_payment_page(
     invoice: &str,
     amount_msat: i64,
@@ -41,6 +42,7 @@ pub fn render_payment_page(
     auto_detect: bool,
     cashu_enabled: bool,
     cashu_payment_request: Option<&str>,
+    cashu_mints: &[String],
 ) -> String {
     // ── QR Code ─────────────────────────────────────────────────────────────
     // Generate at 280 px and inject centering styles into the SVG root so the
@@ -84,18 +86,49 @@ pub fn render_payment_page(
 
     // ── Cashu tab ────────────────────────────────────────────────────────────
     let cashu_tab_html = if cashu_enabled {
+        // The full value is carried alongside the preview so the copy handler
+        // has something to read: a `creq` string is a few hundred characters.
         let payment_req_hint = cashu_payment_request
             .map(|r| {
-                let preview = html_escape(&r.chars().take(60).collect::<String>());
+                let short: String = r.chars().take(48).collect();
                 format!(
-                    "<div class=\"payment-req-box\">\
-<span class=\"payment-req-label\">Payment Request</span>\
-<code class=\"payment-req-code\">{preview}\u{2026}</code>\
-</div>",
-                    preview = preview,
+                    "<div class=\"payment-req-box\" onclick=\"copyPaymentReq()\" \
+title=\"Click to copy the full payment request\">\
+<span class=\"payment-req-label\">Payment Request \u{2014} click to copy</span>\
+<code class=\"payment-req-code\">{short}\u{2026}</code>\
+<span id=\"cashu-preq-full\" hidden>{full}</span>\
+</div>\
+<div class=\"copy-toast\" id=\"preq-toast\">Copied to clipboard!</div>",
+                    short = html_escape(&short),
+                    full = html_escape(r),
                 )
             })
             .unwrap_or_default();
+
+        // Hosts only — a full URL wraps badly on a phone.
+        let mints_hint = if cashu_mints.is_empty() {
+            String::new()
+        } else {
+            let items = cashu_mints
+                .iter()
+                .map(|m| {
+                    let host = m
+                        .trim()
+                        .trim_start_matches("https://")
+                        .trim_start_matches("http://")
+                        .trim_end_matches('/');
+                    format!("<li>{}</li>", html_escape(host))
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            format!(
+                "<div class=\"mints-box\">\
+<span class=\"mints-label\">Tokens accepted from these mints only</span>\
+<ul class=\"mints-list\">{items}</ul>\
+</div>",
+                items = items,
+            )
+        };
         format!(
             "<div id=\"tab-ecash\" class=\"tab-panel hidden\">\
 <div class=\"card\">\
@@ -107,6 +140,7 @@ pub fn render_payment_page(
 </div>\
 </div>\
 {payment_req_hint}\
+{mints_hint}\
 <div class=\"field\">\
 <label for=\"cashu-token\">Cashu Token</label>\
 <textarea id=\"cashu-token\" placeholder=\"cashuA...\" rows=\"4\" spellcheck=\"false\" autocomplete=\"off\"></textarea>\
@@ -116,6 +150,7 @@ pub fn render_payment_page(
 </div>\
 </div>",
             payment_req_hint = payment_req_hint,
+            mints_hint = mints_hint,
         )
     } else {
         String::new()
@@ -254,9 +289,14 @@ document.getElementById('preimage-section').classList.remove('hidden')\">Enter p
   .cashu-icon{{font-size:2rem;line-height:1}}
   .cashu-title{{font-weight:600;font-size:.95rem;color:var(--text);margin-bottom:.15rem}}
   .cashu-subtitle{{font-size:.78rem;color:var(--text-muted)}}
-  .payment-req-box{{background:rgba(245,158,11,.06);border:1px solid rgba(245,158,11,.2);border-radius:.65rem;padding:.65rem .85rem;display:flex;flex-direction:column;gap:.3rem}}
+  .payment-req-box{{background:rgba(245,158,11,.06);border:1px solid rgba(245,158,11,.2);border-radius:.65rem;padding:.65rem .85rem;display:flex;flex-direction:column;gap:.3rem;cursor:pointer}}
+  .payment-req-box:hover{{border-color:rgba(245,158,11,.45)}}
   .payment-req-label{{font-size:.68rem;font-weight:700;letter-spacing:.08em;color:#d97706;text-transform:uppercase}}
   .payment-req-code{{font-family:'JetBrains Mono',monospace;font-size:.7rem;color:var(--text-muted);word-break:break-all;line-height:1.5}}
+  .mints-box{{background:rgba(139,92,246,.06);border:1px solid rgba(139,92,246,.2);border-radius:.65rem;padding:.65rem .85rem;display:flex;flex-direction:column;gap:.35rem}}
+  .mints-label{{font-size:.68rem;font-weight:700;letter-spacing:.08em;color:var(--accent2);text-transform:uppercase}}
+  .mints-list{{margin:0;padding-left:1.1rem;display:flex;flex-direction:column;gap:.2rem}}
+  .mints-list li{{font-family:'JetBrains Mono',monospace;font-size:.72rem;color:var(--text-muted);word-break:break-all}}
   /* Misc */
   .error-msg{{background:rgba(239,68,68,.09);border:1px solid rgba(239,68,68,.22);border-radius:.55rem;padding:.55rem .8rem;font-size:.8rem;color:#f87171}}
   .error-msg.hidden{{display:none}}
@@ -332,6 +372,23 @@ document.getElementById('preimage-section').classList.remove('hidden')\">Enter p
       document.execCommand('copy'); document.body.removeChild(box);
       const t = document.getElementById('copy-toast');
       t.style.opacity = '1'; setTimeout(() => t.style.opacity = '0', 2000);
+    }});
+  }}
+  // Read from the DOM rather than interpolating into JS: the value is already
+  // escaped into the page, so there is no second escaping context to get wrong.
+  function copyPaymentReq() {{
+    const el = document.getElementById('cashu-preq-full');
+    if (!el) return;
+    const text = el.textContent;
+    const toast = () => {{
+      const t = document.getElementById('preq-toast');
+      t.style.opacity = '1'; setTimeout(() => t.style.opacity = '0', 2000);
+    }};
+    navigator.clipboard.writeText(text).then(toast).catch(() => {{
+      const box = document.createElement('textarea');
+      box.value = text; document.body.appendChild(box); box.select();
+      document.execCommand('copy'); document.body.removeChild(box);
+      toast();
     }});
   }}
   function showContent(r) {{
@@ -411,6 +468,15 @@ mod tests {
     const MACAROON: &str = "AgELbmd4X2w0MDIuaW8CQgAA";
 
     fn render(auto_detect: bool, cashu_enabled: bool, cashu_req: Option<&str>) -> String {
+        render_with_mints(auto_detect, cashu_enabled, cashu_req, &[])
+    }
+
+    fn render_with_mints(
+        auto_detect: bool,
+        cashu_enabled: bool,
+        cashu_req: Option<&str>,
+        mints: &[String],
+    ) -> String {
         render_payment_page(
             INVOICE,
             10_000,
@@ -418,6 +484,7 @@ mod tests {
             auto_detect,
             cashu_enabled,
             cashu_req,
+            mints,
         )
     }
 
@@ -522,6 +589,61 @@ mod tests {
         assert!(!without.contains("creqA"));
     }
 
+    /// A truncated request cannot be pasted into a wallet, so the full string
+    /// has to be in the DOM for the copy handler to read.
+    #[test]
+    fn payment_request_is_present_in_full_not_only_previewed() {
+        let long = format!("creqA{}", "x".repeat(400));
+        let html = render(false, true, Some(&long));
+        assert!(
+            html.contains(&long),
+            "the full request must be in the page, not just a preview"
+        );
+        assert!(
+            html.contains("copyPaymentReq()"),
+            "and it must be copyable, like the invoice"
+        );
+    }
+
+    /// Without this the mints reach NUT-24 wallets through the X-Cashu header
+    /// and nobody else: a person pastes a token from an unlisted mint and finds
+    /// out only from the 400.
+    #[test]
+    fn whitelisted_mints_are_listed_for_the_reader() {
+        let mints = vec![
+            "https://mint.example.com".to_string(),
+            "https://other.example.org/".to_string(),
+        ];
+        let html = render_with_mints(false, true, None, &mints);
+        assert!(html.contains("mint.example.com"), "first mint must show");
+        assert!(html.contains("other.example.org"), "second mint must show");
+        assert!(
+            !html.contains("https://mint.example.com"),
+            "hosts only — a full URL wraps badly on a phone"
+        );
+        assert!(html.contains("accepted from these mints only"));
+    }
+
+    /// An empty whitelist means every mint is accepted, so naming none is the
+    /// honest rendering — claiming a restriction that isn't there would be worse
+    /// than saying nothing.
+    #[test]
+    fn no_mint_box_when_the_whitelist_is_empty() {
+        let html = render(false, true, None);
+        // `.mints-box` is always in the stylesheet, so assert on the rendered
+        // element and its copy, as the payment-request test above does.
+        assert!(!html.contains("<div class=\"mints-box\""));
+        assert!(!html.contains("accepted from these mints only"));
+    }
+
+    #[test]
+    fn mint_urls_are_escaped() {
+        let mints = vec!["https://evil.example/<img src=x onerror=alert(1)>".to_string()];
+        let html = render_with_mints(false, true, None, &mints);
+        assert!(!html.contains("<img src=x"), "mint URLs must be escaped");
+        assert!(html.contains("&lt;img"));
+    }
+
     /// The invoice and macaroon are interpolated into an inline <script>. A
     /// value containing `</script>` must not be able to close the element —
     /// the tokenizer ends it at the first literal `</script`, whatever the JS
@@ -529,7 +651,16 @@ mod tests {
     #[test]
     fn script_context_cannot_be_broken_out_of() {
         let hostile = "</script><img src=x onerror=alert(1)>";
-        let html = render_payment_page(hostile, 10_000, hostile, true, true, Some(hostile));
+        let hostile_mints = vec![hostile.to_string()];
+        let html = render_payment_page(
+            hostile,
+            10_000,
+            hostile,
+            true,
+            true,
+            Some(hostile),
+            &hostile_mints,
+        );
         assert!(
             !html.to_ascii_lowercase().contains("</script><img"),
             "a script-closing sequence survived into the page"

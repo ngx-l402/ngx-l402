@@ -221,14 +221,47 @@ let h = ngx_array_push(&mut handlers);           // Could be null!
 
 ## Testing Guidelines
 
-### Integration Testing
+| Kind | Location | Run with |
+|------|----------|----------|
+| **Unit** — pure logic, no nginx | `#[cfg(test)] mod tests` in `ngx_l402_core/src/*.rs` | `cargo test -p ngx_l402_core` |
+| **Integration** — the real module in nginx, against a real backend | `.github/workflows/tests.yml` | `act -W .github/workflows/tests.yml` |
 
-Test the full module with Nginx:
+There is no separate harness. The integration suite *is* `tests.yml`: one `test`
+job that brings up regtest bitcoind, a Lightning node, Redis and a Cashu mint via
+`docker-compose.yml`, then walks each backend in turn.
 
-1. Build and install the module
-2. Configure a test endpoint
-3. Send test requests (valid auth, missing auth, expired tokens)
-4. Verify responses and logs
+### Adding an integration test case
+
+Cases are steps in that job, named `Run Integration Tests - <Backend>`. Add to
+the section for the backend you are testing; only add a new section for a new
+backend. The job is sequential and stateful, so:
+
+- **Poll, don't sleep.** `source .github/scripts/ci-wait.sh` and use `wait_http`,
+  `wait_log`, `wait_container`, or `curl_until` — a fixed `sleep` is a bet on a
+  loaded runner that eventually loses and fails the whole job.
+- **Dump logs before exiting.** `docker logs <container>` ahead of every `exit 1`.
+- **Flush Redis** (`docker exec redis redis-cli flushall`) if your case replays a
+  preimage — replay protection is persistent across sections.
+- **Stop what you started.** Every `nginx-*` service binds port 8000, so a new
+  section must stop its containers before the next one runs.
+
+A new protected route also needs a `location` block in `nginx.conf` **and** a
+`COPY index.html /usr/share/nginx/html/<route>/index.html` line in the
+`Dockerfile`, or it 404s before the module ever runs.
+
+### Never hand-edit `.ngit/act/workflows/`
+
+CI runs on both GitHub Actions and [Nostr](https://gitworkshop.dev) from the same
+definitions. `.ngit/act/workflows/` is **generated** from `.github/workflows/`.
+After editing a workflow, regenerate it in the same commit:
+
+```bash
+./.ngit/act/sync.sh
+git add -A .ngit/act/workflows
+```
+
+The `fmt` job fails on both pipelines if you forget. See
+[.ngit/act/README.md](.ngit/act/README.md) for what the sync transforms.
 
 ---
 
@@ -402,6 +435,8 @@ Before opening a PR:
 - [ ] Tests pass: `cargo test`
 - [ ] Module builds: `cargo build --release --features export-modules`
 - [ ] Manual testing with Nginx performed
+- [ ] New behaviour covered by a test — a unit test in `ngx_l402_core`, or a case in `.github/workflows/tests.yml` (see [Testing Guidelines](#testing-guidelines))
+- [ ] If you edited a workflow: `./.ngit/act/sync.sh` run and `.ngit/act/workflows` staged in the same commit
 - [ ] Commit messages follow conventions
 - [ ] No merge conflicts with `main`
 - [ ] Documentation updated (if needed)

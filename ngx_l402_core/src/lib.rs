@@ -23,7 +23,7 @@ pub use escaping::{escape_json, html_escape};
 pub use fee::fee_reserve_msat;
 pub use l402_header::parse_l402_header_value;
 pub use p2pk::{parse_p2pk_secret_key, InvalidP2pkKey};
-pub use rate_limit::parse_rate_limit;
+pub use rate_limit::{invoice_rate_limit_key, parse_rate_limit};
 pub use redact::redact_redis_url;
 pub use replay_cache::{ReplayCache, DEFAULT_REPLAY_CACHE_CAP};
 pub use wallet_seed::{

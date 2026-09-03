@@ -123,7 +123,7 @@ async fn get_db() -> Result<Arc<cdk_sqlite::WalletSqliteDatabase>, String> {
             cdk_sqlite::WalletSqliteDatabase::new(url.as_str())
                 .await
                 .map(Arc::new)
-                .map_err(|e| format!("Failed to open Cashu database: {:?}", e))
+                .map_err(|e| format!("Failed to open Cashu database: {}", e))
         })
         .await
         .cloned()
@@ -529,7 +529,7 @@ fn verify_proof_dleq_offline(
             })?;
             proof
                 .verify_dleq(key)
-                .map_err(|e| format!("NUT-12 DLEQ verification failed: {:?}", e))
+                .map_err(|e| format!("NUT-12 DLEQ verification failed: {}", e))
         }
         None => {
             if require_dleq {
@@ -609,7 +609,7 @@ pub fn initialize_cashu(db_url: &str) -> Result<(), String> {
                 Ok(())
             }
             Err(e) => {
-                let error = format!("Failed to create Cashu SQLite database: {:?}", e);
+                let error = format!("Failed to create Cashu SQLite database: {}", e);
                 error!("❌ {}", error);
                 Err(error)
             }
@@ -1231,7 +1231,7 @@ pub async fn verify_cashu_token_p2pk(
     );
     // Re-parse to a typed MintUrl (needed for ProofInfo and wallet APIs)
     let mint_url = MintUrl::from_str(&mint_url_str).map_err(|e| {
-        CashuError::Unacceptable(format!("Invalid mint URL after normalization: {:?}", e))
+        CashuError::Unacceptable(format!("Invalid mint URL after normalization: {}", e))
     })?;
 
     // Verify mint is whitelisted
@@ -1322,7 +1322,7 @@ pub async fn verify_cashu_token_p2pk(
             .map(|p| {
                 p.y().map(|y| y.to_hex()).map_err(|e| {
                     CashuError::Internal(format!(
-                        "Failed to compute proof Y-value for replay key: {:?}",
+                        "Failed to compute proof Y-value for replay key: {}",
                         e
                     ))
                 })
@@ -1350,7 +1350,7 @@ pub async fn verify_cashu_token_p2pk(
     ))?;
 
     let public_key = cdk::nuts::PublicKey::from_hex(public_key_str)
-        .map_err(|e| CashuError::Internal(format!("Failed to parse public key: {:?}", e)))?;
+        .map_err(|e| CashuError::Internal(format!("Failed to parse public key: {}", e)))?;
 
     // Create spending condition with our public key
     let spending_condition = cdk::nuts::SpendingConditions::new_p2pk(public_key, None);
@@ -1361,7 +1361,7 @@ pub async fn verify_cashu_token_p2pk(
         .verify_token_p2pk(&token_decoded, spending_condition.clone())
         .await
         .map_err(|e| {
-            CashuError::Unacceptable(format!("Token not locked to our public key: {:?}", e))
+            CashuError::Unacceptable(format!("Token not locked to our public key: {}", e))
         })?;
 
     info!("✅ Token verified as P2PK-locked to our public key");
@@ -1419,7 +1419,7 @@ pub async fn verify_cashu_token_p2pk(
         .check_proofs_spent(proofs.clone())
         .await
         .map_err(|e| {
-            CashuError::Internal(format!("Failed to verify proof state with mint: {:?}", e))
+            CashuError::Internal(format!("Failed to verify proof state with mint: {}", e))
         })?;
 
     // Only Unspent is acceptable. Pending / Reserved / PendingSpent all mean the
@@ -1453,7 +1453,7 @@ pub async fn verify_cashu_token_p2pk(
         .iter()
         .map(|proof| {
             let y = proof.y().map_err(|e| {
-                CashuError::Internal(format!("Failed to compute proof y-coordinate: {:?}", e))
+                CashuError::Internal(format!("Failed to compute proof y-coordinate: {}", e))
             })?;
             Ok(ProofInfo {
                 proof: proof.clone(),
@@ -1533,7 +1533,7 @@ pub async fn verify_cashu_token_p2pk(
             PROCESSED_TOKENS.with(|t| t.borrow_mut().release(&proof_replay_key));
         }
         return Err(CashuError::Internal(format!(
-            "Failed to store proofs in database: {:?}",
+            "Failed to store proofs in database: {}",
             e
         )));
     }
@@ -2115,7 +2115,7 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                     let mut signed_proofs = proofs_to_melt.clone();
                     for proof in &mut signed_proofs {
                         if let Err(e) = proof.sign_p2pk(private_key.clone()) {
-                            error!("❌ Failed to sign proof: {:?}", e);
+                            error!("❌ Failed to sign proof: {}", e);
                         }
                     }
 

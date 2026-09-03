@@ -9,13 +9,14 @@ use ngx::ffi::{
     ngx_http_discard_request_body, ngx_http_finalize_request, ngx_http_handler_pt,
     ngx_http_module_t, ngx_http_phases_NGX_HTTP_ACCESS_PHASE, ngx_http_request_t, ngx_int_t,
     ngx_log_s, ngx_module_t, ngx_shared_memory_add, ngx_shm_zone_t, ngx_slab_alloc,
-    ngx_slab_pool_t, ngx_str_t, ngx_test_config, ngx_uint_t, NGX_CONF_NOARGS, NGX_CONF_TAKE1,
-    NGX_DECLINED, NGX_DONE, NGX_ERROR, NGX_HTTP_COPY, NGX_HTTP_DELETE, NGX_HTTP_GET, NGX_HTTP_HEAD,
-    NGX_HTTP_INTERNAL_SERVER_ERROR, NGX_HTTP_LOCK, NGX_HTTP_LOC_CONF, NGX_HTTP_LOC_CONF_OFFSET,
-    NGX_HTTP_MAIN_CONF, NGX_HTTP_MKCOL, NGX_HTTP_MODULE, NGX_HTTP_MOVE, NGX_HTTP_NOT_ALLOWED,
-    NGX_HTTP_OPTIONS, NGX_HTTP_PATCH, NGX_HTTP_POST, NGX_HTTP_PROPFIND, NGX_HTTP_PROPPATCH,
-    NGX_HTTP_PUT, NGX_HTTP_SRV_CONF, NGX_HTTP_TRACE, NGX_HTTP_UNLOCK, NGX_LOG_EMERG, NGX_LOG_ERR,
-    NGX_LOG_INFO, NGX_LOG_NOTICE, NGX_LOG_WARN, NGX_OK, NGX_RS_MODULE_SIGNATURE,
+    ngx_slab_pool_t, ngx_str_t, ngx_test_config, ngx_uint_t, NGX_CONF_1MORE, NGX_CONF_NOARGS,
+    NGX_CONF_TAKE1, NGX_DECLINED, NGX_DONE, NGX_ERROR, NGX_HTTP_COPY, NGX_HTTP_DELETE,
+    NGX_HTTP_GET, NGX_HTTP_HEAD, NGX_HTTP_INTERNAL_SERVER_ERROR, NGX_HTTP_LOCK, NGX_HTTP_LOC_CONF,
+    NGX_HTTP_LOC_CONF_OFFSET, NGX_HTTP_MAIN_CONF, NGX_HTTP_MKCOL, NGX_HTTP_MODULE, NGX_HTTP_MOVE,
+    NGX_HTTP_NOT_ALLOWED, NGX_HTTP_OPTIONS, NGX_HTTP_PATCH, NGX_HTTP_POST, NGX_HTTP_PROPFIND,
+    NGX_HTTP_PROPPATCH, NGX_HTTP_PUT, NGX_HTTP_SRV_CONF, NGX_HTTP_TRACE, NGX_HTTP_UNLOCK,
+    NGX_LOG_EMERG, NGX_LOG_ERR, NGX_LOG_INFO, NGX_LOG_NOTICE, NGX_LOG_WARN, NGX_OK,
+    NGX_RS_MODULE_SIGNATURE,
 };
 use ngx::http::{
     HTTPStatus, HttpModule, HttpModuleLocationConf, HttpModuleMainConf, HttpModuleServerConf,
@@ -407,8 +408,8 @@ pub async fn get_or_create_lnurl_client(
             Ok(client_arc)
         }
         Err(e) => {
-            error!("❌ Failed to create LNURL client for {}: {:?}", addr, e);
-            Err(format!("Failed to create LNURL client: {:?}", e))
+            error!("❌ Failed to create LNURL client for {}: {}", addr, e);
+            Err(format!("Failed to create LNURL client: {}", e))
         }
     }
 }
@@ -1103,7 +1104,7 @@ impl L402Module {
                     match ln_client_conn.generate_invoice(ln_invoice).await {
                         Ok(result) => result,
                         Err(e) => {
-                            error!("❌ Error generating invoice via LNURL {}: {:?}", addr, e);
+                            error!("❌ Error generating invoice via LNURL {}: {}", addr, e);
                             return None;
                         }
                     }
@@ -1140,7 +1141,7 @@ impl L402Module {
             match ln_client_conn.generate_invoice(ln_invoice).await {
                 Ok(result) => result,
                 Err(e) => {
-                    error!("❌ Error generating invoice: {:?}", e);
+                    error!("❌ Error generating invoice: {}", e);
                     return None;
                 }
             }
@@ -1398,6 +1399,11 @@ unsafe impl HttpModuleServerConf for L402Module {
 #[derive(Debug, Default)]
 pub struct ModuleConfig {
     enable: bool,
+    // HTTP methods (uppercase) exempt from the paywall for this location, set via
+    // `l402_exempt_methods HEAD;`. Exempt requests pass through unpaywalled — e.g.
+    // an informational `HEAD` presence check that should not require payment.
+    // Empty = every method is paywalled as before.
+    exempt_methods: Vec<String>,
     amount_msat: i64,
     macaroon_timeout: i64,
     // Opt-in location-scoped ("realm") caveat. When set via `l402_realm "name"`,
@@ -1431,7 +1437,7 @@ pub struct ModuleConfig {
     manifest_hidden: bool,
 }
 
-pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 14] = [
+pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 15] = [
     ngx_command_t {
         name: ngx_string!("l402"),
         type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1) as ngx_uint_t,
@@ -1537,6 +1543,14 @@ pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 14] = [
         offset: 0,
         post: std::ptr::null_mut(),
     },
+    ngx_command_t {
+        name: ngx_string!("l402_exempt_methods"),
+        type_: (NGX_HTTP_LOC_CONF | NGX_CONF_1MORE) as ngx_uint_t,
+        set: Some(ngx_http_l402_exempt_methods_set),
+        conf: NGX_HTTP_LOC_CONF_OFFSET,
+        offset: 0,
+        post: std::ptr::null_mut(),
+    },
     ngx_command_t::empty(),
 ];
 
@@ -1620,6 +1634,9 @@ impl Merge for ModuleConfig {
         }
         if self.log_format_json.is_none() {
             self.log_format_json = prev.log_format_json;
+        }
+        if self.exempt_methods.is_empty() && !prev.exempt_methods.is_empty() {
+            self.exempt_methods = prev.exempt_methods.clone();
         }
         if prev.manifest_hidden {
             self.manifest_hidden = true;
@@ -1862,6 +1879,16 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
             return NGX_DECLINED as isize;
         }
 
+        // Methods the operator marked exempt (e.g. an informational `HEAD`) skip
+        // the paywall entirely and pass through like a free location.
+        if !conf.exempt_methods.is_empty() {
+            let m = method_caveat_value(method);
+            if conf.exempt_methods.iter().any(|em| em.as_str() == m) {
+                ngx_log_error!(NGX_LOG_INFO, log_ref, "L402 exempt method; passing through");
+                return NGX_DECLINED as isize;
+            }
+        }
+
         let amount_msat = conf.amount_msat;
         if amount_msat <= 0 {
             ngx_log_error!(
@@ -2071,6 +2098,8 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
     if result == 402 {
         if let Some((max_requests, window_secs)) = invoice_rate_limit {
             let client_ip = get_client_ip(request);
+            // SAFETY: `request` is the valid pointer nginx passed to this handler.
+            unsafe { warn_if_proxy_header_ignored(request, &client_ip) };
             if !check_invoice_rate_limit(&client_ip, &request_path, max_requests, window_secs) {
                 metrics::inc(metrics::Metric::RateLimitedTotal);
                 ngx_log_error!(
@@ -2482,7 +2511,7 @@ pub fn l402_access_handler(
                         ));
                     }
                     Err(e) => {
-                        warn!("⚠️ L402 auto-detect verification failed: {:?}", e);
+                        warn!("⚠️ L402 auto-detect verification failed: {}", e);
                         return 401;
                     }
                 }
@@ -2523,13 +2552,13 @@ pub fn l402_access_handler(
                             ));
                         }
                         Err(e) => {
-                            warn!("⚠️ L402 verification failed: {:?}", e);
+                            warn!("⚠️ L402 verification failed: {}", e);
                             return 401;
                         }
                     }
                 }
                 Err(e) => {
-                    warn!("⚠️ Failed to parse L402 header: {:?}", e);
+                    warn!("⚠️ Failed to parse L402 header: {}", e);
                     return 401;
                 }
             }
@@ -2577,13 +2606,27 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
 
     install_crash_handler();
 
+    // init_module is one-time master setup, yet nginx re-invokes it in the same
+    // master on every `nginx -s reload`, needlessly redoing it (a throwaway Tokio
+    // runtime, a discarded DB reopen, a PROCESSED_TOKENS reset that freshly forked
+    // workers inherit). Nothing here changes on reload, so run once and no-op reloads.
+    static INIT_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if INIT_DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        ngx_log_error!(
+            NGX_LOG_INFO,
+            log,
+            "ngx_l402: reload detected; keeping the existing runtime state"
+        );
+        return NGX_OK as isize;
+    }
+
     info!("🚀 Starting L402 module initialization");
     ngx_log_error!(NGX_LOG_INFO, log, "Starting module initialization");
 
     // libsodium's RNG is only thread-safe once initialised, and every 402 mints
     // a macaroon from multiple workers at once. Done here, before nginx forks.
     if let Err(e) = macaroon::initialize() {
-        error!("❌ Failed to initialize macaroon crypto: {:?}", e);
+        error!("❌ Failed to initialize macaroon crypto: {}", e);
         return -1;
     }
 
@@ -2778,6 +2821,35 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
             log,
             "Automatic Cashu redemption enabled (starts in a worker)"
         );
+
+        // Redemption melts ecash to the configured LN client (LND, CLN, NWC,
+        // BOLT12, ECLAIR, or LNURL), which generates the destination invoice. A
+        // node backend always has one; only LNURL mode needs an address. So the
+        // single static misconfiguration is LNURL mode (the default) with no LNURL
+        // address anywhere — warn at boot rather than fail silently here and
+        // noisily every redemption cycle.
+        let backend = std::env::var("LN_CLIENT_TYPE")
+            .unwrap_or_else(|_| "LNURL".to_string())
+            .trim()
+            .to_uppercase();
+        if backend == "LNURL" {
+            let has_lnurl_dest = std::env::var("LNURL_ADDRESS")
+                .map(|a| !a.trim().is_empty())
+                .unwrap_or(false)
+                || collect_route_snapshots().iter().any(|s| {
+                    s.lnurl_addr
+                        .as_deref()
+                        .map(|a| !a.trim().is_empty())
+                        .unwrap_or(false)
+                });
+            if !has_lnurl_dest {
+                ngx_log_error!(
+                    NGX_LOG_WARN,
+                    log,
+                    "CASHU_REDEEM_ON_LIGHTNING is on in LNURL mode but no LNURL address is configured (no LNURL_ADDRESS and no l402_lnurl_addr); received ecash will accumulate and cannot be melted. Set an LNURL address, use a node LN_CLIENT_TYPE, or set CASHU_REDEEM_ON_LIGHTNING=false."
+                );
+            }
+        }
     }
 
     0
@@ -3029,6 +3101,8 @@ fn handle_dry_run_passthrough(
     let rate_limited = if would_return == 402 {
         match invoice_rate_limit {
             Some((max_requests, window_secs)) => {
+                // SAFETY: `request` is the valid pointer nginx passed to this handler.
+                unsafe { warn_if_proxy_header_ignored(request, &client_ip) };
                 !check_invoice_rate_limit(&client_ip, request_path, max_requests, window_secs)
             }
             None => false,
@@ -3763,11 +3837,65 @@ pub unsafe extern "C" fn ngx_http_l402_realm_set(
     std::ptr::null_mut()
 }
 
-/// Returns the client IP, preferring X-Real-IP then the first entry of
-/// X-Forwarded-For over the direct socket address. Falls back to `"unknown"`.
+/// `l402_exempt_methods HEAD [GET ...];` — HTTP methods that skip the paywall for
+/// this location. Stored uppercase; the access handler lets matching requests
+/// through unpaywalled (e.g. an informational `HEAD` presence check).
 ///
-/// Note: X-Forwarded-For can be spoofed by clients unless nginx is configured
-/// to strip or overwrite it via the realip module before reaching this handler.
+/// # Safety
+/// `cf` and `conf` are the valid, non-null pointers Nginx passes to
+/// directive-parsing callbacks; `conf` points to this location's `ModuleConfig`.
+/// `(*cf).args` holds at least one argument after the name because the directive
+/// is declared `NGX_CONF_1MORE`.
+pub unsafe extern "C" fn ngx_http_l402_exempt_methods_set(
+    cf: *mut ngx_conf_t,
+    _cmd: *mut ngx_command_t,
+    conf: *mut c_void,
+) -> *mut c_char {
+    unsafe {
+        let conf = &mut *(conf as *mut ModuleConfig);
+        let args_arr = &*(*cf).args;
+        let args = args_arr.elts as *mut ngx_str_t;
+        let mut methods = Vec::new();
+        for i in 1..args_arr.nelts {
+            let v = (*args.add(i))
+                .to_str()
+                .unwrap_or_default()
+                .trim()
+                .to_uppercase();
+            if !v.is_empty() {
+                methods.push(v);
+            }
+        }
+        info!(
+            "⚙️ l402_exempt_methods = {:?} — these methods skip the paywall here",
+            methods
+        );
+        conf.exempt_methods = methods;
+    }
+
+    std::ptr::null_mut()
+}
+
+/// Returns the client address from the connection, falling back to
+/// `"unknown"`.
+///
+/// This is deliberately the *socket* address and never `X-Real-IP` or
+/// `X-Forwarded-For`. Those are set by the client unless a trusted proxy
+/// overwrites them, so keying the invoice rate limiter on one let anyone mint a
+/// fresh bucket per request (`curl -H "X-Real-IP: $RANDOM"`) and bypass the
+/// limit entirely.
+///
+/// Deployments behind a proxy get the real client address by configuring
+/// nginx's own realip module, which rewrites `connection->addr_text` before the
+/// access phase runs:
+///
+/// ```nginx
+/// set_real_ip_from  10.0.0.0/8;   # your proxy, and only your proxy
+/// real_ip_header    X-Real-IP;
+/// ```
+///
+/// That keeps the trust decision in nginx, where the operator states which
+/// proxies are trusted, rather than in a module that would have to guess.
 fn get_client_ip(request: *mut ngx_http_request_t) -> String {
     // SAFETY: called only from `l402_access_handler_wrapper`, where `request`
     // is the pointer nginx passed to the access handler and is guaranteed
@@ -3776,41 +3904,91 @@ fn get_client_ip(request: *mut ngx_http_request_t) -> String {
         if request.is_null() {
             return "unknown".to_string();
         }
-        let r = &*request;
-
-        // X-Real-IP: single IP set by a trusted reverse proxy
-        if !r.headers_in.x_real_ip.is_null() {
-            let val = (*r.headers_in.x_real_ip)
-                .value
-                .to_str()
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            if !val.is_empty() {
-                return val;
-            }
-        }
-
-        // X-Forwarded-For: "client, proxy1, proxy2" — leftmost is the origin
-        if !r.headers_in.x_forwarded_for.is_null() {
-            let val_str = (*r.headers_in.x_forwarded_for)
-                .value
-                .to_str()
-                .unwrap_or_default();
-            if let Some(ip) = val_str.split(',').next() {
-                let ip = ip.trim();
-                if !ip.is_empty() {
-                    return ip.to_string();
-                }
-            }
-        }
-
-        // Direct socket address — unreliable behind a load balancer
-        let conn = r.connection;
+        let conn = (*request).connection;
         if conn.is_null() {
             return "unknown".to_string();
         }
-        (*conn).addr_text.to_str().unwrap_or_default().to_string()
+        let addr = (*conn).addr_text.to_str().unwrap_or_default();
+        if addr.is_empty() {
+            return "unknown".to_string();
+        }
+        addr.to_string()
+    }
+}
+
+/// Warn once if this request looks proxied but realip did not rewrite the
+/// connection address.
+///
+/// The signal: a forwarded-client header — `X-Real-IP`, or the leftmost entry
+/// of `X-Forwarded-For` — that differs from `addr_text`. Either
+/// `set_real_ip_from` is missing, or it does not list this peer, and in both
+/// cases every client behind that proxy shares a single rate-limit bucket.
+/// Without this the misconfiguration is invisible until users start hitting
+/// limits they should not.
+///
+/// A client sending the header at a server with no proxy at all produces the
+/// identical signal, and nothing here can tell the two apart, so the message
+/// gives both readings rather than assuming the peer is a proxy.
+///
+/// # Safety
+/// `request` must be the valid, non-null pointer nginx passes to the access
+/// handler.
+unsafe fn warn_if_proxy_header_ignored(request: *mut ngx_http_request_t, bucket_addr: &str) {
+    static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if REPORTED.load(std::sync::atomic::Ordering::Relaxed) || request.is_null() {
+        return;
+    }
+
+    // SAFETY: caller guarantees `request` is valid; either header may be null.
+    let (name, header) = unsafe {
+        let h = &(*request).headers_in;
+        if !h.x_real_ip.is_null() {
+            (
+                "X-Real-IP",
+                (*h.x_real_ip)
+                    .value
+                    .to_str()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+            )
+        } else if !h.x_forwarded_for.is_null() {
+            // "client, proxy1, proxy2" — the leftmost entry is the origin, and
+            // the one realip would have substituted.
+            (
+                "X-Forwarded-For",
+                (*h.x_forwarded_for)
+                    .value
+                    .to_str()
+                    .unwrap_or_default()
+                    .split(',')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+            )
+        } else {
+            return;
+        }
+    };
+
+    // Equal means realip already substituted it — correctly configured.
+    if header.is_empty() || header == bucket_addr {
+        return;
+    }
+
+    if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        warn!(
+            "⚠️ l402_invoice_rate_limit is bucketing by connection address {addr}, but this \
+             request carried {name}: {hdr}. If {addr} is your proxy, configure \
+             `set_real_ip_from {addr};` with `real_ip_header {name};` — otherwise every client \
+             behind it shares one bucket. If nothing proxies to you, a client set that header \
+             itself and this is safe to ignore; the header is never trusted directly, which is \
+             why you are seeing this. Logged once per worker.",
+            addr = bucket_addr,
+            name = name,
+            hdr = ngx_l402_core::escape_json(&header),
+        );
     }
 }
 
@@ -3826,13 +4004,7 @@ fn check_invoice_rate_limit(ip: &str, path: &str, max_requests: u32, window_secs
         return true;
     };
 
-    // Hash the request path so the Redis key has a bounded length and an
-    // attacker cannot exhaust Redis memory or cause key collisions by sending
-    // arbitrarily long / crafted paths. Mirrors preimage_redis_key().
-    let mut hasher = Sha256::new();
-    hasher.update(path.as_bytes());
-    let path_hash = hex::encode(hasher.finalize());
-    let key = format!("l402:invoice_rate:{}:{}", ip, &path_hash[..16]);
+    let key = ngx_l402_core::invoice_rate_limit_key(ip, path);
 
     let count: u64 = match redis::Script::new(
         r#"

@@ -275,12 +275,19 @@ jobs:
 
           # Metrics endpoint — must serve text/plain Prometheus exposition.
           # Poll multiple times to handle per-worker counter copies.
+          #
+          # /metrics is ACL'd to localhost in nginx.conf, so scrape from inside
+          # the container's network namespace. The runtime image has no curl of
+          # its own (the Dockerfile installs it only in the builder stage), so
+          # borrow one that shares the network.
           echo "Scraping /metrics endpoint..."
           metrics_code=0
           metrics_resp=""
           dry_run_total=""
           for i in {1..10}; do
-            metrics_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 -H "Connection: close" http://0.0.0.0:8000/metrics) || true
+            metrics_resp=$(docker run --rm --network container:nginx-lnurl curlimages/curl:8.11.1 \
+              -s -i -w "\n%{http_code}" --max-time 30 -H "Connection: close" \
+              http://127.0.0.1:8000/metrics) || true
             metrics_code=$(echo "$metrics_resp" | tail -n1); metrics_code=${metrics_code:-000}
             if [ "$metrics_code" -eq 200 ]; then
               dry_run_total=$(echo "$metrics_resp" | awk '/^l402_dry_run_requests_total / {print $2}')
@@ -298,6 +305,18 @@ jobs:
             exit 1
           fi
           echo "PASS: /metrics returned 200"
+
+          # …and the ACL must actually deny a scrape from off-host. This is the
+          # regression guard: the endpoint publishes revenue and traffic
+          # counters, and this config ships in the Docker image.
+          ext_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 \
+            -H "Connection: close" http://0.0.0.0:8000/metrics || echo 000)
+          if [ "$ext_code" != "403" ]; then
+            echo "FAIL: /metrics reachable from outside the container (got $ext_code, expected 403)"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+          echo "PASS: /metrics denied from outside (403)"
 
           if ! echo "$metrics_resp" | grep -qi "^Content-Type: text/plain"; then
             echo "FAIL: /metrics Content-Type is not text/plain"

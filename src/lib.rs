@@ -2544,9 +2544,10 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
 
     install_crash_handler();
 
-    // nginx re-invokes init_module in the persistent master on every `-s reload`.
-    // Re-running the one-time setup re-sets already-populated OnceLocks and leaves
-    // verification broken until a full restart, so run it once and no-op a reload.
+    // init_module is one-time master setup, yet nginx re-invokes it in the same
+    // master on every `nginx -s reload`, needlessly redoing it (a throwaway Tokio
+    // runtime, a discarded DB reopen, a PROCESSED_TOKENS reset that freshly forked
+    // workers inherit). Nothing here changes on reload, so run once and no-op reloads.
     static INIT_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if INIT_DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
         ngx_log_error!(

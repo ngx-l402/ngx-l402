@@ -44,3 +44,8 @@ libc = "0.2.189"
 [features]
 default = []
 export-modules = []
+
+# Do NOT add `panic = "abort"` to any profile here. The FFI boundary relies on
+# catch_unwind to stop a panic unwinding into nginx's C stack; with abort, a
+# panic in one request kills the whole worker instead of returning 500. The
+# guards fail silently — nothing warns you they stopped working.

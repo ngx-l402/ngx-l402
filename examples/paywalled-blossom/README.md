@@ -84,6 +84,49 @@ curl -i -H "Authorization: L402 <macaroon>:<preimage>" \
 #   expect: HTTP/2 200 — the realm token covers every blob here
 ```
 
+## Enable Cashu (optional)
+
+To accept **Cashu ecash** alongside Lightning, fill the `CASHU_*` block in `.env`
+(already in `.env.example` and wired into the `nginx-l402` service). The download
+paywall then returns an `X-Cashu` NUT-24 payment request on its `402` **in addition
+to** `WWW-Authenticate: L402`, and a client that speaks either can pay. No
+`nginx.conf.template` change is needed: the existing `l402 on` location advertises
+both once ecash is on.
+
+The keys that matter:
+
+- `CASHU_ECASH_SUPPORT=true` turns it on (empty keeps the server L402-only).
+- `CASHU_WHITELISTED_MINTS` — comma-separated mints whose tokens you accept, and
+  **required**: with no whitelist the server won't advertise a Cashu challenge,
+  because accepting an arbitrary mint would let a forged mint pay. The example
+  ships the Minibits (`https://mint.minibits.cash/Bitcoin`) and Coinos
+  (`https://mint.coinos.io`) mints.
+- `CASHU_WALLET_MNEMONIC` — the server's own ecash wallet seed (12 BIP39 words); it
+  receives the tokens. Pin and back it up; it controls the funds.
+- `CASHU_REDEEM_ON_LIGHTNING=true` melts received ecash to your configured
+  Lightning backend (the LNURL address, in this example).
+
+The wallet and replay state persist in the `cashu-data` volume. The compose
+`command` chowns it to `nginx` on start (the image's own chown script only runs
+under a plain `nginx` command, which a custom command like this one bypasses); if
+you change the command, keep that chown or the wallet can't be written.
+
+Verify the challenge before pointing a client at it:
+
+```bash
+curl -si https://blossom.YOURDOMAIN/<64-hex> \
+  | grep -iE "HTTP/|x-cashu|www-authenticate"
+#   expect a 402 with BOTH an `x-cashu: creqA…` and a `www-authenticate: L402 …` line
+```
+
+**Testing with free ecash.** Point the whitelist at a test mint and turn melting
+off (fake ecash can't be melted to real Lightning), so no real sats move:
+
+```
+CASHU_WHITELISTED_MINTS=https://testnut.cashu.space
+CASHU_REDEEM_ON_LIGHTNING=false
+```
+
 ## Notes
 
 - **blossom-server config** — base `blossom-config.yml` on the upstream example;
@@ -96,14 +139,21 @@ curl -i -H "Authorization: L402 <macaroon>:<preimage>" \
   blobs pays once. Note `l402_indefinite_access on` is **required**
   alongside a realm: it disables the single-use preimage check, without which the
   first request claims the preimage and the rest are rejected as replays.
-- **Paid uploads** — two things to know. (1) The uploader must speak **L402**, not
-  vanilla Blossom: it PUTs the blob, gets `402`, then re-sends with payment — so a
-  large blob crosses the wire **twice**. A realm doesn't fix this, since the macaroon
-  binds the HTTP method and a `GET` token can't pre-pay a `PUT`. (2) Payment gates
-  the upload; storage duration is a flat 90 days for everyone. Pricing storage *by*
-  payment amount would need ngx_l402 to pass a TTL to the storage layer, which it
+- **Paid uploads** — `/upload` and `/mirror` are gated. A paying client
+  (**payblob**) PUTs, gets `402`, and re-sends with payment, so a large blob
+  crosses the wire **twice** (`PUT -> 402 -> re-PUT`). The `HEAD /upload`
+  (BUD-06) preflight is exempt (`l402_exempt_methods HEAD`) and stays free:
+  paying it would be wasted, since macaroons are method-bound and a HEAD token
+  is rejected on the `PUT`. Cashu is the clean path: `X-Cashu` rides its own header, so it
+  coexists with a BUD-02 upload auth; L402 rides `Authorization` and only works
+  when the upload carries no auth (this example's `requireAuth: false`). A
+  `HEAD /<sha>` presence check is free for any client (`l402_exempt_methods HEAD`
+  on the download location), so a publisher that only references already-stored
+  blobs never PUTs: pay-upload them with payblob, then publish. Storage is a flat
+  90 days regardless of amount — pricing
+  *by* payment would need ngx_l402 to pass a TTL to the storage layer, which it
   can't today.
-- **Pricing is flat per blob** — a 1 KB blob and a 1 GB blob both cost 100 sats,
+- **Pricing is flat per blob** — a 1 KB blob and a 1 GB blob both cost 10 sats,
   and uploads are uncapped (`client_max_body_size 0`). Simple, and fine when your
   blobs are roughly one size or you trust who's paying. Set `client_max_body_size`
   if you'd rather bound what one payment can store.
@@ -111,8 +161,9 @@ curl -i -H "Authorization: L402 <macaroon>:<preimage>" \
   upload route: realms are matched exactly, and the method binding rules it out
   independently. Uploads stay per-blob on purpose (each one holds disk for 90 days);
   see `nginx.conf.template` for how to opt into a write realm instead.
-- **Cashu** (optional) — to also accept ecash, add the `CASHU_*` env from the
-  ngx_l402 `.env.example` to the `nginx-l402` service.
+- **Cashu** (optional) — see [Enable Cashu](#enable-cashu-optional) above; the
+  `CASHU_*` env is already wired into `.env.example` and the `nginx-l402` service,
+  defaulting to the Minibits and Coinos mints.
 
 ### Sizing the realm window
 

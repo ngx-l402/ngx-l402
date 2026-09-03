@@ -2210,33 +2210,52 @@ jobs:
           source .github/scripts/ci-wait.sh
           echo "🔒 A configured Redis that is unreachable must refuse credentials, not fall back."
 
-          # The pool is a OnceLock built lazily per worker, so nginx has to be
-          # restarted *while* Redis is down for this to exercise anything: with a
-          # pool already built, pool.get() fails and the outage path is reached
-          # either way. Restarting is what puts a worker in the state where
-          # redis_pool() returns None with REDIS_URL still set — the case that
-          # used to be indistinguishable from "operator never configured Redis"
-          # and admitted the request with per-worker protection only.
-          docker stop redis
-          docker restart nginx-lnd
-          wait_http http://0.0.0.0:8000/ 200 90 || { docker logs nginx-lnd; exit 1; }
-
-          resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/protected) || true
+          # Buy the credential with Redis still up. The challenge path also calls
+          # redis_pool() (get_dynamic_config, and the invoice rate limit), so
+          # minting a 402 during the outage blocks on r2d2's connect wait and the
+          # invoice comes back empty. What is under test is the replay claim, not
+          # the challenge, so keep the outage window around the claim alone.
+          docker exec redis redis-cli flushall
+          resp=$(curl -s -i --max-time 30 http://0.0.0.0:8000/protected) || true
           inv=$(echo "$resp" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
           mac=$(echo "$resp" | grep -i "WWW-Authenticate: L402" | grep -o 'macaroon="[^"]*"' | cut -d'"' -f2)
+          if [ -z "$inv" ] || [ -z "$mac" ]; then
+            echo "FAIL: no L402 challenge to work with"
+            echo "$resp"
+            docker logs nginx-lnd
+            exit 1
+          fi
           ph=$(docker exec lndnode lncli -n regtest decodepayreq "$inv" | jq -r '.payment_hash')
           docker exec lndnode lncli -n regtest payinvoice -f "$inv"
+          sleep 5
           pre=$(docker exec lndnode lncli -n regtest listpayments \
             | jq -r --arg h "$ph" '.payments[] | select(.payment_hash == $h) | .payment_preimage')
+          if [ -z "$pre" ] || [ "$pre" = "null" ]; then
+            echo "FAIL: payment produced no preimage"
+            exit 1
+          fi
 
-          # 90s, not 30: r2d2's build() waits out connection_timeout (30s default)
-          # before reporting the pool cannot be built.
-          sc=$(curl -s -o /dev/null -w "%{http_code}" --max-time 90 \
+          # Now the outage. The pool is a OnceLock built lazily per worker, so
+          # nginx has to be restarted *while* Redis is down for this to exercise
+          # anything: with a pool already built, pool.get() fails and the outage
+          # path is reached either way. Restarting is what puts a worker in the
+          # state where redis_pool() returns None with REDIS_URL still set — the
+          # case that used to be indistinguishable from "operator never
+          # configured Redis" and admitted with per-worker protection only.
+          docker stop redis
+          docker restart nginx-lnd
+          wait_http http://0.0.0.0:8000/ 200 90 || { docker start redis; docker logs nginx-lnd; exit 1; }
+
+          # Generous: the auth path calls redis_pool() twice (is_preimage_used,
+          # then the claim) and each waits out r2d2's 30s connection_timeout
+          # before reporting that the pool cannot be built.
+          sc=$(curl -s -o /dev/null -w "%{http_code}" --max-time 180 \
             -H "Authorization: L402 $mac:$pre" http://0.0.0.0:8000/protected) || true
           sc=${sc:-000}
           if [ "$sc" -ne 503 ]; then
             echo "FAIL: paid request during a Redis outage returned $sc, expected 503."
             echo "200 means the outage was treated as 'Redis never configured' and replay protection silently degraded."
+            echo "000 means curl gave up — the request was still blocked on the Redis connect wait."
             docker logs nginx-lnd
             docker start redis
             exit 1

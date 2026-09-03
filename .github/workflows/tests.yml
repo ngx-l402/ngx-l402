@@ -2100,6 +2100,51 @@ jobs:
           CASHU_WHITELISTED_MINTS: http://cashu-mint:3338
           CASHU_WALLET_MNEMONIC: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
 
+      - name: Run Integration test - Redis configured but down fails closed
+        run: |
+          source .github/scripts/ci-wait.sh
+          echo "🔒 A configured Redis that is unreachable must refuse credentials, not fall back."
+
+          # The pool is a OnceLock built lazily per worker, so nginx has to be
+          # restarted *while* Redis is down for this to exercise anything: with a
+          # pool already built, pool.get() fails and the outage path is reached
+          # either way. Restarting is what puts a worker in the state where
+          # redis_pool() returns None with REDIS_URL still set — the case that
+          # used to be indistinguishable from "operator never configured Redis"
+          # and admitted the request with per-worker protection only.
+          docker stop redis
+          docker restart nginx-lnd
+          wait_http http://0.0.0.0:8000/ 200 90 || { docker logs nginx-lnd; exit 1; }
+
+          resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/protected) || true
+          inv=$(echo "$resp" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
+          mac=$(echo "$resp" | grep -i "WWW-Authenticate: L402" | grep -o 'macaroon="[^"]*"' | cut -d'"' -f2)
+          ph=$(docker exec lndnode lncli -n regtest decodepayreq "$inv" | jq -r '.payment_hash')
+          docker exec lndnode lncli -n regtest payinvoice -f "$inv"
+          pre=$(docker exec lndnode lncli -n regtest listpayments \
+            | jq -r --arg h "$ph" '.payments[] | select(.payment_hash == $h) | .payment_preimage')
+
+          # 90s, not 30: r2d2's build() waits out connection_timeout (30s default)
+          # before reporting the pool cannot be built.
+          sc=$(curl -s -o /dev/null -w "%{http_code}" --max-time 90 \
+            -H "Authorization: L402 $mac:$pre" http://0.0.0.0:8000/protected) || true
+          sc=${sc:-000}
+          if [ "$sc" -ne 503 ]; then
+            echo "FAIL: paid request during a Redis outage returned $sc, expected 503."
+            echo "200 means the outage was treated as 'Redis never configured' and replay protection silently degraded."
+            docker logs nginx-lnd
+            docker start redis
+            exit 1
+          fi
+          echo "PASS: request refused with 503 while Redis was down"
+
+          docker start redis
+          wait_container redis 60 || { docker logs redis; exit 1; }
+          docker restart nginx-lnd
+          wait_http http://0.0.0.0:8000/ 200 90 || { docker logs nginx-lnd; exit 1; }
+          docker exec redis redis-cli flushall
+          echo "✅ Redis and nginx restored for the sections that follow."
+
       - name: Run Integration Tests - Invoice Rate Limiting
         run: |
           echo "Testing Redis-based invoice rate limiting (l402_invoice_rate_limit)..."

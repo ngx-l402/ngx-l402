@@ -1485,9 +1485,21 @@ pub async fn verify_cashu_token_p2pk(
         }
         Ok(true) => true, // won the race — proceed to persist proofs
         Err(crate::ReplayClaimError::NotConfigured) => {
-            // Redis was never configured — an explicit operator choice. Fall
-            // back to the in-process memory cache (single-worker protection).
+            // Redis was never configured — an explicit operator choice. Claim in
+            // the per-worker cache instead, and claim by *proof key*: the raw
+            // token check at the top of this function cannot see the same proofs
+            // re-encoded into a different string, and this path stores proofs
+            // without a mint swap, so nothing downstream catches it either
+            // (`update_proofs` upserts on a conflicting Y value rather than
+            // failing). Without this claim a re-encoded token is served free,
+            // repeatedly.
             warn!("⚠️ Redis not configured — Cashu replay protection is in-process only (single-worker)");
+            if !PROCESSED_TOKENS.with(|t| t.borrow_mut().claim(&proof_replay_key)) {
+                error!("🚨 Replay attack detected: proof set already used (in-process cache)");
+                return Err(CashuError::BadCredential(
+                    "Cashu token already used".to_string(),
+                ));
+            }
             false
         }
         Err(crate::ReplayClaimError::Unavailable(e)) => {
@@ -1511,13 +1523,14 @@ pub async fn verify_cashu_token_p2pk(
     // Store directly in database using update_proofs (same as receive_proofs does internally)
     // Pass empty vec for second parameter (no proofs to delete)
     if let Err(e) = wallet.localstore.update_proofs(proof_infos, vec![]).await {
-        // The DB write failed after we took the replay claim. Release the claim
-        // so the token isn't stuck "used" — otherwise a legitimate retry would
-        // be rejected until the Redis TTL expires even though no proofs were
-        // ever persisted. (Only release if we actually claimed; the fail-open
-        // branch above holds no claim to release.)
+        // The DB write failed after we took the replay claim. Release it so the
+        // token isn't stuck "used" — otherwise a legitimate retry would be
+        // rejected even though no proofs were ever persisted. Whichever store
+        // holds the claim is the one to release.
         if claimed {
             crate::release_cashu_token(&proof_replay_key);
+        } else {
+            PROCESSED_TOKENS.with(|t| t.borrow_mut().release(&proof_replay_key));
         }
         return Err(CashuError::Internal(format!(
             "Failed to store proofs in database: {:?}",
@@ -1531,9 +1544,10 @@ pub async fn verify_cashu_token_p2pk(
         }
     }
 
-    // Cache both the raw token string and the proof-based key so that both
-    // exact-string and re-encoded replay attempts are caught on the fast
-    // thread-local path without a Redis round-trip.
+    // Cache the raw token so an identical resubmission short-circuits at the top
+    // of this function without touching Redis. The proof key is claimed above
+    // when Redis is absent; claiming it again here is a no-op that keeps both
+    // paths writing the same two entries.
     cache_processed_token(&proof_replay_key);
     cache_processed_token(token);
     info!(

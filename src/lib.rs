@@ -480,6 +480,25 @@ impl std::fmt::Display for ReplayClaimError {
     }
 }
 
+/// Why `redis_pool()` returned `None`. It collapses two cases a replay path must
+/// not treat alike: `REDIS_URL` was never set, or it was set and the pool could
+/// not be built. The second is an outage — r2d2's `build()` calls
+/// `wait_for_initialization()`, so it returns `Ok` only once a connection is
+/// actually established — and anyone who can take Redis down can induce it.
+/// Falling back to per-worker protection there would unlock replay on demand.
+///
+/// A *malformed* `REDIS_URL` also lands on `NotConfigured`: `RedisClient::open`
+/// only parses, so it fails at boot with an error log and the module never has
+/// Redis at all. That is a startup mistake to fix, not an attacker-inducible
+/// transition out of a working state.
+fn redis_absence_reason() -> ReplayClaimError {
+    if REDIS_URL.get().is_some() {
+        ReplayClaimError::Unavailable("configured, but the pool could not be built".to_string())
+    } else {
+        ReplayClaimError::NotConfigured
+    }
+}
+
 /// Map an atomic preimage replay-claim to the nginx access-phase return code.
 /// Centralizes the configured-vs-unreachable Redis policy so the auto-detect and
 /// classic verification paths stay consistent:
@@ -528,12 +547,17 @@ fn store_preimage_as_used(
     let redis_key = preimage_redis_key(preimage);
 
     // No Redis is an operator's deliberate choice: degrade to per-worker
-    // protection, as the Cashu path does. A *configured* Redis that is
-    // unreachable still fails closed below — that case is attacker-inducible
-    // and must not unlock replay.
+    // protection, as the Cashu path does. A *configured* Redis that cannot be
+    // reached fails closed instead — that case is attacker-inducible and must
+    // not unlock replay.
     let Some(pool) = redis_pool() else {
-        warn_replay_is_in_process_only();
-        return Ok(PREIMAGE_CACHE.with(|c| c.borrow_mut().claim(&redis_key)));
+        return match redis_absence_reason() {
+            ReplayClaimError::NotConfigured => {
+                warn_replay_is_in_process_only();
+                Ok(PREIMAGE_CACHE.with(|c| c.borrow_mut().claim(&redis_key)))
+            }
+            e => Err(e),
+        };
     };
 
     let mut conn = pool
@@ -617,7 +641,9 @@ pub fn is_cashu_token_used(token: &str) -> bool {
 /// Atomically store a Cashu token as used via SET NX EX (single round-trip).
 /// Called ONLY after successful verification to avoid burning tokens on transient failures.
 pub fn store_cashu_token_as_used(token: &str) -> Result<bool, ReplayClaimError> {
-    let pool = redis_pool().ok_or(ReplayClaimError::NotConfigured)?;
+    let Some(pool) = redis_pool() else {
+        return Err(redis_absence_reason());
+    };
 
     let mut conn = pool
         .get()

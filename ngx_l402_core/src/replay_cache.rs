@@ -62,6 +62,17 @@ impl ReplayCache {
         self.seen.contains(key)
     }
 
+    /// Undo a claim, so a credential whose guarded work then failed can be
+    /// retried instead of being stuck "used". Mirrors the Redis path's
+    /// `release_cashu_token`; a key that was never claimed is left alone.
+    pub fn release(&mut self, key: &str) {
+        if self.seen.remove(key) {
+            if let Some(pos) = self.order.iter().position(|k| k == key) {
+                self.order.remove(pos);
+            }
+        }
+    }
+
     /// Number of entries currently held.
     pub fn len(&self) -> usize {
         self.order.len()
@@ -166,5 +177,39 @@ mod tests {
     fn default_uses_the_documented_capacity() {
         assert_eq!(ReplayCache::default().len(), 0);
         assert_eq!(DEFAULT_REPLAY_CACHE_CAP, 10_000);
+    }
+
+    #[test]
+    fn release_lets_a_failed_claim_be_retried() {
+        let mut c = ReplayCache::with_capacity(8);
+        assert!(c.claim("a"));
+        c.release("a");
+        assert!(!c.contains("a"));
+        assert!(c.claim("a"), "a released key must be claimable again");
+    }
+
+    /// Release must drop the key from the FIFO order too, or the freed slot
+    /// stays occupied and eviction pushes out a still-live entry early.
+    #[test]
+    fn release_frees_the_capacity_slot() {
+        let mut c = ReplayCache::with_capacity(2);
+        assert!(c.claim("a"));
+        assert!(c.claim("b"));
+        c.release("a");
+        assert_eq!(c.len(), 1);
+        assert!(c.claim("c"));
+        assert!(
+            c.contains("b"),
+            "b must survive — a's slot was the free one"
+        );
+    }
+
+    #[test]
+    fn releasing_an_unclaimed_key_is_a_no_op() {
+        let mut c = ReplayCache::with_capacity(4);
+        assert!(c.claim("a"));
+        c.release("never-claimed");
+        assert_eq!(c.len(), 1);
+        assert!(c.contains("a"));
     }
 }

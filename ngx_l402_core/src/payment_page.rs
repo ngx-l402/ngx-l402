@@ -392,7 +392,14 @@ document.getElementById('preimage-section').classList.remove('hidden')\">Enter p
     }});
   }}
   function showContent(r) {{
-    r.text().then(html => {{ document.open(); document.write(html); document.close(); }});
+    // Paywalled content isn't always HTML (e.g. a video blob); r.text() +
+    // document.write() would garble it and hang the tab on a large file.
+    const ct = r.headers.get('Content-Type') || '';
+    if (ct.startsWith('text/html')) {{
+      r.text().then(html => {{ document.open(); document.write(html); document.close(); }});
+    }} else {{
+      r.blob().then(blob => {{ window.location.href = URL.createObjectURL(blob); }});
+    }}
   }}
   function submitPreimage() {{
     const hex = document.getElementById('preimage-input').value.trim();
@@ -676,5 +683,19 @@ mod tests {
         // 10_000 msat = 10 sat.
         let html = render(false, false, None);
         assert!(html.contains(">10<") || html.contains("10 sat") || html.contains("10</"));
+    }
+
+    /// showContent must branch on Content-Type, not assume HTML.
+    #[test]
+    fn show_content_branches_on_content_type_for_non_html_resources() {
+        let html = render(true, false, None);
+        assert!(
+            html.contains("ct.startsWith('text/html')"),
+            "showContent must branch on the response's Content-Type"
+        );
+        assert!(
+            html.contains("r.blob()") && html.contains("createObjectURL"),
+            "a non-HTML response must be routed through a blob URL, not document.write"
+        );
     }
 }

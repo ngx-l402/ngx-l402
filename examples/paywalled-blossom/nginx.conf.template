@@ -55,6 +55,11 @@ http {
             l402_realm               "blossom-read";
             l402_macaroon_timeout    600;            # one payment → 10 min of pulls
             l402_indefinite_access   on;             # let that token be reused
+            # Has-blob checks (HEAD /<sha>) are informational (BUD-01/BUD-07), so
+            # leave them free; only GET content is paid. This also lets clients
+            # publish here: pre-upload the blobs (paid PUT), then a publisher whose
+            # presence check is a free HEAD skips re-uploading.
+            l402_exempt_methods      HEAD;
 
             # A realm token buys a WINDOW of egress, not one blob — so bound the
             # throughput rather than the clock. Shortening the window instead is a
@@ -75,26 +80,42 @@ http {
             proxy_set_header X-Forwarded-Proto $scheme;
         }
 
-        # --- Uploads: FREE (fall through to `location /` below). ---
-        # Uploads must stay free to work with vanilla Blossom clients (noci,
-        # and every other) — none of them pay L402 to PUT a blob. Cost is
-        # recovered on the paid *download* plus the 90-day auto-expiry.
+        # --- Paywalled: uploads (PUT /upload and /mirror). ---
+        # A payment gates storing a blob. With Cashu enabled the 402 also carries
+        # X-Cashu, so a client can pay uploads in ecash (payblob does) — the token
+        # rides X-Cashu and doesn't collide with a BUD-02 upload auth. Single-use:
+        # one payment stores one blob. /mirror also stores a blob, so gate it too,
+        # else it's a free way around the gate.
         #
-        # Pay-to-upload is possible but needs an L402-aware uploader that does
-        # not exist yet. To re-enable it (and build that client), restore:
-        #
-        #   location = /upload {
-        #       l402 on;
-        #       l402_amount_msat_default 100000;   # pay to store one blob
-        #       l402_macaroon_timeout    0;        # single-use: one pay = one upload
-        #       proxy_pass http://$blossom_backend; ...
-        #   }
-        #   # /mirror also stores a blob, so gate it the same way, else it's a
-        #   # free way around the upload gate.
-        #   location = /mirror { l402 on; l402_amount_msat_default 100000;
-        #       l402_macaroon_timeout 0; proxy_pass http://$blossom_backend; ... }
+        # Vanilla clients can't pay, so only a paying client can upload here.
+        # HEAD is exempt: the BUD-06 preflight (HEAD /upload) is a non-storing
+        # requirement check, so it stays free. It also has to be free, not paid:
+        # macaroons are bound to the request method, so a token paid on a HEAD
+        # preflight carries RequestMethod = HEAD and is rejected on the PUT. The
+        # client pays the PUT directly, so the blob crosses the wire twice
+        # (PUT -> 402 -> re-PUT), which is the honest upload flow.
+        location = /upload {
+            l402 on;
+            l402_amount_msat_default 10000;    # 10 sats to store one blob
+            l402_macaroon_timeout    0;        # single-use: one pay = one upload
+            l402_exempt_methods      HEAD;     # BUD-06 preflight is free (see above)
+            proxy_pass http://$blossom_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+        location = /mirror {
+            l402 on;
+            l402_amount_msat_default 10000;
+            l402_macaroon_timeout    0;
+            l402_exempt_methods      HEAD;
+            proxy_pass http://$blossom_backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
 
-        # --- Free: uploads, HEAD, list, dashboard, and everything else. ---
+        # --- Free: HEAD, list, dashboard, and everything else. ---
         location / {
             proxy_pass http://$blossom_backend;
             proxy_set_header Host $host;

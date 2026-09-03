@@ -1463,6 +1463,63 @@ jobs:
             exit 1
           fi
 
+          # ---- Reload safety --------------------------------------------------
+          # nginx re-invokes init_module in the live master on every `nginx -s
+          # reload` (the blossom deployment reloads every 6h to pick up renewed
+          # certs). init_module is one-time master setup, so re-running it must
+          # leave the running paywall intact. Reload, then prove a full pay ->
+          # verify still returns 200, so a regression cannot silently 401 payers
+          # between reloads while the server otherwise looks healthy.
+          echo "Reloading nginx-lnd to test reload safety..."
+          docker exec nginx-lnd nginx -s reload
+          # Workers respawn on reload; wait for the free route before paying.
+          wait_http http://0.0.0.0:8000/ 200 30 || { docker logs nginx-lnd; exit 1; }
+          docker exec redis redis-cli flushall
+
+          echo "Getting a fresh invoice after reload..."
+          reload_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/protected) || true
+          reload_invoice=$(echo "$reload_resp" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
+          reload_macaroon=$(echo "$reload_resp" | grep -i "WWW-Authenticate: L402" | grep -o 'macaroon="[^"]*"' | cut -d'"' -f2)
+          if [ -z "$reload_invoice" ] || [ -z "$reload_macaroon" ]; then
+            echo "Error: no L402 challenge after reload — reload broke challenge issuance"
+            echo "$reload_resp"
+            docker logs nginx-lnd
+            exit 1
+          fi
+
+          reload_payment_hash=$(docker exec lndnode lncli -n regtest decodepayreq "$reload_invoice" | jq -r '.payment_hash')
+          echo "Paying post-reload invoice from lndnode..."
+          docker exec lndnode lncli -n regtest payinvoice -f "$reload_invoice"
+          sleep 5
+          reload_preimage=$(docker exec lndnode lncli -n regtest listpayments | jq -r --arg h "$reload_payment_hash" '.payments[] | select(.payment_hash == $h) | .payment_preimage')
+
+          echo "Verifying the paid token after reload (expect 200)..."
+          response=$(curl -s -w "\n%{http_code}" --max-time 30 \
+            -H "Authorization: L402 $reload_macaroon:$reload_preimage" \
+            http://0.0.0.0:8000/protected) || true
+          status_code=$(echo "$response" | tail -n1); status_code=${status_code:-000}
+          if [ "$status_code" -ne 200 ]; then
+            echo "Error: paid request after nginx -s reload returned $status_code, expected 200"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "✅ Reload safety: paywall still verifies payments after nginx -s reload"
+
+          # The manifest registry is rebuilt on every config parse
+          # (preconfiguration clears it, the directive setters refill it), so
+          # exercise that path across the reload too: the endpoint must still
+          # serve its routes, not dangle into the freed previous cycle.
+          echo "Checking /.well-known/l402-services after reload (expect 200 with routes)..."
+          manifest_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/.well-known/l402-services) || true
+          manifest_code=$(echo "$manifest_resp" | tail -n1); manifest_code=${manifest_code:-000}
+          if [ "$manifest_code" -ne 200 ] || ! echo "$manifest_resp" | grep -q '"routes"'; then
+            echo "Error: manifest after reload returned $manifest_code, expected 200 with routes"
+            echo "$manifest_resp"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "✅ Reload safety: manifest still serves routes after nginx -s reload"
+
           # Test L402 method binding: a token paid for one HTTP
           # method must not be redeemable on a different method on the same
           # path. Uses a freshly-paid invoice so this case is independent of

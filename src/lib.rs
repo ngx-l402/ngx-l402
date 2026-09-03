@@ -2544,6 +2544,20 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
 
     install_crash_handler();
 
+    // init_module is one-time master setup, yet nginx re-invokes it in the same
+    // master on every `nginx -s reload`, needlessly redoing it (a throwaway Tokio
+    // runtime, a discarded DB reopen, a PROCESSED_TOKENS reset that freshly forked
+    // workers inherit). Nothing here changes on reload, so run once and no-op reloads.
+    static INIT_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if INIT_DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        ngx_log_error!(
+            NGX_LOG_INFO,
+            log,
+            "ngx_l402: reload detected; keeping the existing runtime state"
+        );
+        return NGX_OK as isize;
+    }
+
     info!("🚀 Starting L402 module initialization");
     ngx_log_error!(NGX_LOG_INFO, log, "Starting module initialization");
 

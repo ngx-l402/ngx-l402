@@ -1321,6 +1321,29 @@ jobs:
             exit 1
           fi
 
+          # HEAD must not leak past the paywall: an unpaid HEAD returns the 402
+          # challenge and stops, never a "header already sent" leak to the backend.
+          echo "Testing unpaid HEAD /protected returns 402 and does not leak..."
+          head_resp=$(curl -sS -I --max-time 30 http://0.0.0.0:8000/protected) || true
+          head_code=$(echo "$head_resp" | grep -iE "^HTTP/" | tail -n1 | awk '{print $2}'); head_code=${head_code:-000}
+          if [ "$head_code" -ne 402 ]; then
+            echo "FAIL: unpaid HEAD /protected returned $head_code, expected 402"
+            echo "$head_resp"
+            docker logs nginx-lnd | tail -20
+            exit 1
+          fi
+          if ! echo "$head_resp" | grep -qi '^WWW-Authenticate: L402'; then
+            echo "FAIL: HEAD /protected 402 is missing the WWW-Authenticate: L402 challenge"
+            echo "$head_resp"
+            exit 1
+          fi
+          if docker logs nginx-lnd 2>&1 | grep -q "header already sent"; then
+            echo "FAIL: 'header already sent' in log: HEAD leaked past the paywall to the content phase"
+            docker logs nginx-lnd 2>&1 | grep "header already sent" | tail -5
+            exit 1
+          fi
+          echo "PASS: unpaid HEAD /protected returns 402 with a challenge and does not leak"
+
           # Extract and verify invoice amount
           invoice=$(echo "$response" | grep -i "WWW-Authenticate: L402" | grep -o 'invoice="[^"]*"' | cut -d'"' -f2)
           if [ -z "$invoice" ]; then

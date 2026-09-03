@@ -1698,11 +1698,16 @@ unsafe fn send_html_response(r: *mut ngx_http_request_t, status: u16, body: Stri
     let _ = req.add_header_out("Content-Type", "text/html; charset=utf-8");
 
     let send_status = req.send_header();
-    if send_status.0 == NGX_ERROR as ngx_int_t
-        || send_status.0 > NGX_OK as ngx_int_t
-        || req.header_only()
-    {
+    if send_status.0 == NGX_ERROR as ngx_int_t || send_status.0 > NGX_OK as ngx_int_t {
         return send_status.0;
+    }
+
+    // HEAD has no body: finalize and return NGX_DONE like the body path.
+    // Returning send_header's NGX_OK instead reads as "access granted" in the
+    // access phase, leaking the request past the sent header (fail-open).
+    if req.header_only() {
+        unsafe { ngx_http_finalize_request(r, send_status.0) };
+        return NGX_DONE as isize;
     }
 
     let rc = unsafe { req.output_filter(&mut *chain).0 };

@@ -98,6 +98,14 @@ Environment=ROOT_KEY=your-root-key
 > in-process caching only — it is lost on restart and does not work across
 > multiple nginx workers. Multi-worker deployments **require** Redis.
 
+> **Not configuring Redis and Redis being down are different.** Leaving
+> `REDIS_URL` unset is a choice, and the module degrades to the per-worker cache
+> above. A `REDIS_URL` that is set but unreachable is an outage: paid credentials
+> are refused with **503** until Redis returns, rather than admitted under weaker
+> protection. Replay protection is the one thing that cannot fail open, since an
+> attacker who can take Redis down would otherwise get unlimited reuse of a
+> single payment.
+
 ```bash
 Environment=REDIS_URL=redis://127.0.0.1:6379
 

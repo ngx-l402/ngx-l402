@@ -1507,6 +1507,21 @@ jobs:
           fi
           echo "✅ Reload safety: paywall still verifies payments after nginx -s reload"
 
+          # The manifest registry is rebuilt on every config parse
+          # (preconfiguration clears it, the directive setters refill it), so
+          # exercise that path across the reload too: the endpoint must still
+          # serve its routes, not dangle into the freed previous cycle.
+          echo "Checking /.well-known/l402-services after reload (expect 200 with routes)..."
+          manifest_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/.well-known/l402-services) || true
+          manifest_code=$(echo "$manifest_resp" | tail -n1); manifest_code=${manifest_code:-000}
+          if [ "$manifest_code" -ne 200 ] || ! echo "$manifest_resp" | grep -q '"routes"'; then
+            echo "Error: manifest after reload returned $manifest_code, expected 200 with routes"
+            echo "$manifest_resp"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "✅ Reload safety: manifest still serves routes after nginx -s reload"
+
           # Test L402 method binding: a token paid for one HTTP
           # method must not be redeemable on a different method on the same
           # path. Uses a freshly-paid invoice so this case is independent of

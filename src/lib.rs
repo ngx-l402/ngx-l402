@@ -420,15 +420,40 @@ pub async fn get_or_create_lnurl_client(
 /// the true gate and closes the TOCTOU window between concurrent workers.
 /// Fails open (returns false) if Redis is unavailable.
 fn is_preimage_used(preimage: &[u8]) -> bool {
+    let redis_key = preimage_redis_key(preimage);
     let Some(pool) = redis_pool() else {
-        return false;
+        return PREIMAGE_CACHE.with(|c| c.borrow().contains(&redis_key));
     };
     let mut conn = match pool.get() {
         Ok(c) => c,
         Err(_) => return false,
     };
-    let redis_key = preimage_redis_key(preimage);
     conn.exists::<_, bool>(&redis_key).unwrap_or(false)
+}
+
+// Per-worker replay cache, used when Redis is not configured. Redis is the
+// authoritative cross-worker gate; this is the single-worker fallback the docs
+// promise operators who run without it. Mirrors the Cashu path's
+// PROCESSED_TOKENS, and holds the hashed key rather than the raw preimage so no
+// payment secret outlives the request.
+thread_local! {
+    static PREIMAGE_CACHE: std::cell::RefCell<ngx_l402_core::ReplayCache> =
+        std::cell::RefCell::new(ngx_l402_core::ReplayCache::default());
+}
+
+/// Warn once per worker that replay protection is degraded, rather than on
+/// every request.
+static NO_REDIS_REPLAY_REPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn warn_replay_is_in_process_only() {
+    if !NO_REDIS_REPLAY_REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        warn!(
+            "⚠️ Redis not configured — preimage replay protection is per-worker, bounded to \
+             {} entries, and lost on reload. Multi-worker deployments require Redis.",
+            ngx_l402_core::DEFAULT_REPLAY_CACHE_CAP
+        );
+    }
 }
 
 /// Why an atomic replay-claim (`store_*_as_used`) did not produce a definitive
@@ -456,22 +481,44 @@ impl std::fmt::Display for ReplayClaimError {
     }
 }
 
+/// Why `redis_pool()` returned `None`. It collapses two cases a replay path must
+/// not treat alike: `REDIS_URL` was never set, or it was set and the pool could
+/// not be built. The second is an outage — r2d2's `build()` calls
+/// `wait_for_initialization()`, so it returns `Ok` only once a connection is
+/// actually established — and anyone who can take Redis down can induce it.
+/// Falling back to per-worker protection there would unlock replay on demand.
+///
+/// A *malformed* `REDIS_URL` also lands on `NotConfigured`: `RedisClient::open`
+/// only parses, so it fails at boot with an error log and the module never has
+/// Redis at all. That is a startup mistake to fix, not an attacker-inducible
+/// transition out of a working state.
+fn redis_absence_reason() -> ReplayClaimError {
+    if REDIS_URL.get().is_some() {
+        ReplayClaimError::Unavailable("configured, but the pool could not be built".to_string())
+    } else {
+        ReplayClaimError::NotConfigured
+    }
+}
+
 /// Map an atomic preimage replay-claim to the nginx access-phase return code.
 /// Centralizes the configured-vs-unreachable Redis policy so the auto-detect and
 /// classic verification paths stay consistent:
 ///   - claimed (first use)       -> admit (NGX_DECLINED)
-///   - already claimed (race)    -> reject as replay (401)
-///   - Redis not configured      -> admit; in-process protection only
+///   - already claimed           -> reject as replay (401)
 ///   - Redis configured but down -> fail closed (503) to prevent replay
+///
+/// `store_preimage_as_used` resolves an unconfigured Redis itself, against the
+/// per-worker cache, so `NotConfigured` does not reach here from that path. The
+/// arm remains for other callers of the shared [`ReplayClaimError`].
 fn handle_preimage_claim(result: Result<bool, ReplayClaimError>) -> isize {
     match result {
         Ok(true) => NGX_DECLINED as isize,
         Ok(false) => {
-            warn!("🚨 Preimage already claimed by concurrent worker — replay rejected");
+            warn!("🚨 Preimage already claimed — replay rejected");
             401
         }
         Err(ReplayClaimError::NotConfigured) => {
-            warn!("⚠️ Redis not configured — replay protection is in-process only (single-worker)");
+            warn_replay_is_in_process_only();
             NGX_DECLINED as isize
         }
         Err(ReplayClaimError::Unavailable(e)) => {
@@ -498,13 +545,26 @@ fn store_preimage_as_used(
     preimage: &[u8],
     macaroon_timeout: i64,
 ) -> Result<bool, ReplayClaimError> {
-    let pool = redis_pool().ok_or(ReplayClaimError::NotConfigured)?;
+    let redis_key = preimage_redis_key(preimage);
+
+    // No Redis is an operator's deliberate choice: degrade to per-worker
+    // protection, as the Cashu path does. A *configured* Redis that cannot be
+    // reached fails closed instead — that case is attacker-inducible and must
+    // not unlock replay.
+    let Some(pool) = redis_pool() else {
+        return match redis_absence_reason() {
+            ReplayClaimError::NotConfigured => {
+                warn_replay_is_in_process_only();
+                Ok(PREIMAGE_CACHE.with(|c| c.borrow_mut().claim(&redis_key)))
+            }
+            e => Err(e),
+        };
+    };
 
     let mut conn = pool
         .get()
         .map_err(|e| ReplayClaimError::Unavailable(format!("connection: {}", e)))?;
 
-    let redis_key = preimage_redis_key(preimage);
     // `None` = store without EX. Never-expiring macaroons need never-expiring
     // markers; the alternative is a guaranteed replay window once the TTL lapses.
     let ttl = if macaroon_timeout > 0 {
@@ -582,7 +642,9 @@ pub fn is_cashu_token_used(token: &str) -> bool {
 /// Atomically store a Cashu token as used via SET NX EX (single round-trip).
 /// Called ONLY after successful verification to avoid burning tokens on transient failures.
 pub fn store_cashu_token_as_used(token: &str) -> Result<bool, ReplayClaimError> {
-    let pool = redis_pool().ok_or(ReplayClaimError::NotConfigured)?;
+    let Some(pool) = redis_pool() else {
+        return Err(redis_absence_reason());
+    };
 
     let mut conn = pool
         .get()

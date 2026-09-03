@@ -2841,12 +2841,17 @@ fn start_cashu_redemption_in_worker(interval_secs: u64) {
         let _ = std::thread::Builder::new()
             .name("cashu_redeem_lease".into())
             .spawn(move || {
+                use std::os::unix::fs::OpenOptionsExt;
                 use std::os::unix::io::AsRawFd;
 
+                // O_NOFOLLOW: the lease lives beside the database, so a symlink
+                // planted at its path would move the lock somewhere else and
+                // silently let two workers redeem at once.
                 let file = match std::fs::OpenOptions::new()
                     .create(true)
                     .truncate(false)
                     .write(true)
+                    .custom_flags(libc::O_NOFOLLOW)
                     .open(&lock_path)
                 {
                     Ok(f) => f,

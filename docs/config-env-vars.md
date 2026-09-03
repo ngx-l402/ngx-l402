@@ -290,8 +290,34 @@ These are set inside `location {}` blocks in `nginx.conf` (not environment varia
 | `l402_indefinite_access` | boolean¹ | `off` | Skip the single-use preimage replay check — a single payment stays valid for the macaroon lifetime |
 | `l402_realm` | string | — | Bind the macaroon to a named protection space instead of the exact request path, so one payment authorizes every location sharing the name |
 | `l402_log_format` | `json` or `text` | `text` | Emit one structured JSON line per L402 access event (verify, challenge, challenge error, rate-limited) — see [logging.md](logging.md) |
+| `l402_payment_html` | boolean¹ | `on` | Serve the browser payment page with a `402`. Turn it `off` for API and agent routes to return the challenge headers with an empty body |
 
 > ¹ **Boolean directives** accept: `on` / `off` / `true` / `false` / `1` / `0` / `yes` / `no` (case-insensitive).
+
+### API routes: skipping the payment page
+
+A `402` normally carries a full HTML page — QR code, copy button, Cashu tab —
+for a human paying in a browser. An API client or AI agent reads
+`WWW-Authenticate` and discards the body, so on those routes the page is wasted
+bytes on every unpaid request.
+
+```nginx
+location /v1/ {
+    l402                      on;
+    l402_amount_msat_default  10000;
+    l402_payment_html         off;   # headers only
+
+    proxy_pass http://upstream;
+}
+```
+
+With it `off` the response is still a `402` and still carries
+`WWW-Authenticate` (and `X-Cashu` when Cashu is enabled) — only the body is
+dropped. Nothing about the payment flow changes; clients that already parse the
+header behave identically.
+
+It inherits into nested locations and follows the usual child-wins rule, so an
+inner location can turn the page back `on` under an outer `off`.
 
 ### Rate limiting behind a proxy
 

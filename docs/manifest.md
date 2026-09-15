@@ -51,7 +51,7 @@ which payment backends are accepted — without any out-of-band integration.
         "type": "static",
         "amount_msat": 10000
       },
-      "caveats_required": ["RequestPath = /protected"]
+      "caveats_required": ["RequestPath = /protected", "RequestMethod = <METHOD>"]
     },
     {
       "path": "/rate-limited",
@@ -59,7 +59,7 @@ which payment backends are accepted — without any out-of-band integration.
         "type": "static",
         "amount_msat": 10000
       },
-      "caveats_required": ["RequestPath = /rate-limited"],
+      "caveats_required": ["RequestPath = /rate-limited", "RequestMethod = <METHOD>"],
       "rate_limit": {
         "max_requests": 2,
         "window_secs": 60
@@ -78,13 +78,14 @@ which payment backends are accepted — without any out-of-band integration.
 | `version` | constant `"1"` | Schema version. Bumped on breaking changes; agents should reject unknown majors. |
 | `service.name`, `service.description`, `service.operator`, `service.contact` | env vars `L402_SERVICE_NAME`, `L402_SERVICE_DESCRIPTION`, `L402_SERVICE_OPERATOR`, `L402_SERVICE_CONTACT` | Optional, omitted when unset. |
 | `payment_methods[].type` | `lightning` or `cashu` | Which payment rail this method describes. |
-| `payment_methods[].backend` | env var `LN_CLIENT_TYPE` | `LNURL`, `LND`, `CLN`, `NWC`, `BOLT12`, `ECLAIR`, `LNC`. |
+| `payment_methods[].backend` | env var `LN_CLIENT_TYPE` | `LNURL`, `LND`, `CLN`, `NWC`, `BOLT12`, `ECLAIR` (LNC shows as `LND`). |
 | `payment_methods[].address` | env var `LNURL_ADDRESS` (LNURL backends only) | Server-default LN address. May be overridden per-route via `lnurl_addr`. |
 | `payment_methods[].mints` | env var `CASHU_WHITELISTED_MINTS` | Allowed Cashu mints (when Cashu is enabled). |
-| `payment_methods[].p2pk_supported` | env var `CASHU_P2PK_MODE` | Whether NUT-24 P2PK Cashu is enabled. |
+| `payment_methods[].p2pk_supported` | env var `CASHU_P2PK_MODE` | `true` when NUT-24 P2PK Cashu is enabled; omitted otherwise. |
+| `payment_methods[].challenge_header` | constant `X-Cashu` | The header a `402` carries the Cashu payment request in (NUT-24). |
 | `routes[].path` | `location` directive | URL path served by this route. |
 | `routes[].price.amount_msat` | `l402_amount_msat_default` | Base price after `merge_loc_conf`. |
-| `routes[].caveats_required` | derived | Caveats the issued macaroon will carry. Today always `[RequestPath = <path>]`. |
+| `routes[].caveats_required` | derived | Caveats the issued macaroon will carry: `RequestPath = <path>` (or `Realm = <name>` with `l402_realm`) and `RequestMethod = <METHOD>`, filled in with the request's method. |
 | `routes[].macaroon_timeout_secs` | `l402_macaroon_timeout` | Omitted when `0` (no expiry). |
 | `routes[].lnurl_addr` | `l402_lnurl_addr` | Per-route LNURL override for multi-tenant deployments. |
 | `routes[].rate_limit` | `l402_invoice_rate_limit` | Server-side invoice rate limit applied before challenge issuance. |

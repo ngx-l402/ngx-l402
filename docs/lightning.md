@@ -11,7 +11,7 @@ Configure the backend via the `LN_CLIENT_TYPE` environment variable:
 | `LN_CLIENT_TYPE` | Description |
 |---|---|
 | `LND` | Lightning Network Daemon — direct gRPC connection |
-| `LNC` | Lightning Node Connect — remote LND via mailbox (no open port needed) |
+| `LND` + `LNC_PAIRING_PHRASE` | Lightning Node Connect — remote LND via mailbox (no open port needed) |
 | `CLN` | Core Lightning |
 | `ECLAIR` | Eclair node |
 | `LNURL` | Lightning Network URL — delegate invoice generation to an LNURL server |
@@ -19,6 +19,8 @@ Configure the backend via the `LN_CLIENT_TYPE` environment variable:
 | `BOLT12` | Reusable Lightning Offers (BOLT12) |
 
 See [Environment Variables](./config-env-vars.md) for the full list of per-backend settings.
+
+Each worker connects to the backend on its first request, so an unreachable node does not stop nginx from starting. Until it is reachable, protected requests return `500`, counted in `l402_invoices_generation_errors_total`.
 
 ---
 
@@ -73,14 +75,14 @@ All boolean directives (`l402`, `l402_auto_detect_payment`) accept: `on` / `off`
 
 ### Client flow with auto-detect enabled
 
-1. Client requests a protected endpoint → receives `402 Payment Required` with a BOLT-11 invoice.
+1. Client requests a protected endpoint → receives `402 Payment Required` with an invoice.
 2. Client pays the invoice (no preimage handling needed).
 3. Client retries with just the macaroon:
    ```
    Authorization: L402 <macaroon>
    ```
 4. Module extracts the `payment_hash` from the macaroon identifier, queries the node, and — if the invoice is settled — uses the returned preimage to verify the macaroon signature.
-5. On success the module returns `200 OK`. If the invoice is not yet settled, it returns `402 Payment Required`.
+5. On success the module returns `200 OK`. If the invoice is not yet settled, it returns `402 Payment Required`. If the lookup fails or takes longer than 5 seconds, it returns `500`.
 
 ### Preimage caching (Redis)
 
@@ -91,10 +93,11 @@ When Redis is configured (`REDIS_URL`), settled preimages are cached under the k
 | `LN_CLIENT_TYPE` | Auto-detect supported | Notes |
 |---|---|---|
 | `LND` | ✅ | Uses `LookupInvoice` gRPC |
-| `CLN` / `BOLT12` | ✅ | Uses `listinvoices` JSON-RPC over unix socket |
+| `CLN` | ✅ | Uses `listinvoices` JSON-RPC over unix socket |
+| `BOLT12` | ✅ | Uses `listinvoices` like `CLN`, so `BOLT12_OFFER` must be an offer from your own node |
 | `ECLAIR` | ✅ | Uses `POST /getreceivedinfo` REST API |
 | `NWC` | ⚠️ | Uses NIP-47 `lookup_invoice`, which wallets may not implement |
-| `LNC` | ❌ | LNC mailbox does not expose `LookupInvoice` |
+| `LND` over LNC | ❌ | LNC mailbox does not expose `LookupInvoice` |
 | `LNURL` | ❌ | Remote wallet — no server-side query API |
 
 > [!NOTE]

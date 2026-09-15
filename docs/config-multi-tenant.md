@@ -9,8 +9,15 @@ The module supports **multi-tenant mode**, allowing different API routes to use 
 ## How It Works
 
 1. **Per-location LNURL addresses**: Use the `l402_lnurl_addr` directive to specify a different LNURL address per Nginx location block.
-2. **Proof tracking**: When a Cashu token is received, the proofs are mapped to the tenant's LNURL address in Redis.
+2. **Proof tracking**: When a Cashu token is received, the proofs are mapped to the tenant's LNURL address in Redis, in both standard and P2PK mode.
 3. **Grouped redemption**: The automatic redemption task groups proofs by tenant and redeems each group to the correct LNURL address.
+
+If Redis is missing or down:
+
+- **No `REDIS_URL`**: nothing can be mapped, so every tenant's proofs are redeemed to `LNURL_ADDRESS`.
+- **Redis configured but unreachable**: redemption pauses rather than guess, and the proofs stay unspent until Redis is back.
+
+A mapping lives for 20 redemption intervals, between one and thirty days and never less than two intervals. Proofs still unredeemed after that go to `LNURL_ADDRESS`.
 
 ---
 

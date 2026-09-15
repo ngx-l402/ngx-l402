@@ -84,6 +84,8 @@ Environment=CASHU_WHITELISTED_MINTS=https://mint1.example.com
 
 ## Redemption Fee Configuration
 
+With `CASHU_REDEEM_ON_LIGHTNING=true`, one worker periodically melts received tokens to your Lightning backend. In LNURL mode that needs `LNURL_ADDRESS` or `l402_lnurl_addr`; with neither, nginx warns at startup and the ecash accumulates unredeemed.
+
 ```bash
 # Minimum balance to attempt melting (default: 10 sats)
 Environment=CASHU_MELT_MIN_BALANCE_SATS=10

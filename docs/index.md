@@ -34,7 +34,7 @@ graph TD;
     G -->|Yes| H[Add WWW-Authenticate Header]
     H --> J[Return 402 Payment Required]
     K --> L{Parse Success?}
-    L -->|No| M[Return 500 Internal Server Error]
+    L -->|No| Q[Return 401 Unauthorized]
     L -->|Yes| AD{"Auto-detect enabled AND no preimage in header?"}
     AD -->|Yes| ND[Query Lightning node for settled invoice]
     ND --> NS{Invoice settled?}
@@ -48,21 +48,22 @@ graph TD;
     O -->|Yes| P
 ```
 
-> **Auto-detect**: When `l402_auto_detect_payment on` is set and the client sends only `Authorization: L402 <macaroon>` (no preimage), the server queries the Lightning node directly. Supported on **LND**, **CLN**, and **Eclair**.
+> **Auto-detect**: When `l402_auto_detect_payment on` is set and the client sends only `Authorization: L402 <macaroon>` (no preimage), the server queries the Lightning node directly. Supported on **LND**, **CLN**, **BOLT12**, **Eclair**, and **NWC** wallets that implement `lookup_invoice` — see [the support matrix](./lightning.md#backend-support-matrix).
 
 ### Response Codes
 
 | Status | When |
 |---|---|
 | `200` | Payment verified — the upstream response is returned |
-| `402` | No credential presented. Carries the `WWW-Authenticate` L402 challenge, and `X-Cashu` when Cashu is enabled |
-| `401` | A credential was presented and failed: malformed, tampered, replayed, or the preimage does not match |
+| `402` | No credential presented, or auto-detect found the invoice unpaid. Carries the `WWW-Authenticate` L402 challenge, and `X-Cashu` when Cashu is enabled |
+| `401` | A credential was presented and failed: malformed, tampered, replayed, or the preimage does not match. Carries `WWW-Authenticate: L402`; retry without a credential for a fresh challenge |
 | `400` | A Cashu token from an unlisted mint, in the wrong unit, or below the price |
 | `429` | Invoice rate limit hit (`l402_invoice_rate_limit`) |
-| `500` | The gateway failed — an unreachable mint or a failed database write, not a problem with your payment |
+| `500` | The gateway failed — an unreachable mint, Lightning node or Redis, or a failed database write, not a problem with your payment |
+| `503` | A Lightning credential arrived while `REDIS_URL` is set but Redis is unreachable; retry once it is back |
 
-`402` is used only for the initial challenge. Once a credential is presented,
-a failure is `401`, never `402` — [the L402
+`402` only asks for payment: the initial challenge, or an auto-detect invoice
+not paid yet. A credential that fails is `401`, never `402` — [the L402
 specification](https://github.com/lightninglabs/L402/blob/master/protocol-specification.md)
 requires this so clients can tell "you need to pay" from "your credential is
 broken". The `400` cases are the ones

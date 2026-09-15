@@ -53,13 +53,8 @@ sudo chmod 755 /var/lib/nginx
 
 > The `cdk-sqlite` crate automatically creates the database file and tables on first run. Database location: `/var/lib/nginx/cashu_tokens.db`
 
-> **Note**: Both `restart` and `reload` are needed to ensure the Cashu redemption task starts properly.
-
 ### 6. Restart Nginx
 
 ```bash
 sudo systemctl restart nginx
-sudo systemctl reload nginx
 ```
-
-> **Note**: Both `restart` and `reload` are needed to ensure the Cashu redemption task starts properly.

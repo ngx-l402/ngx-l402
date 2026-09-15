@@ -36,12 +36,13 @@ docker run -d \
   -e LND_ADDRESS=your-lnd-ip:10009 \
   -e MACAROON_FILE_PATH=/app/data/admin.macaroon \
   -e CERT_FILE_PATH=/app/data/tls.cert \
+  -e ROOT_KEY=your-32-byte-hex-key \
   -e CASHU_ECASH_SUPPORT=true \
   -e CASHU_WALLET_MNEMONIC="word1 word2 ... word12" \
   -e CASHU_DB_PATH=/app/data/cashu_tokens.db \
   -e CASHU_WHITELISTED_MINTS=https://mint1.example.com,https://mint2.example.com \
   -e CASHU_REDEEM_ON_LIGHTNING=true \
-  -e REDIS_URL=redis://redis:6379 \
+  -e REDIS_URL=redis://your-redis-host:6379 \
   -v ~/l402-data:/app/data \
   ghcr.io/ngx-l402/ngx-l402:latest
 ```
@@ -100,6 +101,7 @@ docker run -d \
   -e LND_ADDRESS=your-lnd-ip:10009 \
   -e MACAROON_FILE_PATH=/app/data/admin.macaroon \
   -e CERT_FILE_PATH=/app/data/tls.cert \
+  -e ROOT_KEY=your-32-byte-hex-key \
   -e CASHU_ECASH_SUPPORT=true \
   -e CASHU_P2PK_MODE=true \
   -e CASHU_P2PK_PRIVATE_KEY=your-32-byte-hex-private-key \
@@ -107,7 +109,7 @@ docker run -d \
   -e CASHU_DB_PATH=/app/data/cashu_tokens.db \
   -e CASHU_WHITELISTED_MINTS=https://mint1.example.com \
   -e CASHU_REDEEM_ON_LIGHTNING=true \
-  -e REDIS_URL=redis://redis:6379 \
+  -e REDIS_URL=redis://your-redis-host:6379 \
   -v ~/l402-data:/app/data \
   ghcr.io/ngx-l402/ngx-l402:latest
 ```

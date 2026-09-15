@@ -2,6 +2,8 @@
 
 All configuration is done via environment variables set in `nginx.service` (typically at `/lib/systemd/system/nginx.service`).
 
+They are read once, when nginx starts. `nginx -s reload` keeps the old values, so restart nginx after changing one.
+
 ```ini
 [Service]
 ...
@@ -14,7 +16,13 @@ Environment=VAR_NAME=value
 
 | Variable | Required | Description |
 |---|---|---|
-| `LN_CLIENT_TYPE` | ✅ | One of: `LND`, `CLN`, `LNURL`, `NWC`, `BOLT12`, `ECLAIR` |
+| `LN_CLIENT_TYPE` | — | One of: `LND`, `CLN`, `LNURL`, `NWC`, `BOLT12`, `ECLAIR`; defaults to `LNURL`. For LNC, use `LND` with `LNC_PAIRING_PHRASE`. nginx refuses to start on any other value |
+
+## Root Key
+
+| Variable | Required | Description |
+|---|---|---|
+| `ROOT_KEY` | ✅ | Secret that signs macaroons, at least 32 characters (`openssl rand -hex 32`). nginx refuses to start without it, and changing it invalidates every token already issued |
 
 ---
 
@@ -27,6 +35,9 @@ Environment=MACAROON_FILE_PATH=/path/to/macaroon
 Environment=CERT_FILE_PATH=/path/to/cert
 Environment=ROOT_KEY=your-root-key
 ```
+
+nginx's worker user (`nginx` in the shipped config) must be able to read
+`MACAROON_FILE_PATH` and `CERT_FILE_PATH`.
 
 ## LND via Lightning Node Connect (LNC)
 
@@ -44,6 +55,10 @@ Environment=LN_CLIENT_TYPE=CLN
 Environment=CLN_LIGHTNING_RPC_FILE_PATH=/path/to/lightning-rpc
 Environment=ROOT_KEY=your-root-key
 ```
+
+nginx's worker user must be able to reach the socket: share a group with CLN and
+start it with `rpc-file-mode=0660`. Avoid `0666` outside a test setup — it lets
+every local user control the node.
 
 ## LNURL
 
@@ -74,10 +89,11 @@ Environment=ROOT_KEY=your-root-key
 
 > **How it works**: When a client requests a protected resource, the module
 > connects to your **CLN node** via the Unix socket at `CLN_LIGHTNING_RPC_FILE_PATH`
-> and calls `fetchinvoice` to derive a fresh single-use **BOLT11 invoice** from
-> the reusable BOLT12 offer. The node resolves the offer's embedded node ID and
+> and calls `fetchinvoice` to get a new **BOLT12 invoice** for each request from
+> the reusable offer. The node resolves the offer's embedded node ID and
 > negotiates the payment parameters over the Lightning network automatically.
-> `CLN_LIGHTNING_RPC_FILE_PATH` is therefore **required** alongside `BOLT12_OFFER`.
+> `CLN_LIGHTNING_RPC_FILE_PATH` is therefore **required** alongside `BOLT12_OFFER`,
+> with the same socket access as `CLN`.
 
 ## Eclair
 
@@ -102,11 +118,11 @@ Environment=ROOT_KEY=your-root-key
 
 > **Not configuring Redis and Redis being down are different.** Leaving
 > `REDIS_URL` unset is a choice, and the module degrades to the per-worker cache
-> above. A `REDIS_URL` that is set but unreachable is an outage: paid credentials
-> are refused with **503** until Redis returns, rather than admitted under weaker
-> protection. Replay protection is the one thing that cannot fail open, since an
-> attacker who can take Redis down would otherwise get unlimited reuse of a
-> single payment.
+> above. A `REDIS_URL` that is set but unreachable is an outage: Lightning
+> credentials are refused with **503** and P2PK Cashu tokens with **500** until
+> Redis returns, since an attacker who can take Redis down would otherwise reuse
+> a single payment without limit. Standard-mode Cashu tokens are still accepted:
+> the mint swap already rejects a spent token.
 
 ```bash
 Environment=REDIS_URL=redis://127.0.0.1:6379
@@ -123,12 +139,9 @@ Environment=L402_CASHU_TOKEN_TTL_SECONDS=86400
 
 ### Setting TTL to "infinite" (permanent replay protection)
 
-The module stores spent preimages and Cashu tokens in Redis using
-`SET NX EX <seconds>`. Redis requires a positive integer for `EX` — there is
-no built-in "never expire" option via this command.
-
-To achieve **permanent** replay protection (strongly recommended in production),
-set the TTL to a very large value:
+A preimage marker already never expires on routes with `l402_macaroon_timeout 0`,
+and otherwise outlives the macaroon. Cashu markers always expire after
+`L402_CASHU_TOKEN_TTL_SECONDS`. For permanent protection, set a very large value:
 
 ```bash
 # ~68 years — effectively permanent
@@ -140,8 +153,8 @@ Environment=L402_CASHU_TOKEN_TTL_SECONDS=2147483647
 > API with many unique tokens this will grow Redis memory over time. Size each
 > key at ~100 bytes; 1 million spent tokens ≈ 100 MB.
 >
-> **Do not set `0`** — Redis rejects `EX 0` with an error, which causes the
-> module to fail-open and skip the replay check entirely.
+> **Do not set `0`**: Redis rejects `EX 0`, so every P2PK Cashu token is refused
+> with `500`, and auto-detect stops caching settled preimages.
 
 ---
 
@@ -220,21 +233,6 @@ Environment=CASHU_REQUIRE_DLEQ=true   # default: true — keep it on
 > - The standard (non-P2PK) mode is unaffected: its mint swap already validates
 >   proofs authoritatively.
 
-> **🔒 NUT-12 DLEQ (`CASHU_REQUIRE_DLEQ`)**: In P2PK mode, tokens are verified
-> on a fast path that **skips the mint swap** for lower latency. DLEQ proofs
-> (NUT-12) are what let us confirm offline — using only cached mint keysets —
-> that each proof was actually signed by the whitelisted mint. With this check
-> off, a forger could submit correctly-shaped, mint-whitelisted proofs that the
-> mint never signed and get free service (the operator only finds out at
-> redemption time, when the melt fails).
-> - **Default `true`**: a proof with no DLEQ data is rejected. Modern Cashu
->   wallets include DLEQ by default, so this is safe.
-> - Set `CASHU_REQUIRE_DLEQ=false` only as a temporary safety valve if a
->   real-world wallet ships DLEQ-less tokens. This is **insecure** and re-opens
->   the forged-proof window above.
-> - The standard (non-P2PK) mode is unaffected: its mint swap already validates
->   proofs authoritatively.
-
 See [Cashu eCash](./cashu.md) for a full explanation of Standard vs P2PK mode and redemption fee examples.
 
 ---
@@ -287,10 +285,15 @@ These are set inside `location {}` blocks in `nginx.conf` (not environment varia
 | `l402_amount_msat_default` | integer | — | Price in millisatoshis (overridden by Redis dynamic pricing). Cashu payment requests carry a whole number of sats, so a sub-sat price is advertised rounded **up** while Lightning is charged exactly; the module warns at startup when the two diverge |
 | `l402_macaroon_timeout` | integer (seconds) | `0` (disabled) | Macaroon validity window; `0` = no expiry |
 | `l402_lnurl_addr` | string | — | Per-location LNURL address for multi-tenant setups |
-| `l402_invoice_rate_limit` | `<N>r/m` or `<N>r/s` | disabled | Max invoice generation rate per IP per route |
+| `l402_invoice_rate_limit` | `<N>r/s`, `<N>r/m`, `<N>r/h`, or `<N>` (per minute) | disabled | Max invoice generation rate per IP per route |
 | `l402_auto_detect_payment` | boolean¹ | `off` | Server-side payment detection — queries the Lightning node instead of requiring the client to supply the preimage |
 | `l402_indefinite_access` | boolean¹ | `off` | Skip the single-use preimage replay check — a single payment stays valid for the macaroon lifetime |
 | `l402_realm` | string | — | Bind the macaroon to a named protection space instead of the exact request path, so one payment authorizes every location sharing the name |
+| `l402_exempt_methods` | one or more HTTP methods | — | Methods served without payment, e.g. `HEAD`; nested locations inherit it |
+| `l402_dry_run` | `on` or `off` | `off` | Log and count what would be blocked, without blocking — see [dry-run.md](dry-run.md) |
+| `l402_metrics` | no arguments | — | Serve Prometheus counters from this location; the shipped `nginx.conf` allows only localhost — see [dry-run.md](dry-run.md#prometheus-metrics) |
+| `l402_manifest` | no arguments | — | Serve the JSON manifest of this server's paid routes, normally at `/.well-known/l402-services` — see [manifest.md](manifest.md) |
+| `l402_manifest_hide` | no arguments | — | Leave this location out of the manifest |
 | `l402_log_format` | `json` or `text` | `text` | Emit one structured JSON line per L402 access event (verify, challenge, challenge error, rate-limited) — see [logging.md](logging.md) |
 
 > ¹ **Boolean directives** accept: `on` / `off` / `true` / `false` / `1` / `0` / `yes` / `no` (case-insensitive).
@@ -413,4 +416,4 @@ location /subscriber-only {
 
 > **Backends that support auto-detect**: `LND`, `CLN`, `BOLT12`, `ECLAIR`, and
 > `NWC` where the wallet implements the optional NIP-47 `lookup_invoice`.
-> `LNC` and `LNURL` do **not** support server-side lookup.
+> `LND` over LNC and `LNURL` do **not** support server-side lookup.

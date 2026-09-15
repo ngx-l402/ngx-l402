@@ -58,7 +58,9 @@ Environment=L402_PREIMAGE_TTL_SECONDS=86400      # Default: 24 hours
 Environment=L402_CASHU_TOKEN_TTL_SECONDS=86400   # Default: 24 hours
 ```
 
-**How it works**: After successful verification, SHA256 hashes of preimages/tokens are stored in Redis with a TTL. Subsequent use of the same credential is rejected with `401`. Protection persists across Nginx restarts and works with multiple Nginx instances.
+**How it works**: After successful verification, a SHA-256 hash of the preimage or token is stored in Redis, and reusing the credential is rejected with `401`. Protection persists across Nginx restarts and works with multiple Nginx instances.
+
+A preimage's marker lives for `L402_PREIMAGE_TTL_SECONDS` or the macaroon's own timeout, whichever is longer. On routes with `l402_macaroon_timeout 0` it never expires, because neither does the macaroon. A Cashu token's marker lives for `L402_CASHU_TOKEN_TTL_SECONDS`.
 
 ---
 
@@ -88,3 +90,19 @@ Requests that exceed the limit receive `429 Too Many Requests` with a `Retry-Aft
 The rate limit only applies to unauthenticated requests (those that would result in a 402). Requests presenting a valid L402 token bypass it entirely.
 
 **How it works**: Uses a fixed-window Redis counter (`INCR` + `EXPIRE` on first hit) keyed by IP and path. Fails open — if Redis is unavailable, rate limiting is disabled and traffic passes through normally.
+
+---
+
+## Keys the Module Writes
+
+| Key | Holds | Expires |
+|---|---|---|
+| `<path>` | Dynamic price you set | Never — you manage it |
+| `lnurl:<path>` | Per-route LNURL override you set | Never — you manage it |
+| `l402:preimage:<sha256>` | Spent Lightning preimage | See [Replay Attack Prevention](#replay-attack-prevention) |
+| `l402:cashu_token:<sha256>` | Spent Cashu token | `L402_CASHU_TOKEN_TTL_SECONDS` |
+| `l402:settled:<payment hash>` | Settled preimage cached by auto-detect | `L402_PREIMAGE_TTL_SECONDS` |
+| `l402:invoice_rate:<sha256>` | Invoice rate-limit counter for a client and route | The rate-limit window |
+| `cashu:proof_lnurl:<sha256>` | Which tenant a Cashu proof belongs to | 20 redemption intervals — see [Multi-Tenant](./config-multi-tenant.md) |
+
+Run Redis with `maxmemory-policy noeviction`: an evicted replay marker makes its credential usable again.

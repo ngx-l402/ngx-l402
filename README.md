@@ -10,7 +10,7 @@ For local contributor setup on macOS (Docker nginx recommended), see `docs/macos
 
 ### ✨ Key Features
 
-- **Server-side auto-detect** — Enable `l402_auto_detect_payment on` in `nginx.conf` and clients no longer need to include the preimage in the `Authorization` header. The module queries your Lightning node directly (LND, CLN, or Eclair) to confirm payment settlement.
+- **Server-side auto-detect** — Enable `l402_auto_detect_payment on` in `nginx.conf` and clients no longer need to include the preimage in the `Authorization` header. The module queries your Lightning node directly (LND, CLN, BOLT12, Eclair, or an NWC wallet that supports lookup) to confirm payment settlement.
 - **Classic preimage flow** — Standard `L402 <macaroon>:<preimage>` header is always supported.
 - **Cashu eCash support** — Accept Cashu tokens as an alternative payment method via the `X-Cashu` header.
 - **Redis caching** — Settled preimages are cached in Redis to avoid repeated node lookups.

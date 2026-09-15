@@ -1,5 +1,4 @@
 use crate::cashu_redemption_logger;
-use crate::REDIS_POOL;
 use cdk::mint_url::MintUrl;
 use l402_middleware::lnclient;
 use l402_middleware::lndrpc::lnrpc;
@@ -23,7 +22,8 @@ thread_local! {
         RefCell::new(ngx_l402_core::ReplayCache::default());
 }
 
-const MSAT_PER_SAT: u64 = 1000;
+// Single definition, shared with `sat_to_msat` so the two can never disagree.
+use ngx_l402_core::MSAT_PER_SAT;
 
 // Database singleton using cdk-sqlite. Opened in the master; `CASHU_DB_PID`
 // records who opened it so a forked worker knows to open its own instead of
@@ -157,6 +157,9 @@ static CASHU_REQUIRE_DLEQ: OnceLock<bool> = OnceLock::new();
 static LN_CLIENT: tokio::sync::OnceCell<Arc<tokio::sync::Mutex<dyn lnclient::LNClient>>> =
     tokio::sync::OnceCell::const_new();
 static LN_CLIENT_TYPE: OnceLock<String> = OnceLock::new();
+/// LNURL_ADDRESS as the master saw it: where proofs with no tenant mapping are
+/// redeemed. Workers cannot read the environment.
+static DEFAULT_LNURL_ADDRESS: OnceLock<String> = OnceLock::new();
 
 // Resolved BIP39 wallet mnemonic — the Cashu/NUT-13 backup phrase. Set once at
 // init (initialize_cashu) from CASHU_WALLET_MNEMONIC, a persisted file, or a
@@ -615,6 +618,10 @@ pub fn is_multi_tenant_enabled() -> bool {
 /// thread's runtime via `LN_CLIENT` to avoid inheriting broken tonic Channels
 /// from the nginx master process after fork().
 pub fn initialize_ln_client(client_type: String) -> Result<(), String> {
+    if let Ok(address) = std::env::var("LNURL_ADDRESS") {
+        let _ = DEFAULT_LNURL_ADDRESS.set(address);
+    }
+
     LN_CLIENT_TYPE
         .set(client_type.clone())
         .map_err(|_| "LN_CLIENT_TYPE already initialized".to_string())?;
@@ -849,7 +856,15 @@ pub fn get_whitelisted_mints() -> Option<&'static HashSet<String>> {
 }
 
 fn get_lnurl_from_proof(proof: &cdk::nuts::Proof) -> Result<Option<String>, String> {
-    let pool = REDIS_POOL.get().ok_or("Redis pool is not initialised")?;
+    // Without Redis no mapping was ever recorded, so the default address is
+    // right. A configured Redis that can't be reached still holds the tenant's
+    // mapping: fail, and the caller keeps the proofs for the next cycle.
+    let Some(pool) = crate::redis_pool() else {
+        return match crate::redis_absence_reason() {
+            crate::ReplayClaimError::NotConfigured => Ok(None),
+            unavailable => Err(unavailable.to_string()),
+        };
+    };
 
     let mut conn = pool
         .get()
@@ -875,9 +890,10 @@ fn set_proof_to_lnurl(
     proofs: cdk::nuts::Proofs,
     lnurl_route: Option<String>,
 ) -> Result<(), String> {
-    let pool = REDIS_POOL.get().ok_or("Redis pool is not initialised")?;
+    let pool = crate::redis_pool().ok_or_else(|| crate::redis_absence_reason().to_string())?;
 
-    let lnurl = lnurl_route.unwrap_or_else(|| std::env::var("LNURL_ADDRESS").unwrap_or_default());
+    let lnurl =
+        lnurl_route.unwrap_or_else(|| DEFAULT_LNURL_ADDRESS.get().cloned().unwrap_or_default());
 
     if lnurl.is_empty() {
         return Err("No LNURL address available for cashu token".to_string());
@@ -886,6 +902,15 @@ fn set_proof_to_lnurl(
     let mut conn = pool
         .get()
         .map_err(|e| format!("Failed to get redis connection from pool: {}", e))?;
+
+    // Mappings are normally deleted once their proofs melt, but a proof that
+    // never redeems — redemption disabled, a mint permanently unreachable, a
+    // melt that keeps failing — would otherwise leave its key in Redis forever.
+    // Expire well past the redemption interval so a live mapping is never lost
+    // while an abandoned one still goes away on its own.
+    // The master's parse: a worker has no environment to read.
+    let interval = crate::CASHU_REDEEM_INTERVAL.get().copied().unwrap_or(0);
+    let ttl = ngx_l402_core::proof_mapping_ttl_secs(interval);
 
     for proof in proofs {
         let secret = proof.secret.to_string();
@@ -896,7 +921,7 @@ fn set_proof_to_lnurl(
         let proof_hash = hex::encode(hasher.finalize());
 
         let redis_key = format!("cashu:proof_lnurl:{}", proof_hash);
-        conn.set::<_, _, ()>(&redis_key, &lnurl)
+        conn.set_ex::<_, _, ()>(&redis_key, &lnurl, ttl)
             .map_err(|e| format!("Failed to set proof mapping: {}", e))?;
     }
 
@@ -905,7 +930,7 @@ fn set_proof_to_lnurl(
 
 /// Remove proof-to-lnurl mappings from Redis after proofs have been melted
 fn remove_proof_lnurl_mappings(proofs: &cdk::nuts::Proofs) -> Result<(), String> {
-    let pool = REDIS_POOL.get().ok_or("Redis pool is not initialised")?;
+    let pool = crate::redis_pool().ok_or_else(|| crate::redis_absence_reason().to_string())?;
 
     let mut conn = pool
         .get()
@@ -933,14 +958,29 @@ fn group_proofs_by_lnurl(
     proofs: cdk::nuts::Proofs,
 ) -> Result<HashMap<String, cdk::nuts::Proofs>, String> {
     let mut grouped: HashMap<String, cdk::nuts::Proofs> = HashMap::new();
-    let default_lnurl = std::env::var("LNURL_ADDRESS")
-        .map_err(|_| "LNURL_ADDRESS is required for multi-tenant mode".to_string())?;
+    let default_lnurl = DEFAULT_LNURL_ADDRESS
+        .get()
+        .cloned()
+        .ok_or("LNURL_ADDRESS is required for multi-tenant mode")?;
 
     for proof in proofs {
-        let lnurl = get_lnurl_from_proof(&proof)
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| default_lnurl.clone());
+        // Distinguish "no mapping recorded" from "could not read the mapping".
+        // Only the first may fall back to the default address: on a Redis
+        // failure the tenant's mapping still exists and is simply unreadable,
+        // so paying its proofs to LNURL_ADDRESS would melt their funds into the
+        // operator's wallet. Abort the cycle instead — the proofs stay unspent
+        // and the next run redeems them to the right place.
+        let lnurl = match get_lnurl_from_proof(&proof) {
+            Ok(Some(mapped)) => mapped,
+            Ok(None) => default_lnurl.clone(),
+            Err(e) => {
+                return Err(format!(
+                    "cannot read the proof-to-LNURL mapping, refusing to redeem to the \
+                     default address and misroute tenant funds: {}",
+                    e
+                ));
+            }
+        };
 
         if lnurl.is_empty() {
             continue;
@@ -1168,46 +1208,29 @@ pub async fn verify_cashu_token(
         .await
         .map_err(CashuError::Internal)?;
 
-    match wallet
-        .receive(token, cdk::wallet::ReceiveOptions::default())
-        .await
-    {
-        Ok(_) => {
+    // A tenant's proofs have to be mapped as the wallet will redeem them, and
+    // `receive` can't: it swaps them for new proofs and returns only an amount.
+    let received = if is_multi_tenant_enabled() {
+        receive_for_tenant(&wallet, &token_decoded, lnurl_addr).await
+    } else {
+        wallet
+            .receive(token, cdk::wallet::ReceiveOptions::default())
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    };
+
+    match received {
+        Ok(()) => {
             info!(
                 "✅ Cashu token received successfully from mint: {}",
                 mint_url
             );
 
-            if is_multi_tenant_enabled() {
-                // Use only the proofs from this specific token, not all wallet
-                // proofs. The wallet is shared across tenants, so
-                // get_unspent_proofs() would return other tenants' proofs and
-                // overwrite their LNURL mappings.
-                let keysets_info = wallet.get_mint_keysets().await.map_err(|e| {
-                    CashuError::Internal(format!(
-                        "Failed to get keysets for proof extraction: {}",
-                        e
-                    ))
-                })?;
-                match token_decoded.proofs(&keysets_info) {
-                    Ok(proofs) => {
-                        if let Err(e) = set_proof_to_lnurl(proofs, lnurl_addr) {
-                            warn!("⚠️ Failed to set proof-to-lnurl mapping: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        warn!(
-                            "⚠️ Failed to extract proofs from token for lnurl mapping: {}",
-                            e
-                        );
-                    }
-                }
-            }
-
             // Atomic claim outcomes: Ok(true) = first claim (admit),
             // Ok(false) = concurrent replay (reject), Err = Redis unconfigured
             // or unavailable. Unlike the P2PK path, this path already swapped the
-            // proofs at the mint (wallet.receive above), so a replayed token's
+            // proofs at the mint (the receive above), so a replayed token's
             // proofs are spent and the mint rejects a second receive even during
             // a Redis outage. The mint is the backstop here, so failing open is
             // safe regardless of whether Redis is unconfigured or down.
@@ -1243,6 +1266,73 @@ pub async fn verify_cashu_token(
             Err(CashuError::Internal(format!("mint receive failed: {}", e)))
         }
     }
+}
+
+/// Receive a token in multi-tenant mode, mapping the proofs it produces.
+///
+/// `Wallet::receive` swaps a token's proofs at the mint for new ones and
+/// returns only the amount, so the mapping used to be keyed on the spent input
+/// proofs and matched nothing redemption later looked up: every tenant's funds
+/// went to `LNURL_ADDRESS`. This is the same swap, asking for the whole amount
+/// back: `swap` returns those proofs reserved, so each is mapped before it
+/// becomes spendable.
+async fn receive_for_tenant(
+    wallet: &cdk::wallet::Wallet,
+    token: &cdk::nuts::Token,
+    lnurl_addr: Option<String>,
+) -> Result<(), String> {
+    use cdk::amount::SplitTarget;
+    use cdk::nuts::nut00::ProofsMethods;
+    use cdk::nuts::State;
+    use cdk::types::ProofInfo;
+
+    let keysets = wallet.get_mint_keysets().await.map_err(|e| e.to_string())?;
+    let proofs = token.proofs(&keysets).map_err(|e| e.to_string())?;
+    let fee = wallet
+        .get_proofs_fee(&proofs)
+        .await
+        .map_err(|e| e.to_string())?;
+    let amount = proofs
+        .total_amount()
+        .map_err(|e| e.to_string())?
+        .checked_sub(fee)
+        .ok_or("token does not cover the mint's input fee")?;
+
+    // As `receive_proofs` does: record the inputs, so a failed swap can reclaim them.
+    let inputs = proofs
+        .iter()
+        .cloned()
+        .map(|p| {
+            ProofInfo::new(
+                p,
+                wallet.mint_url.clone(),
+                State::Pending,
+                wallet.unit.clone(),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    wallet
+        .localstore
+        .update_proofs(inputs, vec![])
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let received = wallet
+        .swap(Some(amount), SplitTarget::default(), proofs, None, false)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or("mint swap returned no proofs")?;
+
+    if let Err(e) = set_proof_to_lnurl(received.clone(), lnurl_addr) {
+        warn!("⚠️ Failed to set proof-to-lnurl mapping: {}", e);
+    }
+
+    wallet
+        .localstore
+        .update_proofs_state(received.ys().map_err(|e| e.to_string())?, State::Unspent)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Verify Cashu token using P2PK optimized mode (NUT-24)
@@ -1640,10 +1730,10 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
     // Captured at init: this runs in a worker, with no environment to read.
     let melt = melt_config();
     let min_balance_sats = melt.min_balance_sats;
-    let minimum_for_redemption_msat = min_balance_sats * MSAT_PER_SAT;
+    let minimum_for_redemption_msat = ngx_l402_core::sat_to_msat(min_balance_sats);
     let fee_reserve_percent = melt.fee_reserve_percent;
     let min_fee_reserve_sats = melt.min_fee_reserve_sats;
-    let min_fee_reserve_msat = min_fee_reserve_sats * MSAT_PER_SAT;
+    let min_fee_reserve_msat = ngx_l402_core::sat_to_msat(min_fee_reserve_sats);
     let max_proofs_per_melt = melt.max_proofs_per_melt;
 
     let msg = if max_proofs_per_melt > 0 {
@@ -1816,9 +1906,10 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                                             if let Some(min_amount) =
                                                 method.get("min_amount").and_then(|m| m.as_u64())
                                             {
+                                                // min_amount is mint-supplied.
                                                 current_minimum_for_redemption_msat =
                                                     if unit == "sat" {
-                                                        min_amount * MSAT_PER_SAT
+                                                        ngx_l402_core::sat_to_msat(min_amount)
                                                     } else {
                                                         min_amount
                                                     };
@@ -1872,8 +1963,9 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                                         if let Some(min_fee) =
                                             entry.get("min").and_then(|m| m.as_u64())
                                         {
+                                            // min_fee is mint-supplied.
                                             current_min_fee_reserve_msat = if unit == "sat" {
-                                                min_fee * MSAT_PER_SAT
+                                                ngx_l402_core::sat_to_msat(min_fee)
                                             } else {
                                                 min_fee
                                             };
@@ -1927,7 +2019,7 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                 .map(|p| {
                     let amount: u64 = p.amount.into();
                     if wallet.unit == cdk::nuts::CurrencyUnit::Sat {
-                        amount * MSAT_PER_SAT
+                        ngx_l402_core::sat_to_msat(amount)
                     } else {
                         amount
                     }
@@ -1958,7 +2050,7 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                         .map(|p| {
                             let amount: u64 = p.amount.into();
                             if wallet.unit == cdk::nuts::CurrencyUnit::Sat {
-                                amount * MSAT_PER_SAT
+                                ngx_l402_core::sat_to_msat(amount)
                             } else {
                                 amount
                             }
@@ -2117,15 +2209,15 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                 Ok(q) => {
                     let actual_fee_reserve_sats: u64 = q.fee_reserve.into();
                     let amount_sats: u64 = q.amount.into();
-                    // Saturating conversion: these amounts come from the mint, so
-                    // a buggy/hostile quote must not overflow the sat->msat math.
-                    // An absurd value saturates to u64::MAX and is rejected by the
-                    // balance check below rather than wrapping to a small number.
+                    // These amounts come from the mint: a buggy or hostile quote
+                    // must not overflow the sat->msat math. sat_to_msat
+                    // saturates, so an absurd value is rejected by the balance
+                    // check below rather than wrapping to a small number.
                     let (actual_fee_reserve_msat, amount_msat) =
                         if wallet.unit == cdk::nuts::CurrencyUnit::Sat {
                             (
-                                actual_fee_reserve_sats.saturating_mul(MSAT_PER_SAT),
-                                amount_sats.saturating_mul(MSAT_PER_SAT),
+                                ngx_l402_core::sat_to_msat(actual_fee_reserve_sats),
+                                ngx_l402_core::sat_to_msat(amount_sats),
                             )
                         } else {
                             (actual_fee_reserve_sats, amount_sats)
@@ -2168,11 +2260,29 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                         client_id
                     );
 
+                    // An unsigned proof cannot melt, so submitting the batch
+                    // anyway just burns the quote and surfaces a local signing
+                    // failure as an opaque mint rejection. Stop at the first
+                    // one and say which proof failed.
                     let mut signed_proofs = proofs_to_melt.clone();
-                    for proof in &mut signed_proofs {
+                    let mut signing_error = None;
+                    for (i, proof) in signed_proofs.iter_mut().enumerate() {
                         if let Err(e) = proof.sign_p2pk(private_key.clone()) {
-                            error!("❌ Failed to sign proof: {}", e);
+                            signing_error = Some(format!(
+                                "failed to sign P2PK proof {} of {}: {}",
+                                i + 1,
+                                proofs_to_melt.len(),
+                                e
+                            ));
+                            break;
                         }
+                    }
+
+                    if let Some(msg) = signing_error {
+                        let msg = format!("❌ Not melting for {}: {}", client_id, msg);
+                        error!("{}", msg);
+                        cashu_redemption_logger::log_redemption(&msg);
+                        continue;
                     }
 
                     wallet_clone.melt_proofs(&quote.id, signed_proofs).await
@@ -2190,9 +2300,11 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                     info!("{}", result_msg);
                     cashu_redemption_logger::log_redemption(&result_msg);
 
+                    // fee_reserve is mint-supplied — the same value guarded with
+                    // saturating_mul when the quote was validated above.
                     let actual_fees_sats: u64 = quote.fee_reserve.into();
                     let actual_fees_msat = if wallet.unit == cdk::nuts::CurrencyUnit::Sat {
-                        actual_fees_sats * MSAT_PER_SAT
+                        ngx_l402_core::sat_to_msat(actual_fees_sats)
                     } else {
                         actual_fees_sats
                     };

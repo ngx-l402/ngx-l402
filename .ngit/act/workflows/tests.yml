@@ -113,6 +113,44 @@ jobs:
             exit 1
           fi
 
+          # /protected serves the browser payment page, so its 402 has a body.
+          # This is the contrast the /api-only assertions below depend on: if
+          # the page ever stopped rendering, an empty body there would be
+          # indistinguishable from l402_payment_html working.
+          if [ "$(curl -s -o /dev/null -w '%{size_download}' --max-time 30 -L http://0.0.0.0:8000/protected)" -eq 0 ]; then
+            echo "FAIL: /protected returned an empty 402 body — the payment page is not rendering"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+          echo "PASS: /protected 402 carries the payment page"
+
+          # `l402_payment_html off` — same challenge, no page. Assert all three
+          # properties, since dropping any one of them is a silent regression:
+          # still 402, still carries WWW-Authenticate, and the body is empty.
+          echo "Testing /api-only (l402_payment_html off)..."
+          api_resp=$(curl -s -i -w "\n%{http_code}" --max-time 30 http://0.0.0.0:8000/api-only) || true
+          api_code=$(echo "$api_resp" | tail -n1); api_code=${api_code:-000}
+          if [ "$api_code" -ne 402 ]; then
+            echo "FAIL: /api-only returned $api_code, expected 402"
+            echo "$api_resp"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+          if ! echo "$api_resp" | grep -q 'WWW-Authenticate: L402 macaroon='; then
+            echo "FAIL: /api-only 402 is missing WWW-Authenticate — the challenge must survive with the page off"
+            echo "$api_resp"
+            docker logs nginx-lnurl
+            exit 1
+          fi
+          api_bytes=$(curl -s -o /dev/null -w '%{size_download}' --max-time 30 http://0.0.0.0:8000/api-only)
+          if [ "$api_bytes" -ne 0 ]; then
+            echo "FAIL: /api-only 402 returned a $api_bytes byte body, expected none"
+            curl -s --max-time 30 http://0.0.0.0:8000/api-only | head -20
+            docker logs nginx-lnurl
+            exit 1
+          fi
+          echo "PASS: /api-only returns 402 + WWW-Authenticate with an empty body"
+
           # Flush Redis to clear any previously stored preimages (replay protection)
           echo "Flushing Redis for clean test state..."
           echo "Keys before flush:"

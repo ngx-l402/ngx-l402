@@ -1390,6 +1390,11 @@ pub struct ModuleConfig {
     // (inherit from parent scope); `Some(false)` explicitly turns it off and
     // stops inheritance.
     dry_run: Option<bool>,
+    // Whether a 402 carries the full HTML payment page. `None` means unset
+    // (inherit from parent scope); `Some(false)` serves the challenge headers
+    // with an empty body, for routes consumed by API clients and agents rather
+    // than browsers. Defaults to on.
+    payment_html: Option<bool>,
     // Structured JSON access logging (`l402_log_format json`). Tri-state like
     // dry_run so an inner location can force it off when an outer scope turned
     // it on. Unset everywhere means the default text logging — existing
@@ -1406,7 +1411,7 @@ pub struct ModuleConfig {
     manifest_hidden: bool,
 }
 
-pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 15] = [
+pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 16] = [
     ngx_command_t {
         name: ngx_string!("l402"),
         type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1) as ngx_uint_t,
@@ -1513,6 +1518,14 @@ pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 15] = [
         post: std::ptr::null_mut(),
     },
     ngx_command_t {
+        name: ngx_string!("l402_payment_html"),
+        type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1) as ngx_uint_t,
+        set: Some(ngx_http_l402_payment_html_set),
+        conf: NGX_HTTP_LOC_CONF_OFFSET,
+        offset: 0,
+        post: std::ptr::null_mut(),
+    },
+    ngx_command_t {
         name: ngx_string!("l402_exempt_methods"),
         type_: (NGX_HTTP_LOC_CONF | NGX_CONF_1MORE) as ngx_uint_t,
         set: Some(ngx_http_l402_exempt_methods_set),
@@ -1600,6 +1613,9 @@ impl Merge for ModuleConfig {
         // location overrides `l402_dry_run on;` on the outer scope.
         if self.dry_run.is_none() {
             self.dry_run = prev.dry_run;
+        }
+        if self.payment_html.is_none() {
+            self.payment_html = prev.payment_html;
         }
         if self.log_format_json.is_none() {
             self.log_format_json = prev.log_format_json;
@@ -1753,6 +1769,34 @@ unsafe fn send_html_response(r: *mut ngx_http_request_t, status: u16, body: Stri
     NGX_DONE as isize
 }
 
+/// Send `status` with its already-attached headers and no body.
+///
+/// A bare `return 402` is not bodyless: nginx's special-response handler fills
+/// in its built-in page for every 4xx. Marking the request header-only is what
+/// drops the body. Returns `NGX_DONE` for the reason `send_html_response` does.
+///
+/// # Safety
+/// `r` must be the valid, non-null request pointer nginx passed to the handler.
+unsafe fn send_empty_response(r: *mut ngx_http_request_t, status: u16) -> isize {
+    let rc = unsafe { ngx_http_discard_request_body(r) };
+    if rc != NGX_OK as ngx_int_t {
+        return rc as isize;
+    }
+
+    // Before borrowing `r` as a Request, so the raw write does not alias it.
+    unsafe { (*r).set_header_only(1) };
+    let req = unsafe { Request::from_ngx_http_request(r) };
+    req.set_status(HTTPStatus(status as usize));
+    req.set_content_length_n(0);
+
+    let send_status = req.send_header();
+    if send_status.0 == NGX_ERROR as ngx_int_t || send_status.0 > NGX_OK as ngx_int_t {
+        return send_status.0;
+    }
+    unsafe { ngx_http_finalize_request(r, send_status.0) };
+    NGX_DONE as isize
+}
+
 // Per-worker scratch slot used by `l402_access_handler` to report *which*
 // payment method satisfied a successful verification. The wrapper consumes it
 // only in enforce mode (after the dry-run early return) so shadow traffic
@@ -1816,6 +1860,7 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         invoice_rate_limit,
         auto_detect_payment,
         dry_run,
+        payment_html,
         indefinite_access,
         realm,
         log_format_json,
@@ -1883,6 +1928,7 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         let invoice_rate_limit = conf.invoice_rate_limit;
         let auto_detect_payment = conf.auto_detect_payment;
         let dry_run = conf.dry_run.unwrap_or(false);
+        let payment_html = conf.payment_html.unwrap_or(true);
         let indefinite_access = conf.indefinite_access.unwrap_or(false);
         let realm = conf.realm.clone();
         let log_format_json = conf.log_format_json.unwrap_or(false);
@@ -1897,6 +1943,7 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
             invoice_rate_limit,
             auto_detect_payment,
             dry_run,
+            payment_html,
             indefinite_access,
             realm,
             log_format_json,
@@ -2247,6 +2294,14 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
                 // Render and send the HTML payment page for browser clients.
                 // API clients that check WWW-Authenticate will still function
                 // correctly because the header is already set above.
+                //
+                // `l402_payment_html off` stops here: the challenge headers are
+                // already attached, and an API client or agent only discards the
+                // page.
+                if !payment_html {
+                    // SAFETY: `request` is the valid pointer nginx passed to this handler.
+                    return unsafe { send_empty_response(request, 402) };
+                }
                 if let Some((macaroon_b64, invoice)) =
                     ngx_l402_core::parse_l402_header_value(&header_value)
                 {
@@ -3277,6 +3332,54 @@ pub unsafe extern "C" fn l402_metrics_content_handler(r: *mut ngx_http_request_t
     // SAFETY: `chain` is non-null, was just initialised, and lives for the
     // request via the request pool.
     unsafe { req.output_filter(&mut *chain).0 }
+}
+
+/// Directive handler for `l402_payment_html on|off;`.
+///
+/// `off` serves the 402 with its `WWW-Authenticate` (and `X-Cashu`) headers but
+/// an empty body — the API/agent shape, where an HTML page is dead weight the
+/// client discards. `on` (the default) keeps the browser payment page.
+///
+/// # Safety
+///
+/// An nginx config-parsing callback. `cf`, `conf`, and `(*cf).args` are
+/// guaranteed valid and non-null by nginx for the duration of the call, and
+/// `NGX_CONF_TAKE1` guarantees exactly one argument at `args.add(1)`.
+pub unsafe extern "C" fn ngx_http_l402_payment_html_set(
+    cf: *mut ngx_conf_t,
+    _cmd: *mut ngx_command_t,
+    conf: *mut c_void,
+) -> *mut c_char {
+    // SAFETY: `cf`, `conf`, and `(*cf).args` are guaranteed valid by Nginx
+    // during config-parsing callbacks. `args.add(1)` is safe because
+    // NGX_CONF_TAKE1 ensures exactly one argument is present.
+    unsafe {
+        let conf = &mut *(conf as *mut ModuleConfig);
+        let args = (*(*cf).args).elts as *mut ngx_str_t;
+        let val = (*args.add(1)).to_str().unwrap_or_default().trim();
+
+        if val.eq_ignore_ascii_case("on")
+            || val.eq_ignore_ascii_case("true")
+            || val.eq_ignore_ascii_case("1")
+            || val.eq_ignore_ascii_case("yes")
+        {
+            conf.payment_html = Some(true);
+        } else if val.eq_ignore_ascii_case("off")
+            || val.eq_ignore_ascii_case("false")
+            || val.eq_ignore_ascii_case("0")
+            || val.eq_ignore_ascii_case("no")
+        {
+            conf.payment_html = Some(false);
+            info!("⚙️ l402_payment_html off — 402 responses carry headers only, no HTML body");
+        } else {
+            error!(
+                "Invalid l402_payment_html value: '{}' (expected on/off)",
+                val
+            );
+            return c"l402_payment_html: expected 'on' or 'off'".as_ptr() as *mut c_char;
+        }
+    }
+    std::ptr::null_mut()
 }
 
 /// Directive handler for `l402_dry_run on|off;`.

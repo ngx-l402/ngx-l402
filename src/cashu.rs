@@ -211,9 +211,9 @@ const GENERATED_MNEMONIC_WORDS: usize = 12;
 ///   3. A freshly generated BIP39 phrase, persisted to that file when a path is
 ///      available and logged once so the operator can back it up.
 ///
-/// Fails closed (returns `Err`) only when an explicitly configured mnemonic is
-/// invalid — we must never silently start a *different* empty wallet over real
-/// funds.
+/// Fails closed (returns `Err`) when an explicitly configured mnemonic is
+/// invalid, or a phrase file exists that `read_wallet_file` won't trust — we
+/// must never silently start a *different* empty wallet over real funds.
 fn resolve_wallet_mnemonic(db_url: &str) -> Result<(), String> {
     if WALLET_MNEMONIC.get().is_some() {
         return Ok(());
@@ -236,9 +236,16 @@ fn resolve_wallet_mnemonic(db_url: &str) -> Result<(), String> {
 
     let file_path = wallet_mnemonic_file_path(db_url);
 
+    // Only reached when the phrase comes from a file. Setting
+    // CASHU_WALLET_MNEMONIC returns above, and is the way to have no file to
+    // attack at all.
+    if let Some(ref path) = file_path {
+        warn_if_wallet_dir_is_shared(path);
+    }
+
     // 2. Previously persisted mnemonic.
     if let Some(ref path) = file_path {
-        if let Ok(contents) = std::fs::read_to_string(path) {
+        if let Some(contents) = read_wallet_file(path)? {
             let m = contents.trim().to_string();
             if ngx_l402_core::is_valid_mnemonic(&m) {
                 let _ = WALLET_MNEMONIC.set(m);
@@ -291,10 +298,11 @@ fn resolve_wallet_mnemonic(db_url: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Give the database files the same owner as their directory.
+/// Give the database files their directory's owner and group, mode 0660.
 ///
 /// The master creates them as root; the workers that use them run as nginx.
-/// The data directory already names that user, so follow it.
+/// The data directory already names that user: as its owner, or, when root owns
+/// it (the Docker image), as its group, which 0660 lets write.
 ///
 /// Ownership and mode are applied to an `O_NOFOLLOW` descriptor, never to the
 /// path. This runs as root, so a path-based chown here is a privilege-
@@ -395,11 +403,11 @@ fn wallet_mnemonic_file_path(db_url: &str) -> Option<String> {
 /// writes the BIP39 phrase controlling every Cashu fund, and `O_CREAT` alone
 /// follows an existing link, which would deliver it to the link's target.
 ///
-/// Neither guards the *name*. POSIX gives unlink and rename to whoever can write
-/// the directory, whatever the file inside it is owned by, so anyone who can
-/// write `path`'s parent replaces the phrase outright, no symlink needed. The
-/// parent is the trust boundary and must be owned by the user this process runs
-/// as.
+/// Neither guards the *name*: POSIX gives unlink and rename to whoever can write
+/// the directory, whatever the file is owned by. The parent must be one only
+/// this user can rename in: its own, or sticky. A file someone else created
+/// there is refused, not overwritten, hence truncating only after
+/// `ensure_owned`.
 fn persist_mnemonic(path: &str, mnemonic: &str) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -409,11 +417,14 @@ fn persist_mnemonic(path: &str, mnemonic: &str) -> Result<(), String> {
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
-            .truncate(true)
+            .truncate(false)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
             .open(path)
             .map_err(|e| format!("open {} (ELOOP = symlink, refused): {}", path, e))?;
+        ensure_owned(&f, path)?;
+        f.set_len(0)
+            .map_err(|e| format!("truncate {}: {}", path, e))?;
         f.write_all(format!("{}\n", mnemonic).as_bytes())
             .map_err(|e| format!("write {}: {}", path, e))?;
         // An existing file keeps its own mode on open, so set it explicitly —
@@ -459,9 +470,9 @@ fn check_wallet_fingerprint(db_url: &str) -> Result<(), String> {
         return Ok(());
     };
 
-    match std::fs::read_to_string(&path) {
-        Ok(stored) if stored.trim() == fingerprint => Ok(()),
-        Ok(stored) => Err(format!(
+    match read_wallet_file(&path)? {
+        Some(stored) if stored.trim() == fingerprint => Ok(()),
+        Some(stored) => Err(format!(
             "CASHU_WALLET_MNEMONIC does not match the wallet that owns this database \
              (seed fingerprint {} != recorded {}). Refusing to start to avoid orphaning \
              funds. If you intentionally switched wallets, delete {}.",
@@ -469,8 +480,8 @@ fn check_wallet_fingerprint(db_url: &str) -> Result<(), String> {
             stored.trim(),
             path
         )),
-        Err(_) => {
-            // First run (or unreadable): record the current fingerprint.
+        None => {
+            // First run: record the current fingerprint.
             if let Err(e) = persist_fingerprint(&path, &fingerprint) {
                 warn!("⚠️ Could not persist wallet fingerprint to {}: {}", path, e);
             }
@@ -494,6 +505,56 @@ fn wallet_fingerprint_file_path(db_url: &str) -> Option<String> {
     )
 }
 
+/// Warn if a user other than this one could delete or rename the mnemonic.
+///
+/// `read_wallet_file` refuses a phrase this process doesn't own, so no one else
+/// can substitute one. But POSIX lets whoever can write a directory unlink or
+/// rename what is in it, whatever the file's owner: they can still remove the
+/// phrase, which stops Cashu starting, or remove it with its fingerprint, which
+/// opens a new wallet over the old one. A sticky directory limits that to their
+/// own files.
+///
+/// Runs in the master before workers fork, so `geteuid` is the trusted user.
+#[cfg(unix)]
+fn warn_if_wallet_dir_is_shared(mnemonic_path: &str) {
+    use std::os::unix::fs::MetadataExt;
+
+    let Some(parent) = std::path::Path::new(mnemonic_path).parent() else {
+        return;
+    };
+    let dir = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+    // SAFETY: geteuid is always successful and takes no arguments.
+    let me = unsafe { libc::geteuid() };
+
+    for ancestor in dir.ancestors() {
+        let Ok(md) = std::fs::metadata(ancestor) else {
+            continue;
+        };
+        let mode = md.mode();
+        // In a sticky directory others can only rename their own entries.
+        let others_can_write = mode & 0o022 != 0 && mode & 0o1000 == 0;
+        let foreign_owner = md.uid() != me && md.uid() != 0;
+        if others_can_write || foreign_owner {
+            warn!(
+                "⚠️ The Cashu wallet mnemonic at {} can be deleted or renamed by another \
+                 user: {} is writable by a user other than this process (owner uid={}, \
+                 mode={:o}; we are uid={}). Make that directory root-owned and sticky \
+                 (chown root:<worker group>, chmod 1770), set CASHU_WALLET_MNEMONIC, or \
+                 point CASHU_WALLET_MNEMONIC_FILE at a directory only this user can write.",
+                mnemonic_path,
+                ancestor.display(),
+                md.uid(),
+                mode & 0o7777,
+                me,
+            );
+            return;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_if_wallet_dir_is_shared(_mnemonic_path: &str) {}
+
 /// Persist the wallet fingerprint beside the database.
 ///
 /// `fs::write` and a path-based chmod both follow symlinks, and this runs as
@@ -509,11 +570,14 @@ fn persist_fingerprint(path: &str, fingerprint: &str) -> Result<(), String> {
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
-            .truncate(true)
+            .truncate(false)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
             .open(path)
             .map_err(|e| format!("open {} (ELOOP = symlink, refused): {}", path, e))?;
+        ensure_owned(&f, path)?;
+        f.set_len(0)
+            .map_err(|e| format!("truncate {}: {}", path, e))?;
         f.write_all(format!("{}\n", fingerprint).as_bytes())
             .map_err(|e| format!("write {}: {}", path, e))?;
         let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
@@ -522,6 +586,62 @@ fn persist_fingerprint(path: &str, fingerprint: &str) -> Result<(), String> {
     {
         std::fs::write(path, format!("{}\n", fingerprint))
             .map_err(|e| format!("write {}: {}", path, e))?;
+    }
+    Ok(())
+}
+
+/// Read a wallet file, `None` if it does not exist. Refuses a symlink, and on
+/// unix anything `ensure_owned` rejects.
+fn read_wallet_file(path: &str) -> Result<Option<String>, String> {
+    use std::io::Read;
+
+    #[cfg(unix)]
+    let opened = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+    };
+    #[cfg(not(unix))]
+    let opened = std::fs::File::open(path);
+
+    let mut file = match opened {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("open {} (ELOOP = symlink, refused): {}", path, e)),
+    };
+    #[cfg(unix)]
+    ensure_owned(&file, path)?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)
+        .map_err(|e| format!("read {}: {}", path, e))?;
+    Ok(Some(contents))
+}
+
+/// Refuse a wallet file this process doesn't own, or that others can write.
+///
+/// A sticky directory stops other users deleting or renaming the phrase, not
+/// creating one while it is missing, and root would read that file like any
+/// other. So ownership, not the directory, decides whose phrase it is.
+#[cfg(unix)]
+fn ensure_owned(file: &std::fs::File, path: &str) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let md = file
+        .metadata()
+        .map_err(|e| format!("stat {}: {}", path, e))?;
+    // SAFETY: geteuid is always successful and takes no arguments.
+    let me = unsafe { libc::geteuid() };
+    if md.uid() != me || md.mode() & 0o022 != 0 {
+        return Err(format!(
+            "{} is owned by uid {} with mode {:o}; refusing it: a wallet file must be owned \
+             by uid {} and writable by no one else",
+            path,
+            md.uid(),
+            md.mode() & 0o7777,
+            me
+        ));
     }
     Ok(())
 }
@@ -649,6 +769,12 @@ pub fn initialize_cashu(db_url: &str) -> Result<(), String> {
 
     let _ = CASHU_DB_URL.set(db_url.to_string());
     capture_melt_config();
+
+    // Before opening, too. In a sticky, group-writable directory the kernel
+    // refuses even root an O_CREAT open of a file it neither owns nor shares an
+    // owner with the directory (fs.protected_regular=2), and SQLite then falls
+    // back to read-only. Volumes from earlier images hold nginx-owned files.
+    set_db_ownership(db_url);
 
     // Create runtime for async initialization
     let rt = Runtime::new().expect("Failed to create runtime");

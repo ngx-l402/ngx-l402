@@ -1748,9 +1748,9 @@ jobs:
           # Test Cashu eCash support
           echo "Testing Cashu eCash support..."
 
-          # Ensure the Cashu database has proper permissions
+          # Ensure the Cashu database has proper permissions. Leave the data
+          # directory alone: the image makes it sticky, and a chmod would clear it.
           echo "Setting up Cashu database permissions..."
-          docker exec nginx-lnd chmod 770 /app/data
           docker exec nginx-lnd chmod 660 /app/data/cashu_tokens.db
           echo "Cashu database permissions set successfully"
           
@@ -1972,6 +1972,32 @@ jobs:
             exit 1
           fi
           echo "✅ wallet.mnemonic generated on first run"
+          # Root owns the data directory and the phrase; nginx writes the database
+          # through the group, and the sticky bit keeps it off files it doesn't
+          # own. Prove it as the nginx user rather than trusting the mode bits.
+          dir_perms=$(docker exec nginx-lnd stat -c '%U:%G %a' /app/data)
+          phrase_perms=$(docker exec nginx-lnd stat -c '%U:%G %a' /app/data/wallet.mnemonic)
+          if [ "$dir_perms" != "root:nginx 1770" ] || [ "$phrase_perms" != "root:root 600" ]; then
+            echo "❌ Expected root:nginx 1770 and root:root 600, got '$dir_perms' and '$phrase_perms'"
+            exit 1
+          fi
+          for attempt in \
+            'cat /app/data/wallet.mnemonic' \
+            'echo x >> /app/data/wallet.mnemonic' \
+            'mv /app/data/wallet.mnemonic /app/data/moved' \
+            'rm /app/data/wallet.mnemonic' \
+            'echo x > /app/data/planted && mv -f /app/data/planted /app/data/wallet.mnemonic'; do
+            if docker exec -u nginx nginx-lnd sh -c "$attempt" 2>/dev/null; then
+              echo "❌ The nginx user could: $attempt"
+              exit 1
+            fi
+          done
+          docker exec nginx-lnd rm -f /app/data/planted
+          if docker logs nginx-lnd 2>&1 | grep -q "can be deleted or renamed"; then
+            echo "❌ Startup warned about the data directory the image just secured"
+            exit 1
+          fi
+          echo "✅ The nginx user cannot read, change, move, delete or replace the wallet mnemonic"
           # A fingerprint must have been recorded
           FP1=$(docker run --rm -v ngx-l402_cashu-data:/data alpine \
             sh -c 'cat /data/wallet.fingerprint 2>/dev/null | tr -d "[:space:]" || echo ""')
@@ -1991,6 +2017,18 @@ jobs:
             exit 1
           fi
           echo "✅ Auto-generated mnemonic persists across restarts (fingerprint stable: $FP1)"
+          # While the phrase is missing nginx can still create one, so the module
+          # must refuse a wallet.mnemonic it doesn't own rather than adopt it.
+          docker exec nginx-lnd rm -f /app/data/wallet.mnemonic /app/data/wallet.fingerprint
+          docker exec -u nginx nginx-lnd sh -c 'echo "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about" > /app/data/wallet.mnemonic'
+          docker-compose -f docker-compose.yml restart nginx-lnd
+          wait_http http://0.0.0.0:8000/ 200 90 || { docker logs nginx-lnd | tail -30; exit 1; }
+          if ! docker logs nginx-lnd 2>&1 | grep -q "wallet.mnemonic is owned by uid"; then
+            echo "❌ The module adopted a wallet.mnemonic written by the nginx user"
+            docker logs nginx-lnd | tail -30
+            exit 1
+          fi
+          echo "✅ A wallet.mnemonic written by the nginx user is refused"
           # Restore: delete auto-generated wallet files from inside the running
           # container (same UID/GID) then recreate with the known test mnemonic.
           # Using docker exec avoids alpine UID-mapping issues on the named volume.

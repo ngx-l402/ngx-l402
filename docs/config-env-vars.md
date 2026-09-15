@@ -171,6 +171,7 @@ Environment=CASHU_REDEMPTION_INTERVAL_SECS=3600  # default: 1 hour
 > - If unset, one is generated and saved beside the DB on first run — **back it up**
 > - On startup the module records a fingerprint of the seed next to the DB and refuses to start if a later mnemonic doesn't match (so a changed/typo'd phrase can't silently orphan a funded wallet); delete the `wallet.fingerprint` file to switch wallets intentionally
 > - Never commit it to Git; keep it in a secrets manager
+> - A phrase or fingerprint *file* is trusted only if the user nginx's master runs as owns it and no one else can write it; anything else is refused. Keep its directory root-owned and sticky (`chown root:nginx`, `chmod 1770`), as the Docker image does: nginx then writes the database but can't delete, rename or replace the phrase. The module warns at startup when another user could
 
 ### Redemption Fee Handling
 

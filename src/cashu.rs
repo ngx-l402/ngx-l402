@@ -903,15 +903,9 @@ fn set_proof_to_lnurl(
         .get()
         .map_err(|e| format!("Failed to get redis connection from pool: {}", e))?;
 
-    // Mappings are normally deleted once their proofs melt, but a proof that
-    // never redeems — redemption disabled, a mint permanently unreachable, a
-    // melt that keeps failing — would otherwise leave its key in Redis forever.
-    // Expire well past the redemption interval so a live mapping is never lost
-    // while an abandoned one still goes away on its own.
-    // The master's parse: a worker has no environment to read.
-    let interval = crate::CASHU_REDEEM_INTERVAL.get().copied().unwrap_or(0);
-    let ttl = ngx_l402_core::proof_mapping_ttl_secs(interval);
-
+    // No expiry. A missing mapping redeems to the default address, so a key
+    // that expired before its proofs melted would pay the tenant's funds to
+    // the operator. Keys are deleted once their proofs melt.
     for proof in proofs {
         let secret = proof.secret.to_string();
 
@@ -921,7 +915,7 @@ fn set_proof_to_lnurl(
         let proof_hash = hex::encode(hasher.finalize());
 
         let redis_key = format!("cashu:proof_lnurl:{}", proof_hash);
-        conn.set_ex::<_, _, ()>(&redis_key, &lnurl, ttl)
+        conn.set::<_, _, ()>(&redis_key, &lnurl)
             .map_err(|e| format!("Failed to set proof mapping: {}", e))?;
     }
 
@@ -1666,6 +1660,15 @@ pub async fn verify_cashu_token_p2pk(
         }
     };
 
+    // Map before storing: proofs are stored Unspent, and a redemption cycle that
+    // saw them before their mapping existed would pay them to the default
+    // address. A mapping for proofs that then fail to store is harmless.
+    if is_multi_tenant_enabled() {
+        if let Err(e) = set_proof_to_lnurl(proofs.clone(), lnurl_addr) {
+            warn!("⚠️ Failed to set proof-to-lnurl mapping: {}", e);
+        }
+    }
+
     // Store directly in database using update_proofs (same as receive_proofs does internally)
     // Pass empty vec for second parameter (no proofs to delete)
     if let Err(e) = wallet.localstore.update_proofs(proof_infos, vec![]).await {
@@ -1682,12 +1685,6 @@ pub async fn verify_cashu_token_p2pk(
             "Failed to store proofs in database: {}",
             e
         )));
-    }
-
-    if is_multi_tenant_enabled() {
-        if let Err(e) = set_proof_to_lnurl(proofs.clone(), lnurl_addr) {
-            warn!("⚠️ Failed to set proof-to-lnurl mapping: {}", e);
-        }
     }
 
     // Cache the raw token so an identical resubmission short-circuits at the top
@@ -2289,6 +2286,14 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                 } else {
                     wallet_clone.melt(&quote.id).await
                 }
+            } else if is_multi_tenant {
+                // Melt this tenant's proofs, not whatever the wallet selects.
+                // `melt` picks inputs from every unspent proof, so it could spend
+                // another tenant's proofs while this tenant's stay unspent with
+                // their mappings deleted below, and redeem to the default address.
+                wallet_clone
+                    .melt_proofs(&quote.id, proofs_to_melt.clone())
+                    .await
             } else {
                 wallet_clone.melt(&quote.id).await
             };
@@ -2327,6 +2332,22 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                             "⚠️ Failed to clean up proof mappings for {}: {}",
                             client_id, e
                         );
+                    }
+
+                    // The unused fee reserve comes back as new, unmapped proofs.
+                    // It is this tenant's money: map it, or the next cycle pays it
+                    // to the default address.
+                    if is_multi_tenant {
+                        if let Some(change) = result.change {
+                            if let Err(e) = set_proof_to_lnurl(change, Some(client_id.clone())) {
+                                let msg = format!(
+                                    "⚠️ Failed to map melt change for {}: {}",
+                                    client_id, e
+                                );
+                                warn!("{}", msg);
+                                cashu_redemption_logger::log_redemption(&msg);
+                            }
+                        }
                     }
                 }
                 Err(e) => {

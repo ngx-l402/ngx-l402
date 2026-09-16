@@ -1979,12 +1979,35 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                     (group_proofs.clone(), group_total_msat)
                 };
 
+            // When the selected proofs are melted as-is (multi-tenant, P2PK), the
+            // mint also charges its input fee on them, on top of the quote's
+            // amount and fee reserve. Hold it back too, or a mint with input
+            // fees rejects the same melt every cycle.
+            let input_fee_msat = if is_multi_tenant || is_p2pk_mode_enabled() {
+                match wallet_clone.get_proofs_fee(&proofs_to_melt).await {
+                    // Keyset fees are mint-supplied: saturate, never wrap.
+                    Ok(fee) if wallet.unit == cdk::nuts::CurrencyUnit::Sat => {
+                        u64::from(fee).saturating_mul(MSAT_PER_SAT)
+                    }
+                    Ok(fee) => u64::from(fee),
+                    Err(e) => {
+                        let msg = format!("❌ Failed to get input fee for {}: {}", client_id, e);
+                        error!("{}", msg);
+                        cashu_redemption_logger::log_redemption(&msg);
+                        continue;
+                    }
+                }
+            } else {
+                0
+            };
+
             // Calculate fee reserve (pure math lives in ngx_l402_core, unit-tested).
             let fee_reserve_selected_msat = ngx_l402_core::fee_reserve_msat(
                 selected_total_msat,
                 current_fee_reserve_percent,
                 current_min_fee_reserve_msat,
-            );
+            )
+            .saturating_add(input_fee_msat);
 
             if selected_total_msat <= fee_reserve_selected_msat {
                 let msg = format!(
@@ -2138,7 +2161,9 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                     info!("{}", msg);
                     cashu_redemption_logger::log_redemption(&msg);
 
-                    let required_total_msat = amount_msat.saturating_add(actual_fee_reserve_msat);
+                    let required_total_msat = amount_msat
+                        .saturating_add(actual_fee_reserve_msat)
+                        .saturating_add(input_fee_msat);
                     if selected_total_msat < required_total_msat {
                         let msg = format!(
                             "⚠️ Fee reserve insufficient for {}: {} msat < {} msat required",
@@ -2179,6 +2204,14 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                 } else {
                     wallet_clone.melt(&quote.id).await
                 }
+            } else if is_multi_tenant {
+                // Melt this tenant's proofs. `melt` selects inputs from every
+                // unspent proof in the wallet, so it could spend other tenants'
+                // proofs while this tenant's stay unspent, their mappings deleted
+                // below, and redeem to the default address next cycle.
+                wallet_clone
+                    .melt_proofs(&quote.id, proofs_to_melt.clone())
+                    .await
             } else {
                 wallet_clone.melt(&quote.id).await
             };

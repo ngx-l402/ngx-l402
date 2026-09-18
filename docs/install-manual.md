@@ -47,8 +47,10 @@ See [Environment Variables](./config-env-vars.md) for the complete reference.
 ```bash
 # One-time setup — persists across restarts
 sudo mkdir -p /var/lib/nginx
-sudo chown nginx:nginx /var/lib/nginx
-sudo chmod 755 /var/lib/nginx
+# Root owns it, nginx writes through the group, and the sticky bit keeps nginx
+# away from the root-owned wallet phrase — see Cashu eCash
+sudo chown root:nginx /var/lib/nginx
+sudo chmod 1770 /var/lib/nginx
 ```
 
 > The `cdk-sqlite` crate automatically creates the database file and tables on first run. Database location: `/var/lib/nginx/cashu_tokens.db`

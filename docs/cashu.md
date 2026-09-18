@@ -132,13 +132,16 @@ Environment=CASHU_MAX_PROOFS_PER_MELT=1000
 ```bash
 # One-time setup — persists across restarts
 sudo mkdir -p /var/lib/nginx
-sudo chown nginx:nginx /var/lib/nginx
-sudo chmod 750 /var/lib/nginx
+sudo chown root:nginx /var/lib/nginx
+sudo chmod 1770 /var/lib/nginx
 ```
 
 The `cdk-sqlite` crate automatically creates the database file and tables. Database location: `/var/lib/nginx/cashu_tokens.db`
 
 > [!NOTE]
 > This directory holds the token database and, when the mnemonic is
-> auto-generated, `wallet.mnemonic` (mode `0600`). Keep it owned by the nginx
-> user, and include both files in your encrypted backups.
+> auto-generated, `wallet.mnemonic` (mode `0600`). Root owns it and nginx writes
+> through the group; the sticky bit (the `1` in `1770`) lets nginx delete or
+> rename only its own files, so it can't remove or replace the phrase. The module
+> refuses a phrase file it doesn't own, and the Docker image sets all this up on
+> every start. Include both files in your encrypted backups.

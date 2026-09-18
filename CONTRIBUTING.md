@@ -130,6 +130,11 @@ git rebase main
 cargo fmt              # Format code
 ```
 
+CI also runs `cargo machete` (unused-dependency check). If it flags a
+dependency that is used in a way the scanner cannot see (build scripts, code
+generated into `OUT_DIR`), add it to `[package.metadata.cargo-machete]` in
+that crate's `Cargo.toml`.
+
 **Code style**:
 - Follow [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/)
 - Write idiomatic Rust (iterators over loops, avoid unnecessary cloning)

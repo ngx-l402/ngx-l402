@@ -171,6 +171,7 @@ Environment=CASHU_REDEMPTION_INTERVAL_SECS=3600  # default: 1 hour
 > - If unset, one is generated and saved beside the DB on first run — **back it up**
 > - On startup the module records a fingerprint of the seed next to the DB and refuses to start if a later mnemonic doesn't match (so a changed/typo'd phrase can't silently orphan a funded wallet); delete the `wallet.fingerprint` file to switch wallets intentionally
 > - Never commit it to Git; keep it in a secrets manager
+> - A phrase or fingerprint *file* is trusted only if the user nginx's master runs as owns it and no one else can write it; anything else is refused. Keep its directory root-owned and sticky (`chown root:nginx`, `chmod 1770`), as the Docker image does: nginx then writes the database but can't delete, rename or replace the phrase. The module warns at startup when another user could delete or rename one. `CASHU_WALLET_MNEMONIC_FILE` may be a symlink, as Kubernetes secret mounts are; the default `wallet.mnemonic` and the fingerprint may not
 
 ### Redemption Fee Handling
 
@@ -271,8 +272,8 @@ Environment=RUST_LOG=info
 # For module-specific debug logs:
 Environment=RUST_LOG=ngx_l402_lib=debug,info
 
-# Log per-request performance timing (set to any non-empty value to enable)
-Environment=L402_PERF_LOG=1
+# Log per-request performance timing at debug level (only `true` enables it)
+Environment=L402_PERF_LOG=true
 ```
 
 ---

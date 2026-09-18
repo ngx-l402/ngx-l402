@@ -29,7 +29,8 @@ fn open_log_file() -> std::io::Result<std::fs::File> {
 ///
 /// Called from `init_module`, in the master: the log directory is root-owned,
 /// but redemption writes from a worker. Ownership follows the Cashu data
-/// directory, which the operator already sets — the same rule the database uses.
+/// directory, which the operator already sets — the same rule the database uses,
+/// group-writable too: a root-owned data directory names the workers by group.
 pub fn prepare_log_file(data_dir_owner: Option<(u32, u32)>) {
     // fchown/fchmod on the descriptor, not the path — see `open_log_file`.
     let file = match open_log_file() {
@@ -49,7 +50,7 @@ pub fn prepare_log_file(data_dir_owner: Option<(u32, u32)>) {
         if let Some((uid, gid)) = data_dir_owner {
             let _ = std::os::unix::fs::fchown(&file, Some(uid), Some(gid));
         }
-        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o640));
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o660));
     }
 }
 

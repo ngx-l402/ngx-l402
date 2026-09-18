@@ -3,6 +3,11 @@ name = "grpc-server"
 version = "0.1.0"
 edition = "2021"
 
+[package.metadata.cargo-machete]
+# prost is referenced by tonic's generated code (built into OUT_DIR, which
+# machete cannot scan); tonic-build is used from build.rs.
+ignored = ["prost", "tonic-build"]
+
 [dependencies]
 tonic = "0.10"
 tonic-reflection = "0.10"

@@ -41,12 +41,24 @@ COPY index.html /usr/share/nginx/html/shadow/index.html
 COPY index.html /usr/share/nginx/html/tenant1/index.html
 COPY index.html /usr/share/nginx/html/tenant2/index.html
 
-# Cashu data dir, owned by nginx as in the manual install. A mounted volume
-# hides the ownership set at build time, so the entrypoint sets it again.
+# Cashu data dir. Root owns it and nginx writes through the group; the sticky
+# bit lets nginx delete or rename only its own files, so the root-owned wallet
+# phrase is out of its reach. A mounted volume hides ownership set at build
+# time, so the entrypoint sets it on every start.
 RUN printf '%s\n' \
     '#!/bin/sh' \
     'd=$(dirname "${CASHU_DB_PATH:-/app/data/cashu_tokens.db}")' \
-    'mkdir -p "$d" && chown -R nginx:nginx "$d" && chmod 750 "$d"' \
+    'mkdir -p "$d" || exit 1' \
+    '# Earlier images gave nginx everything, wallet files included. Take those' \
+    '# back once, while nginx still owns the directory: after that, a wallet' \
+    '# file nginx creates stays nginx-owned and the module refuses it.' \
+    'if [ "$(stat -c %U "$d")" != root ]; then' \
+    '  chown -h root:root "$d/wallet.mnemonic" "$d/wallet.fingerprint" 2>/dev/null' \
+    'fi' \
+    '# Only the database files nginx writes, and no hard link: one can be another' \
+    '# name for the root-owned phrase.' \
+    'find "$d" -maxdepth 1 -name "$(basename "${CASHU_DB_PATH:-/app/data/cashu_tokens.db}")*" -links 1 -exec chown -h nginx:nginx {} + || exit 1' \
+    'chown root:nginx "$d" && chmod 1770 "$d"' \
     > /docker-entrypoint.d/05-cashu-data-perms.sh \
     && chmod +x /docker-entrypoint.d/05-cashu-data-perms.sh
 

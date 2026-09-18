@@ -726,12 +726,7 @@ pub fn cache_settled_preimage(payment_hash: &[u8], preimage: &[u8]) -> Result<()
     let preimage_hex = hex::encode(preimage);
     let redis_key = format!("l402:settled:{}", hash_hex);
 
-    let ttl_seconds = std::env::var("L402_PREIMAGE_TTL_SECONDS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(86400);
-
-    conn.set_ex::<_, _, ()>(&redis_key, preimage_hex, ttl_seconds)
+    conn.set_ex::<_, _, ()>(&redis_key, preimage_hex, get_preimage_ttl())
         .map_err(|e| format!("Failed to cache settled preimage: {}", e))?;
 
     info!(
@@ -2670,6 +2665,11 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
     }
 
     manifest::init_env_snapshot();
+
+    // Resolve these before fork: nginx clears the environment in workers.
+    get_preimage_ttl();
+    get_cashu_token_ttl();
+    perf_log_enabled();
 
     // Cache the LN backend type string for structured log lines. We can't
     // read env vars from worker threads, so snapshot it here.

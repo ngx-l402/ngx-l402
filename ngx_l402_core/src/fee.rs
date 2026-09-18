@@ -32,6 +32,19 @@ pub fn fee_reserve_msat(amount_msat: u64, percent: f64, min_reserve_msat: u64) -
     percentage_fee.max(min_reserve_msat)
 }
 
+/// Total held back from a melt of fixed proofs, in millisatoshis: the Lightning
+/// fee reserve from [`fee_reserve_msat`] plus the mint's input fee on those
+/// proofs. The input fee is mint-supplied, so the sum saturates rather than
+/// wrapping.
+pub fn melt_reserve_msat(
+    amount_msat: u64,
+    percent: f64,
+    min_reserve_msat: u64,
+    input_fee_msat: u64,
+) -> u64 {
+    fee_reserve_msat(amount_msat, percent, min_reserve_msat).saturating_add(input_fee_msat)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,6 +82,32 @@ mod tests {
     fn handles_large_amounts() {
         // 1% of 1 BTC (in msat) = 1_000_000_000 msat; no overflow, exact.
         assert_eq!(fee_reserve_msat(100_000_000_000, 1.0, 0), 1_000_000_000);
+    }
+
+    #[test]
+    fn melt_reserve_adds_input_fee_to_percentage_reserve() {
+        // 1% of 1_000_000 = 10_000, plus a 2 sat (2_000 msat) input fee.
+        assert_eq!(melt_reserve_msat(1_000_000, 1.0, 1_000, 2_000), 12_000);
+    }
+
+    #[test]
+    fn melt_reserve_adds_input_fee_on_top_of_the_floor() {
+        // 1% of 10_000 = 100, floor 5_000 wins, then the input fee is added.
+        assert_eq!(melt_reserve_msat(10_000, 1.0, 5_000, 1_000), 6_000);
+    }
+
+    #[test]
+    fn melt_reserve_without_input_fee_matches_fee_reserve() {
+        assert_eq!(
+            melt_reserve_msat(1_000_000, 1.0, 1_000, 0),
+            fee_reserve_msat(1_000_000, 1.0, 1_000)
+        );
+    }
+
+    /// A hostile mint's input fee must not wrap the total to a small number.
+    #[test]
+    fn melt_reserve_saturates_rather_than_wrapping() {
+        assert_eq!(melt_reserve_msat(1_000_000, 1.0, 1_000, u64::MAX), u64::MAX);
     }
 
     #[test]

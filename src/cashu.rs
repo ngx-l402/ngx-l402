@@ -2218,10 +2218,19 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
             let input_fee_msat = if is_multi_tenant || is_p2pk_mode_enabled() {
                 match wallet_clone.get_proofs_fee(&proofs_to_melt).await {
                     // Keyset fees are mint-supplied: saturate, never wrap.
-                    Ok(fee) if wallet.unit == cdk::nuts::CurrencyUnit::Sat => {
-                        u64::from(fee).saturating_mul(MSAT_PER_SAT)
-                    }
-                    Ok(fee) => u64::from(fee),
+                    Ok(fee) => match wallet.unit {
+                        cdk::nuts::CurrencyUnit::Sat => ngx_l402_core::sat_to_msat(u64::from(fee)),
+                        cdk::nuts::CurrencyUnit::Msat => u64::from(fee),
+                        ref unit => {
+                            let msg = format!(
+                                "❌ Unsupported wallet unit {} for input fee of {}, skipping",
+                                unit, client_id
+                            );
+                            error!("{}", msg);
+                            cashu_redemption_logger::log_redemption(&msg);
+                            continue;
+                        }
+                    },
                     Err(e) => {
                         let msg = format!("❌ Failed to get input fee for {}: {}", client_id, e);
                         error!("{}", msg);
@@ -2234,12 +2243,12 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
             };
 
             // Calculate fee reserve (pure math lives in ngx_l402_core, unit-tested).
-            let fee_reserve_selected_msat = ngx_l402_core::fee_reserve_msat(
+            let fee_reserve_selected_msat = ngx_l402_core::melt_reserve_msat(
                 selected_total_msat,
                 current_fee_reserve_percent,
                 current_min_fee_reserve_msat,
-            )
-            .saturating_add(input_fee_msat);
+                input_fee_msat,
+            );
 
             if selected_total_msat <= fee_reserve_selected_msat {
                 let msg = format!(

@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-6b30a7d8.js";
+            window.path_to_searchindex_js = "searchindex-e802f3f3.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-b5966016.js"></script>
+        <script src="toc-c42dc3ae.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -225,7 +225,7 @@ which payment backends are accepted — without any out-of-band integration.</p>
         "type": "static",
         "amount_msat": 10000
       },
-      "caveats_required": ["RequestPath = /protected"]
+      "caveats_required": ["RequestPath = /protected", "RequestMethod = &lt;METHOD&gt;"]
     },
     {
       "path": "/rate-limited",
@@ -233,7 +233,7 @@ which payment backends are accepted — without any out-of-band integration.</p>
         "type": "static",
         "amount_msat": 10000
       },
-      "caveats_required": ["RequestPath = /rate-limited"],
+      "caveats_required": ["RequestPath = /rate-limited", "RequestMethod = &lt;METHOD&gt;"],
       "rate_limit": {
         "max_requests": 2,
         "window_secs": 60
@@ -253,13 +253,14 @@ which payment backends are accepted — without any out-of-band integration.</p>
 <tr><td><code>version</code></td><td>constant <code>"1"</code></td><td>Schema version. Bumped on breaking changes; agents should reject unknown majors.</td></tr>
 <tr><td><code>service.name</code>, <code>service.description</code>, <code>service.operator</code>, <code>service.contact</code></td><td>env vars <code>L402_SERVICE_NAME</code>, <code>L402_SERVICE_DESCRIPTION</code>, <code>L402_SERVICE_OPERATOR</code>, <code>L402_SERVICE_CONTACT</code></td><td>Optional, omitted when unset.</td></tr>
 <tr><td><code>payment_methods[].type</code></td><td><code>lightning</code> or <code>cashu</code></td><td>Which payment rail this method describes.</td></tr>
-<tr><td><code>payment_methods[].backend</code></td><td>env var <code>LN_CLIENT_TYPE</code></td><td><code>LNURL</code>, <code>LND</code>, <code>CLN</code>, <code>NWC</code>, <code>BOLT12</code>, <code>ECLAIR</code>, <code>LNC</code>.</td></tr>
+<tr><td><code>payment_methods[].backend</code></td><td>env var <code>LN_CLIENT_TYPE</code></td><td><code>LNURL</code>, <code>LND</code>, <code>CLN</code>, <code>NWC</code>, <code>BOLT12</code>, <code>ECLAIR</code> (LNC shows as <code>LND</code>).</td></tr>
 <tr><td><code>payment_methods[].address</code></td><td>env var <code>LNURL_ADDRESS</code> (LNURL backends only)</td><td>Server-default LN address. May be overridden per-route via <code>lnurl_addr</code>.</td></tr>
 <tr><td><code>payment_methods[].mints</code></td><td>env var <code>CASHU_WHITELISTED_MINTS</code></td><td>Allowed Cashu mints (when Cashu is enabled).</td></tr>
-<tr><td><code>payment_methods[].p2pk_supported</code></td><td>env var <code>CASHU_P2PK_MODE</code></td><td>Whether NUT-24 P2PK Cashu is enabled.</td></tr>
+<tr><td><code>payment_methods[].p2pk_supported</code></td><td>env var <code>CASHU_P2PK_MODE</code></td><td><code>true</code> when NUT-24 P2PK Cashu is enabled; omitted otherwise.</td></tr>
+<tr><td><code>payment_methods[].challenge_header</code></td><td>constant <code>X-Cashu</code></td><td>The header a <code>402</code> carries the Cashu payment request in (NUT-24).</td></tr>
 <tr><td><code>routes[].path</code></td><td><code>location</code> directive</td><td>URL path served by this route.</td></tr>
 <tr><td><code>routes[].price.amount_msat</code></td><td><code>l402_amount_msat_default</code></td><td>Base price after <code>merge_loc_conf</code>.</td></tr>
-<tr><td><code>routes[].caveats_required</code></td><td>derived</td><td>Caveats the issued macaroon will carry. Today always <code>[RequestPath = &lt;path&gt;]</code>.</td></tr>
+<tr><td><code>routes[].caveats_required</code></td><td>derived</td><td>Caveats that bind the macaroon to the request: <code>RequestPath = &lt;path&gt;</code> (or <code>Realm = &lt;name&gt;</code> with <code>l402_realm</code>) and <code>RequestMethod = &lt;METHOD&gt;</code>, filled in with the request’s method. With <code>l402_macaroon_timeout</code> set, the macaroon also carries <code>ExpiresAt</code>, given here as <code>macaroon_timeout_secs</code>.</td></tr>
 <tr><td><code>routes[].macaroon_timeout_secs</code></td><td><code>l402_macaroon_timeout</code></td><td>Omitted when <code>0</code> (no expiry).</td></tr>
 <tr><td><code>routes[].lnurl_addr</code></td><td><code>l402_lnurl_addr</code></td><td>Per-route LNURL override for multi-tenant deployments.</td></tr>
 <tr><td><code>routes[].rate_limit</code></td><td><code>l402_invoice_rate_limit</code></td><td>Server-side invoice rate limit applied before challenge issuance.</td></tr>
@@ -371,7 +372,7 @@ the difference between L402 being a protocol and L402 being a
 
         <!-- Custom JS scripts -->
         <script src="mermaid-eefea253.min.js"></script>
-        <script src="mermaid-init-ccf746f1.js"></script>
+        <script src="mermaid-init-53b67c53.js"></script>
 
 
 

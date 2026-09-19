@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-6b30a7d8.js";
+            window.path_to_searchindex_js = "searchindex-e802f3f3.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-b5966016.js"></script>
+        <script src="toc-c42dc3ae.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -213,22 +213,17 @@
 <h3 id="5-set-up-sqlite-database-directory-if-using-cashu"><a class="header" href="#5-set-up-sqlite-database-directory-if-using-cashu">5. Set Up SQLite Database Directory (if using Cashu)</a></h3>
 <pre><code class="language-bash"># One-time setup — persists across restarts
 sudo mkdir -p /var/lib/nginx
-sudo chown nginx:nginx /var/lib/nginx
-sudo chmod 755 /var/lib/nginx
+# Root owns it, nginx writes through the group, and the sticky bit keeps nginx
+# away from the root-owned wallet phrase — see Cashu eCash
+sudo chown root:nginx /var/lib/nginx
+sudo chmod 1770 /var/lib/nginx
 </code></pre>
 <blockquote>
 <p>The <code>cdk-sqlite</code> crate automatically creates the database file and tables on first run. Database location: <code>/var/lib/nginx/cashu_tokens.db</code></p>
 </blockquote>
-<blockquote>
-<p><strong>Note</strong>: Both <code>restart</code> and <code>reload</code> are needed to ensure the Cashu redemption task starts properly.</p>
-</blockquote>
 <h3 id="6-restart-nginx"><a class="header" href="#6-restart-nginx">6. Restart Nginx</a></h3>
 <pre><code class="language-bash">sudo systemctl restart nginx
-sudo systemctl reload nginx
 </code></pre>
-<blockquote>
-<p><strong>Note</strong>: Both <code>restart</code> and <code>reload</code> are needed to ensure the Cashu redemption task starts properly.</p>
-</blockquote>
 
                     </main>
 
@@ -282,7 +277,7 @@ sudo systemctl reload nginx
 
         <!-- Custom JS scripts -->
         <script src="mermaid-eefea253.min.js"></script>
-        <script src="mermaid-init-ccf746f1.js"></script>
+        <script src="mermaid-init-53b67c53.js"></script>
 
 
 

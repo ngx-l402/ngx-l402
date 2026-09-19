@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-6b30a7d8.js";
+            window.path_to_searchindex_js = "searchindex-e802f3f3.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-b5966016.js"></script>
+        <script src="toc-c42dc3ae.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -221,7 +221,8 @@ interface, set <code>requirepass</code>, and limit write access to tenant config
 Environment=L402_PREIMAGE_TTL_SECONDS=86400      # Default: 24 hours
 Environment=L402_CASHU_TOKEN_TTL_SECONDS=86400   # Default: 24 hours
 </code></pre>
-<p><strong>How it works</strong>: After successful verification, SHA256 hashes of preimages/tokens are stored in Redis with a TTL. Subsequent use of the same credential is rejected with <code>401</code>. Protection persists across Nginx restarts and works with multiple Nginx instances.</p>
+<p><strong>How it works</strong>: After successful verification, a SHA-256 hash of the preimage or token is stored in Redis, and reusing the credential is rejected with <code>401</code>. Protection persists across Nginx restarts and works with multiple Nginx instances.</p>
+<p>A preimage’s marker lives for <code>L402_PREIMAGE_TTL_SECONDS</code> or the macaroon’s own timeout, whichever is longer. On routes with <code>l402_macaroon_timeout 0</code> it never expires, because neither does the macaroon. A Cashu token’s marker lives for <code>L402_CASHU_TOKEN_TTL_SECONDS</code>.</p>
 <hr>
 <h2 id="invoice-rate-limiting"><a class="header" href="#invoice-rate-limiting">Invoice Rate Limiting</a></h2>
 <p>Limits how many invoices (402 responses) a single IP can request per route within a time window. This protects your Lightning node from invoice-spam without affecting clients that hold a valid token.</p>
@@ -248,6 +249,25 @@ Environment=L402_CASHU_TOKEN_TTL_SECONDS=86400   # Default: 24 hours
 <p>Requests that exceed the limit receive <code>429 Too Many Requests</code> with a <code>Retry-After</code> header set to the window duration.</p>
 <p>The rate limit only applies to unauthenticated requests (those that would result in a 402). Requests presenting a valid L402 token bypass it entirely.</p>
 <p><strong>How it works</strong>: Uses a fixed-window Redis counter (<code>INCR</code> + <code>EXPIRE</code> on first hit) keyed by IP and path. Fails open — if Redis is unavailable, rate limiting is disabled and traffic passes through normally.</p>
+<hr>
+<h2 id="keys-the-module-writes"><a class="header" href="#keys-the-module-writes">Keys the Module Writes</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Key</th><th>Holds</th><th>Expires</th></tr>
+</thead>
+<tbody>
+<tr><td><code>&lt;path&gt;</code></td><td>Dynamic price you set</td><td>Never — you manage it</td></tr>
+<tr><td><code>lnurl:&lt;path&gt;</code></td><td>Per-route LNURL override you set</td><td>Never — you manage it</td></tr>
+<tr><td><code>l402:preimage:&lt;sha256&gt;</code></td><td>Spent Lightning preimage</td><td>See <a href="#replay-attack-prevention">Replay Attack Prevention</a></td></tr>
+<tr><td><code>l402:cashu_token:&lt;sha256&gt;</code></td><td>Spent Cashu token: a hash of the token, or in P2PK mode of its proofs, so a re-encoded token still matches</td><td><code>L402_CASHU_TOKEN_TTL_SECONDS</code></td></tr>
+<tr><td><code>l402:settled:&lt;payment hash&gt;</code></td><td>Settled preimage cached by auto-detect</td><td><code>L402_PREIMAGE_TTL_SECONDS</code></td></tr>
+<tr><td><code>l402:invoice_rate:&lt;sha256&gt;</code></td><td>Invoice rate-limit counter for a client and route</td><td>The rate-limit window</td></tr>
+<tr><td><code>cashu:proof_lnurl:&lt;sha256&gt;</code></td><td>Which tenant a Cashu proof belongs to</td><td>20 redemption intervals — see <a href="./config-multi-tenant.html">Multi-Tenant</a></td></tr>
+</tbody>
+</table>
+</div>
+<p>Run Redis with <code>maxmemory-policy noeviction</code>: an evicted replay marker makes its credential usable again.</p>
 
                     </main>
 
@@ -301,7 +321,7 @@ Environment=L402_CASHU_TOKEN_TTL_SECONDS=86400   # Default: 24 hours
 
         <!-- Custom JS scripts -->
         <script src="mermaid-eefea253.min.js"></script>
-        <script src="mermaid-init-ccf746f1.js"></script>
+        <script src="mermaid-init-53b67c53.js"></script>
 
 
 

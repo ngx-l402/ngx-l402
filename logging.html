@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-6b30a7d8.js";
+            window.path_to_searchindex_js = "searchindex-e802f3f3.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-b5966016.js"></script>
+        <script src="toc-c42dc3ae.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -207,6 +207,13 @@ Environment=RUST_LOG=debug
 # Module-specific debug logs only (reduces noise)
 Environment=RUST_LOG=ngx_l402_lib=debug,info
 </code></pre>
+<hr>
+<h2 id="structured-json-logs"><a class="header" href="#structured-json-logs">Structured JSON Logs</a></h2>
+<p>Set <code>l402_log_format json;</code> on a protected location to emit one JSON line per L402 access event, alongside the usual text logs. Field names match the dry-run line, so the same <code>jq</code> / log-aggregator queries work for both:</p>
+<pre><code class="language-json">{"event":"l402_verify","route":"/api/data","backend":"LND","client_ip":"203.0.113.7","auth_state":"valid","method":"lightning","latency_ms":42}
+</code></pre>
+<p>Events: <code>l402_verify</code> (<code>auth_state</code> valid or invalid, <code>method</code> when known), <code>l402_challenge</code> (a 402 was issued, with <code>price_msat</code> and <code>price_source</code>), <code>l402_challenge_error</code> (<code>error</code>: <code>backend</code>, <code>timeout</code>, or <code>panic</code>), and <code>l402_rate_limited</code> (a 429, with <code>window_secs</code>).</p>
+<p>Off by default (<code>text</code>), so existing deployments see no change. The directive is per-location: an inner <code>l402_log_format text;</code> overrides an outer <code>json</code>.</p>
 
                     </main>
 
@@ -260,7 +267,7 @@ Environment=RUST_LOG=ngx_l402_lib=debug,info
 
         <!-- Custom JS scripts -->
         <script src="mermaid-eefea253.min.js"></script>
-        <script src="mermaid-init-ccf746f1.js"></script>
+        <script src="mermaid-init-53b67c53.js"></script>
 
 
 

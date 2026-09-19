@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-6b30a7d8.js";
+            window.path_to_searchindex_js = "searchindex-e802f3f3.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-b5966016.js"></script>
+        <script src="toc-c42dc3ae.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -182,6 +182,7 @@
                     <main>
                         <h1 id="environment-variables"><a class="header" href="#environment-variables">Environment Variables</a></h1>
 <p>All configuration is done via environment variables set in <code>nginx.service</code> (typically at <code>/lib/systemd/system/nginx.service</code>).</p>
+<p>They are read once, when nginx starts. <code>nginx -s reload</code> keeps the old values, so restart nginx after changing one.</p>
 <pre><code class="language-ini">[Service]
 ...
 Environment=VAR_NAME=value
@@ -194,7 +195,18 @@ Environment=VAR_NAME=value
 <tr><th>Variable</th><th>Required</th><th>Description</th></tr>
 </thead>
 <tbody>
-<tr><td><code>LN_CLIENT_TYPE</code></td><td>✅</td><td>One of: <code>LND</code>, <code>CLN</code>, <code>LNURL</code>, <code>NWC</code>, <code>BOLT12</code>, <code>ECLAIR</code></td></tr>
+<tr><td><code>LN_CLIENT_TYPE</code></td><td>—</td><td>One of: <code>LND</code>, <code>CLN</code>, <code>LNURL</code>, <code>NWC</code>, <code>BOLT12</code>, <code>ECLAIR</code>; defaults to <code>LNURL</code>. For LNC, use <code>LND</code> with <code>LNC_PAIRING_PHRASE</code>. nginx refuses to start on any other value</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="root-key"><a class="header" href="#root-key">Root Key</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Variable</th><th>Required</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>ROOT_KEY</code></td><td>✅</td><td>Secret that signs macaroons, at least 32 characters (<code>openssl rand -hex 32</code>). nginx refuses to start without it, and changing it invalidates every token already issued</td></tr>
 </tbody>
 </table>
 </div>
@@ -206,6 +218,8 @@ Environment=MACAROON_FILE_PATH=/path/to/macaroon
 Environment=CERT_FILE_PATH=/path/to/cert
 Environment=ROOT_KEY=your-root-key
 </code></pre>
+<p>nginx’s worker user (<code>nginx</code> in the shipped config) must be able to read
+<code>MACAROON_FILE_PATH</code> and <code>CERT_FILE_PATH</code>.</p>
 <h2 id="lnd-via-lightning-node-connect-lnc"><a class="header" href="#lnd-via-lightning-node-connect-lnc">LND via Lightning Node Connect (LNC)</a></h2>
 <pre><code class="language-bash">Environment=LN_CLIENT_TYPE=LND
 Environment=LNC_PAIRING_PHRASE=&lt;10-word-mnemonic-from-litd&gt;
@@ -217,11 +231,15 @@ Environment=ROOT_KEY=your-root-key
 Environment=CLN_LIGHTNING_RPC_FILE_PATH=/path/to/lightning-rpc
 Environment=ROOT_KEY=your-root-key
 </code></pre>
+<p>nginx’s worker user must be able to reach the socket: share a group with CLN and
+start it with <code>rpc-file-mode=0660</code>. Avoid <code>0666</code> outside a test setup — it lets
+every local user control the node.</p>
 <h2 id="lnurl"><a class="header" href="#lnurl">LNURL</a></h2>
 <pre><code class="language-bash">Environment=LN_CLIENT_TYPE=LNURL
 Environment=LNURL_ADDRESS=username@your-lnurl-server.com
 Environment=ROOT_KEY=your-root-key
 </code></pre>
+<p>The username must match the LUD-16 charset (<code>a-z 0-9 - _ .</code>); addresses like <code>user+tag@example.com</code> are rejected since l402_middleware 2.3.4.</p>
 <h2 id="nwc-nostr-wallet-connect"><a class="header" href="#nwc-nostr-wallet-connect">NWC (Nostr Wallet Connect)</a></h2>
 <pre><code class="language-bash">Environment=LN_CLIENT_TYPE=NWC
 Environment=NWC_URI=nostr+walletconnect://&lt;pubkey&gt;?relay=&lt;relay_url&gt;&amp;secret=&lt;secret&gt;
@@ -236,10 +254,11 @@ Environment=ROOT_KEY=your-root-key
 <blockquote>
 <p><strong>How it works</strong>: When a client requests a protected resource, the module
 connects to your <strong>CLN node</strong> via the Unix socket at <code>CLN_LIGHTNING_RPC_FILE_PATH</code>
-and calls <code>fetchinvoice</code> to derive a fresh single-use <strong>BOLT11 invoice</strong> from
-the reusable BOLT12 offer. The node resolves the offer’s embedded node ID and
+and calls <code>fetchinvoice</code> to get a new <strong>BOLT12 invoice</strong> for each request from
+the reusable offer. The node resolves the offer’s embedded node ID and
 negotiates the payment parameters over the Lightning network automatically.
-<code>CLN_LIGHTNING_RPC_FILE_PATH</code> is therefore <strong>required</strong> alongside <code>BOLT12_OFFER</code>.</p>
+<code>CLN_LIGHTNING_RPC_FILE_PATH</code> is therefore <strong>required</strong> alongside <code>BOLT12_OFFER</code>,
+with the same socket access as <code>CLN</code>.</p>
 </blockquote>
 <h2 id="eclair"><a class="header" href="#eclair">Eclair</a></h2>
 <pre><code class="language-bash">Environment=LN_CLIENT_TYPE=ECLAIR
@@ -259,6 +278,15 @@ error is logged. Never use a well-known or placeholder password in production.</
 in-process caching only — it is lost on restart and does not work across
 multiple nginx workers. Multi-worker deployments <strong>require</strong> Redis.</p>
 </blockquote>
+<blockquote>
+<p><strong>Not configuring Redis and Redis being down are different.</strong> Leaving
+<code>REDIS_URL</code> unset is a choice, and the module degrades to the per-worker cache
+above. A <code>REDIS_URL</code> that is set but unreachable is an outage: Lightning
+credentials are refused with <strong>503</strong> and P2PK Cashu tokens with <strong>500</strong> until
+Redis returns, since an attacker who can take Redis down would otherwise reuse
+a single payment without limit. Standard-mode Cashu tokens are still accepted:
+the mint swap already rejects a spent token.</p>
+</blockquote>
 <pre><code class="language-bash">Environment=REDIS_URL=redis://127.0.0.1:6379
 
 # Connection pool size (default: 4)
@@ -271,11 +299,9 @@ Environment=L402_PREIMAGE_TTL_SECONDS=86400
 Environment=L402_CASHU_TOKEN_TTL_SECONDS=86400
 </code></pre>
 <h3 id="setting-ttl-to-infinite-permanent-replay-protection"><a class="header" href="#setting-ttl-to-infinite-permanent-replay-protection">Setting TTL to “infinite” (permanent replay protection)</a></h3>
-<p>The module stores spent preimages and Cashu tokens in Redis using
-<code>SET NX EX &lt;seconds&gt;</code>. Redis requires a positive integer for <code>EX</code> — there is
-no built-in “never expire” option via this command.</p>
-<p>To achieve <strong>permanent</strong> replay protection (strongly recommended in production),
-set the TTL to a very large value:</p>
+<p>A preimage marker already never expires on routes with <code>l402_macaroon_timeout 0</code>,
+and otherwise outlives the macaroon. Cashu markers always expire after
+<code>L402_CASHU_TOKEN_TTL_SECONDS</code>. For permanent protection, set a very large value:</p>
 <pre><code class="language-bash"># ~68 years — effectively permanent
 Environment=L402_PREIMAGE_TTL_SECONDS=2147483647
 Environment=L402_CASHU_TOKEN_TTL_SECONDS=2147483647
@@ -284,8 +310,8 @@ Environment=L402_CASHU_TOKEN_TTL_SECONDS=2147483647
 <p><strong>Trade-off</strong>: Permanent keys accumulate in Redis indefinitely. For a busy
 API with many unique tokens this will grow Redis memory over time. Size each
 key at ~100 bytes; 1 million spent tokens ≈ 100 MB.</p>
-<p><strong>Do not set <code>0</code></strong> — Redis rejects <code>EX 0</code> with an error, which causes the
-module to fail-open and skip the replay check entirely.</p>
+<p><strong>Do not set <code>0</code></strong>: Redis rejects <code>EX 0</code>, so every P2PK Cashu token is refused
+with <code>500</code>, and auto-detect stops caching settled preimages.</p>
 </blockquote>
 <hr>
 <h2 id="cashu-ecash"><a class="header" href="#cashu-ecash">Cashu eCash</a></h2>
@@ -313,6 +339,7 @@ Environment=CASHU_REDEMPTION_INTERVAL_SECS=3600  # default: 1 hour
 <li>If unset, one is generated and saved beside the DB on first run — <strong>back it up</strong></li>
 <li>On startup the module records a fingerprint of the seed next to the DB and refuses to start if a later mnemonic doesn’t match (so a changed/typo’d phrase can’t silently orphan a funded wallet); delete the <code>wallet.fingerprint</code> file to switch wallets intentionally</li>
 <li>Never commit it to Git; keep it in a secrets manager</li>
+<li>A phrase or fingerprint <em>file</em> is trusted only if the user nginx’s master runs as owns it and no one else can write it; anything else is refused. Keep its directory root-owned and sticky (<code>chown root:nginx</code>, <code>chmod 1770</code>), as the Docker image does: nginx then writes the database but can’t delete, rename or replace the phrase. The module warns at startup when another user could delete or rename one. <code>CASHU_WALLET_MNEMONIC_FILE</code> may be a symlink, as Kubernetes secret mounts are; the default <code>wallet.mnemonic</code> and the fingerprint may not</li>
 </ul>
 </blockquote>
 <h3 id="redemption-fee-handling"><a class="header" href="#redemption-fee-handling">Redemption Fee Handling</a></h3>
@@ -363,24 +390,6 @@ the forged-proof window above.</li>
 proofs authoritatively.</li>
 </ul>
 </blockquote>
-<blockquote>
-<p><strong>🔒 NUT-12 DLEQ (<code>CASHU_REQUIRE_DLEQ</code>)</strong>: In P2PK mode, tokens are verified
-on a fast path that <strong>skips the mint swap</strong> for lower latency. DLEQ proofs
-(NUT-12) are what let us confirm offline — using only cached mint keysets —
-that each proof was actually signed by the whitelisted mint. With this check
-off, a forger could submit correctly-shaped, mint-whitelisted proofs that the
-mint never signed and get free service (the operator only finds out at
-redemption time, when the melt fails).</p>
-<ul>
-<li><strong>Default <code>true</code></strong>: a proof with no DLEQ data is rejected. Modern Cashu
-wallets include DLEQ by default, so this is safe.</li>
-<li>Set <code>CASHU_REQUIRE_DLEQ=false</code> only as a temporary safety valve if a
-real-world wallet ships DLEQ-less tokens. This is <strong>insecure</strong> and re-opens
-the forged-proof window above.</li>
-<li>The standard (non-P2PK) mode is unaffected: its mint swap already validates
-proofs authoritatively.</li>
-</ul>
-</blockquote>
 <p>See <a href="./cashu.html">Cashu eCash</a> for a full explanation of Standard vs P2PK mode and redemption fee examples.</p>
 <hr>
 <h2 id="lnd-via-socks5--tor-proxy"><a class="header" href="#lnd-via-socks5--tor-proxy">LND via SOCKS5 / Tor proxy</a></h2>
@@ -403,8 +412,8 @@ Environment=L402_SERVICE_CONTACT=ops@example.com
 # For module-specific debug logs:
 Environment=RUST_LOG=ngx_l402_lib=debug,info
 
-# Log per-request performance timing (set to any non-empty value to enable)
-Environment=L402_PERF_LOG=1
+# Log per-request performance timing at debug level (only `true` enables it)
+Environment=L402_PERF_LOG=true
 </code></pre>
 <hr>
 <h2 id="nginx-location-directives"><a class="header" href="#nginx-location-directives">Nginx Location Directives</a></h2>
@@ -416,19 +425,74 @@ Environment=L402_PERF_LOG=1
 </thead>
 <tbody>
 <tr><td><code>l402</code></td><td>boolean¹</td><td><code>off</code></td><td>Enable L402 protection for this location</td></tr>
-<tr><td><code>l402_amount_msat_default</code></td><td>integer</td><td>—</td><td>Price in millisatoshis (overridden by Redis dynamic pricing)</td></tr>
+<tr><td><code>l402_amount_msat_default</code></td><td>integer</td><td>—</td><td>Price in millisatoshis (overridden by Redis dynamic pricing). Cashu payment requests carry a whole number of sats, so a sub-sat price is advertised rounded <strong>up</strong> while Lightning is charged exactly; the module warns at startup when the two diverge</td></tr>
 <tr><td><code>l402_macaroon_timeout</code></td><td>integer (seconds)</td><td><code>0</code> (disabled)</td><td>Macaroon validity window; <code>0</code> = no expiry</td></tr>
 <tr><td><code>l402_lnurl_addr</code></td><td>string</td><td>—</td><td>Per-location LNURL address for multi-tenant setups</td></tr>
-<tr><td><code>l402_invoice_rate_limit</code></td><td><code>&lt;N&gt;r/m</code> or <code>&lt;N&gt;r/s</code></td><td>disabled</td><td>Max invoice generation rate per IP per route</td></tr>
+<tr><td><code>l402_invoice_rate_limit</code></td><td><code>&lt;N&gt;r/s</code>, <code>&lt;N&gt;r/m</code>, <code>&lt;N&gt;r/h</code>, or <code>&lt;N&gt;</code> (per minute)</td><td>disabled</td><td>Max invoice generation rate per IP per route</td></tr>
 <tr><td><code>l402_auto_detect_payment</code></td><td>boolean¹</td><td><code>off</code></td><td>Server-side payment detection — queries the Lightning node instead of requiring the client to supply the preimage</td></tr>
 <tr><td><code>l402_indefinite_access</code></td><td>boolean¹</td><td><code>off</code></td><td>Skip the single-use preimage replay check — a single payment stays valid for the macaroon lifetime</td></tr>
 <tr><td><code>l402_realm</code></td><td>string</td><td>—</td><td>Bind the macaroon to a named protection space instead of the exact request path, so one payment authorizes every location sharing the name</td></tr>
+<tr><td><code>l402_exempt_methods</code></td><td>one or more HTTP methods</td><td>—</td><td>Methods served without payment, e.g. <code>HEAD</code>; nested locations inherit it</td></tr>
+<tr><td><code>l402_dry_run</code></td><td><code>on</code> or <code>off</code></td><td><code>off</code></td><td>Log and count what would be blocked, without blocking — see <a href="dry-run.html">dry-run.md</a></td></tr>
+<tr><td><code>l402_metrics</code></td><td>no arguments</td><td>—</td><td>Serve Prometheus counters from this location; the shipped <code>nginx.conf</code> allows only localhost — see <a href="dry-run.html#prometheus-metrics">dry-run.md</a></td></tr>
+<tr><td><code>l402_manifest</code></td><td>no arguments</td><td>—</td><td>Serve the JSON manifest of this server’s paid routes, normally at <code>/.well-known/l402-services</code> — see <a href="manifest.html">manifest.md</a></td></tr>
+<tr><td><code>l402_manifest_hide</code></td><td>no arguments</td><td>—</td><td>Leave this location out of the manifest</td></tr>
+<tr><td><code>l402_log_format</code></td><td><code>json</code> or <code>text</code></td><td><code>text</code></td><td>Emit one structured JSON line per L402 access event (verify, challenge, challenge error, rate-limited) — see <a href="logging.html">logging.md</a></td></tr>
+<tr><td><code>l402_payment_html</code></td><td>boolean¹</td><td><code>on</code></td><td>Serve the browser payment page with a <code>402</code>. Turn it <code>off</code> for API and agent routes to return the challenge headers with an empty body</td></tr>
 </tbody>
 </table>
 </div>
 <blockquote>
 <p>¹ <strong>Boolean directives</strong> accept: <code>on</code> / <code>off</code> / <code>true</code> / <code>false</code> / <code>1</code> / <code>0</code> / <code>yes</code> / <code>no</code> (case-insensitive).</p>
 </blockquote>
+<h3 id="api-routes-skipping-the-payment-page"><a class="header" href="#api-routes-skipping-the-payment-page">API routes: skipping the payment page</a></h3>
+<p>A <code>402</code> normally carries a full HTML page — QR code, copy button, Cashu tab —
+for a human paying in a browser. An API client or AI agent reads
+<code>WWW-Authenticate</code> and discards the body, so on those routes the page is wasted
+bytes on every unpaid request.</p>
+<pre><code class="language-nginx">location /v1/ {
+    l402                      on;
+    l402_amount_msat_default  10000;
+    l402_payment_html         off;   # headers only
+
+    proxy_pass http://upstream;
+}
+</code></pre>
+<p>With it <code>off</code> the response is still a <code>402</code> and still carries
+<code>WWW-Authenticate</code> (and <code>X-Cashu</code> when Cashu is enabled) — only the body is
+dropped. Nothing about the payment flow changes; clients that already parse the
+header behave identically.</p>
+<p>It inherits into nested locations and follows the usual child-wins rule, so an
+inner location can turn the page back <code>on</code> under an outer <code>off</code>.</p>
+<h3 id="rate-limiting-behind-a-proxy"><a class="header" href="#rate-limiting-behind-a-proxy">Rate limiting behind a proxy</a></h3>
+<p><code>l402_invoice_rate_limit</code> buckets by the <strong>connection’s</strong> source address. It
+deliberately ignores <code>X-Real-IP</code> and <code>X-Forwarded-For</code>, because a client can set
+those itself — keying on one would let anyone mint a fresh bucket per request
+and bypass the limit entirely.</p>
+<p>If nginx sits behind a load balancer or CDN, every request arrives from the
+proxy’s address and would share a single bucket. Configure nginx’s own realip
+module so the real client address is substituted before the L402 access phase
+runs:</p>
+<pre><code class="language-nginx">set_real_ip_from  10.0.0.0/8;      # your proxy's range — and only your proxy's
+real_ip_header    X-Real-IP;       # or X-Forwarded-For
+</code></pre>
+<p>Listing the trusted ranges is what makes the header safe to believe, and it
+keeps that decision with the operator, who knows the topology.</p>
+<p>If a rate-limited request arrives carrying an <code>X-Real-IP</code> (or an
+<code>X-Forwarded-For</code> whose leftmost entry) that does not match the connection
+address, the module logs this once per worker so the misconfiguration is visible
+before users start hitting limits they shouldn’t:</p>
+<pre><code>l402_invoice_rate_limit is bucketing by connection address 10.0.0.7, but this
+request carried X-Real-IP: 203.0.113.5. If 10.0.0.7 is your proxy, configure
+`set_real_ip_from 10.0.0.7;` with `real_ip_header X-Real-IP;` — otherwise every
+client behind it shares one bucket. If nothing proxies to you, a client set that
+header itself and this is safe to ignore; the header is never trusted directly,
+which is why you are seeing this. Logged once per worker.
+</code></pre>
+<p>On a server with no proxy in front of it anyone can trigger that line by sending
+the header, and it names their address rather than a proxy’s — so treat it as a
+prompt to check your topology, not as a <code>set_real_ip_from</code> value to paste. If
+you are not behind a proxy, ignore it: the rate limit is already keyed correctly.</p>
 <h3 id="realm-scoped-access"><a class="header" href="#realm-scoped-access">Realm-scoped access</a></h3>
 <p>By default a macaroon is bound to the exact path it was minted for: paying for
 <code>/a</code> gives you <code>/a</code> and nothing else. <code>l402_realm</code> replaces that binding with a
@@ -455,9 +519,10 @@ location /library/full {
 </code></pre>
 <p>Three things to know before using it:</p>
 <ul>
-<li><strong><code>l402_indefinite_access on</code> is effectively required.</strong> The client presents the
-same preimage on every path in the realm, and the single-use replay check would
-reject the second request. Without it a realm token works exactly once.</li>
+<li><strong><code>l402_indefinite_access on</code> is required.</strong> The client presents the same
+preimage on every path in the realm, and the single-use replay check would
+reject the second request. The module rejects the combination at config-parse
+time, so nginx will not start without it.</li>
 <li><strong>The realm is not bound to a price.</strong> Two locations sharing a name with
 different <code>l402_amount_msat_default</code> means a token bought at the cheaper one
 opens the dearer one. Give differently-priced content different realm names.</li>
@@ -467,6 +532,8 @@ with one payment, so prefer specific names (<code>library-2026</code>) over gene
 </ul>
 <p>The HTTP method is still bound in realm mode: a <code>GET</code> token will not satisfy a
 <code>POST</code>.</p>
+<p>See <a href="./realm.html">Realms</a> for the full treatment — inheritance, nested realms,
+and what stays bound.</p>
 <h3 id="example-auto-detect-enabled-location"><a class="header" href="#example-auto-detect-enabled-location">Example: auto-detect enabled location</a></h3>
 <pre><code class="language-nginx">location /protected {
     l402                         on;
@@ -495,14 +562,14 @@ same preimage grants access forever.</p>
 <blockquote>
 <p><strong>Backends that support auto-detect</strong>: <code>LND</code>, <code>CLN</code>, <code>BOLT12</code>, <code>ECLAIR</code>, and
 <code>NWC</code> where the wallet implements the optional NIP-47 <code>lookup_invoice</code>.
-<code>LNC</code> and <code>LNURL</code> do <strong>not</strong> support server-side lookup.</p>
+<code>LND</code> over LNC and <code>LNURL</code> do <strong>not</strong> support server-side lookup.</p>
 </blockquote>
 
                     </main>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="install-docker.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="deploy-tls.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
@@ -516,7 +583,7 @@ same preimage grants access forever.</p>
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="install-docker.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="deploy-tls.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
@@ -550,7 +617,7 @@ same preimage grants access forever.</p>
 
         <!-- Custom JS scripts -->
         <script src="mermaid-eefea253.min.js"></script>
-        <script src="mermaid-init-ccf746f1.js"></script>
+        <script src="mermaid-init-53b67c53.js"></script>
 
 
 

@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-6b30a7d8.js";
+            window.path_to_searchindex_js = "searchindex-e802f3f3.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-b5966016.js"></script>
+        <script src="toc-c42dc3ae.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -214,7 +214,7 @@
     G --&gt;|Yes| H[Add WWW-Authenticate Header]
     H --&gt; J[Return 402 Payment Required]
     K --&gt; L{Parse Success?}
-    L --&gt;|No| M[Return 500 Internal Server Error]
+    L --&gt;|No| Q[Return 401 Unauthorized]
     L --&gt;|Yes| AD{"Auto-detect enabled AND no preimage in header?"}
     AD --&gt;|Yes| ND[Query Lightning node for settled invoice]
     ND --&gt; NS{Invoice settled?}
@@ -229,8 +229,36 @@
 </pre>
 
 <blockquote>
-<p><strong>Auto-detect</strong>: When <code>l402_auto_detect_payment on</code> is set and the client sends only <code>Authorization: L402 &lt;macaroon&gt;</code> (no preimage), the server queries the Lightning node directly. Supported on <strong>LND</strong>, <strong>CLN</strong>, and <strong>Eclair</strong>.</p>
+<p><strong>Auto-detect</strong>: When <code>l402_auto_detect_payment on</code> is set and the client sends only <code>Authorization: L402 &lt;macaroon&gt;</code> (no preimage), the server queries the Lightning node directly. Supported on <strong>LND</strong>, <strong>CLN</strong>, <strong>BOLT12</strong>, <strong>Eclair</strong>, and <strong>NWC</strong> wallets that implement <code>lookup_invoice</code> — see <a href="./lightning.html#backend-support-matrix">the support matrix</a>.</p>
 </blockquote>
+<h3 id="response-codes"><a class="header" href="#response-codes">Response Codes</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Status</th><th>When</th></tr>
+</thead>
+<tbody>
+<tr><td><code>200</code></td><td>Payment verified — the upstream response is returned</td></tr>
+<tr><td><code>402</code></td><td>No credential presented, or auto-detect found the invoice unpaid. Carries the <code>WWW-Authenticate</code> L402 challenge, and <code>X-Cashu</code> when Cashu is enabled</td></tr>
+<tr><td><code>401</code></td><td>A credential was presented and failed: malformed, tampered, replayed, or the preimage does not match. Carries <code>WWW-Authenticate: L402</code>; retry without a credential for a fresh challenge</td></tr>
+<tr><td><code>400</code></td><td>A Cashu token from an unlisted mint, in the wrong unit, or below the price</td></tr>
+<tr><td><code>429</code></td><td>Invoice rate limit hit (<code>l402_invoice_rate_limit</code>)</td></tr>
+<tr><td><code>500</code></td><td>The gateway failed — an unreachable mint, Lightning node or Redis, or a failed database write, not a problem with your payment</td></tr>
+<tr><td><code>503</code></td><td>A Lightning credential arrived while <code>REDIS_URL</code> is set but Redis is unreachable; retry once it is back</td></tr>
+</tbody>
+</table>
+</div>
+<p><code>402</code> only asks for payment: the initial challenge, or an auto-detect invoice
+not paid yet. A credential that fails is <code>401</code>, never <code>402</code> — <a href="https://github.com/lightninglabs/L402/blob/master/protocol-specification.md">the L402
+specification</a>
+requires this so clients can tell “you need to pay” from “your credential is
+broken”. The <code>400</code> cases are the ones
+<a href="https://github.com/cashubtc/nuts/blob/main/24.md">NUT-24</a> names.</p>
+<p>A <code>500</code> on a request that carried a Cashu token leaves the token’s fate unknown:
+swapping it at the mint and recording the proofs are separate steps, so a failure
+between them may have spent the token or not touched it. Treat it as an outage
+rather than a rejected payment, and don’t discard the token. Other <code>500</code>s — a
+missing price, an uninitialised module — are unrelated to payment.</p>
 <hr>
 <h2 id="quick-start"><a class="header" href="#quick-start">Quick Start</a></h2>
 <blockquote>
@@ -300,7 +328,7 @@ curl -i http://localhost:8000/protected
 
         <!-- Custom JS scripts -->
         <script src="mermaid-eefea253.min.js"></script>
-        <script src="mermaid-init-ccf746f1.js"></script>
+        <script src="mermaid-init-53b67c53.js"></script>
 
 
 

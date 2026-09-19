@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-6b30a7d8.js";
+            window.path_to_searchindex_js = "searchindex-e802f3f3.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-b5966016.js"></script>
+        <script src="toc-c42dc3ae.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -192,7 +192,7 @@
 </thead>
 <tbody>
 <tr><td><code>LND</code></td><td>Lightning Network Daemon — direct gRPC connection</td></tr>
-<tr><td><code>LNC</code></td><td>Lightning Node Connect — remote LND via mailbox (no open port needed)</td></tr>
+<tr><td><code>LND</code> + <code>LNC_PAIRING_PHRASE</code></td><td>Lightning Node Connect — remote LND via mailbox (no open port needed)</td></tr>
 <tr><td><code>CLN</code></td><td>Core Lightning</td></tr>
 <tr><td><code>ECLAIR</code></td><td>Eclair node</td></tr>
 <tr><td><code>LNURL</code></td><td>Lightning Network URL — delegate invoice generation to an LNURL server</td></tr>
@@ -202,6 +202,7 @@
 </table>
 </div>
 <p>See <a href="./config-env-vars.html">Environment Variables</a> for the full list of per-backend settings.</p>
+<p>Each worker connects to the backend on the first request that needs it, so an unreachable node does not stop nginx from starting. While it is down, requests that need a new invoice return <code>500</code> (counted in <code>l402_invoices_generation_errors_total</code>), and so do auto-detect retries whose preimage isn’t cached in Redis. A full <code>macaroon:preimage</code> credential still verifies without the node.</p>
 <hr>
 <h2 id="payment-flow"><a class="header" href="#payment-flow">Payment Flow</a></h2>
 <ol>
@@ -250,14 +251,14 @@
 <p>All boolean directives (<code>l402</code>, <code>l402_auto_detect_payment</code>) accept: <code>on</code> / <code>off</code> / <code>true</code> / <code>false</code> / <code>1</code> / <code>0</code> / <code>yes</code> / <code>no</code> (case-insensitive).</p>
 <h3 id="client-flow-with-auto-detect-enabled"><a class="header" href="#client-flow-with-auto-detect-enabled">Client flow with auto-detect enabled</a></h3>
 <ol>
-<li>Client requests a protected endpoint → receives <code>402 Payment Required</code> with a BOLT-11 invoice.</li>
+<li>Client requests a protected endpoint → receives <code>402 Payment Required</code> with an invoice.</li>
 <li>Client pays the invoice (no preimage handling needed).</li>
 <li>Client retries with just the macaroon:
 <pre><code>Authorization: L402 &lt;macaroon&gt;
 </code></pre>
 </li>
 <li>Module extracts the <code>payment_hash</code> from the macaroon identifier, queries the node, and — if the invoice is settled — uses the returned preimage to verify the macaroon signature.</li>
-<li>On success the module returns <code>200 OK</code>. If the invoice is not yet settled, it returns <code>402 Payment Required</code>.</li>
+<li>On success the module returns <code>200 OK</code>. If the invoice is not yet settled, it returns <code>402 Payment Required</code>. If the lookup fails or takes longer than 5 seconds, it returns <code>500</code>.</li>
 </ol>
 <h3 id="preimage-caching-redis"><a class="header" href="#preimage-caching-redis">Preimage caching (Redis)</a></h3>
 <p>When Redis is configured (<code>REDIS_URL</code>), settled preimages are cached under the key <code>l402:settled:&lt;payment_hash_hex&gt;</code>. Subsequent requests for the same payment hash are served from the cache, avoiding repeated node round-trips.</p>
@@ -269,10 +270,11 @@
 </thead>
 <tbody>
 <tr><td><code>LND</code></td><td>✅</td><td>Uses <code>LookupInvoice</code> gRPC</td></tr>
-<tr><td><code>CLN</code> / <code>BOLT12</code></td><td>✅</td><td>Uses <code>listinvoices</code> JSON-RPC over unix socket</td></tr>
+<tr><td><code>CLN</code></td><td>✅</td><td>Uses <code>listinvoices</code> JSON-RPC over unix socket</td></tr>
+<tr><td><code>BOLT12</code></td><td>✅</td><td>Uses <code>listinvoices</code> like <code>CLN</code>, so <code>BOLT12_OFFER</code> must be an offer from your own node</td></tr>
 <tr><td><code>ECLAIR</code></td><td>✅</td><td>Uses <code>POST /getreceivedinfo</code> REST API</td></tr>
 <tr><td><code>NWC</code></td><td>⚠️</td><td>Uses NIP-47 <code>lookup_invoice</code>, which wallets may not implement</td></tr>
-<tr><td><code>LNC</code></td><td>❌</td><td>LNC mailbox does not expose <code>LookupInvoice</code></td></tr>
+<tr><td><code>LND</code> over LNC</td><td>❌</td><td>LNC mailbox does not expose <code>LookupInvoice</code></td></tr>
 <tr><td><code>LNURL</code></td><td>❌</td><td>Remote wallet — no server-side query API</td></tr>
 </tbody>
 </table>
@@ -283,6 +285,10 @@
 </blockquote>
 <hr>
 <h2 id="wallet-compatibility"><a class="header" href="#wallet-compatibility">Wallet Compatibility</a></h2>
+<blockquote class="blockquote-tag blockquote-tag-note">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path></svg>Note</p>
+<p><strong>NWC works for <em>accepting</em> payments, not just paying.</strong> A common misconception is that Nostr Wallet Connect (NIP-47) is only a spending protocol. <code>LN_CLIENT_TYPE=NWC</code> uses the connection to <strong>receive</strong>: it creates each L402 invoice with <code>make_invoice</code> and verifies payment with <code>lookup_invoice</code>. The catch is that both are <strong>optional</strong> NIP-47 methods — not every wallet implements them, and a given connection secret may be permission-scoped (e.g. pay-only). Use a wallet and connection that grant <code>make_invoice</code> <strong>and</strong> <code>lookup_invoice</code> (a wallet advertises its supported commands in its NIP-47 info event); a pay-only connection can spend but cannot accept.</p>
+</blockquote>
 <blockquote class="blockquote-tag blockquote-tag-warning">
 <p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path></svg>Warning</p>
 <p>Some wallets (e.g. <a href="https://www.walletofsatoshi.com/">Wallet of Satoshi</a>) return <strong>48-byte non-standard preimages</strong>, which are <strong>not compatible</strong> with this module. Use a wallet that returns a standard 32-byte preimage.</p>
@@ -295,7 +301,7 @@
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="config-multi-tenant.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="realm.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
@@ -309,7 +315,7 @@
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="config-multi-tenant.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="realm.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
@@ -343,7 +349,7 @@
 
         <!-- Custom JS scripts -->
         <script src="mermaid-eefea253.min.js"></script>
-        <script src="mermaid-init-ccf746f1.js"></script>
+        <script src="mermaid-init-53b67c53.js"></script>
 
 
 

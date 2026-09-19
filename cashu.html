@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-6b30a7d8.js";
+            window.path_to_searchindex_js = "searchindex-e802f3f3.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-b5966016.js"></script>
+        <script src="toc-c42dc3ae.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -183,6 +183,14 @@
                         <h1 id="cashu-ecash"><a class="header" href="#cashu-ecash">Cashu eCash</a></h1>
 <p>The module supports <a href="https://cashu.space">Cashu</a> eCash tokens as an alternative payment method to Lightning invoices.</p>
 <hr>
+<h2 id="paying-with-a-token"><a class="header" href="#paying-with-a-token">Paying with a Token</a></h2>
+<p>Clients send the token in the <code>X-Cashu</code> header, per <a href="https://github.com/cashubtc/nuts/blob/main/24.md">NUT-24</a>:</p>
+<pre><code class="language-bash">curl -i https://your-gateway/protected -H "X-Cashu: cashuB..."
+</code></pre>
+<p>The token must come from a mint in <code>CASHU_WHITELISTED_MINTS</code> and cover the route’s price.</p>
+<p><code>Authorization: Cashu &lt;token&gt;</code> is also accepted and wins if both are sent. It predates
+NUT-24 support here; new clients should use <code>X-Cashu</code>.</p>
+<hr>
 <h2 id="standard-mode-vs-p2pk-mode"><a class="header" href="#standard-mode-vs-p2pk-mode">Standard Mode vs P2PK Mode</a></h2>
 <div class="table-wrapper">
 <table>
@@ -204,13 +212,23 @@ Environment=CASHU_DB_PATH=/var/lib/nginx/cashu_tokens.db
 # BIP39 wallet mnemonic (NUT-13 backup phrase); unset = auto-generated on first run
 Environment=CASHU_WALLET_MNEMONIC="word1 word2 ... word12"
 
-# Optional: Whitelist specific mints (comma-separated)
+# Whitelist accepted mints (comma-separated). Optional, but see the note below.
 Environment=CASHU_WHITELISTED_MINTS=https://mint1.example.com,https://mint2.example.com
 
 # Optional: Auto-redeem to Lightning
 Environment=CASHU_REDEEM_ON_LIGHTNING=true
 Environment=CASHU_REDEMPTION_INTERVAL_SECS=3600
 </code></pre>
+<p>Standard mode also answers a 402 with an <code>X-Cashu</code> payment request, stating the
+amount, unit and accepted mints. It carries no NUT-10 lock — that is what P2PK
+mode adds — but wallets need it to construct a payable token.</p>
+<blockquote>
+<p><strong>Set <code>CASHU_WHITELISTED_MINTS</code>.</strong> The mint list <em>is</em> the <code>m</code> field of the
+payment request, so leaving it unset means there is nothing to advertise, no
+challenge is sent, and NUT-24 wallets cannot pay at all — on any deployment.
+Where callers are untrusted it does a second job: without it, someone can
+present tokens from a mint they run themselves and pass the paywall for free.</p>
+</blockquote>
 <blockquote>
 <p><strong>⚠️ Security</strong>: <code>CASHU_WALLET_MNEMONIC</code> is the BIP39 phrase that derives the wallet seed (NUT-13) — the only backup of your wallet. Anyone with it can steal your tokens, and losing it loses the funds. It’s a 12/24-word phrase (not a hex secret); leave it unset to auto-generate and persist one on first run, and never commit it to Git. On startup the module records a seed fingerprint next to the DB and refuses to start if a later mnemonic doesn’t match — delete <code>wallet.fingerprint</code> to switch wallets intentionally.</p>
 </blockquote>
@@ -235,6 +253,7 @@ Environment=CASHU_WHITELISTED_MINTS=https://mint1.example.com
 </ol>
 <hr>
 <h2 id="redemption-fee-configuration"><a class="header" href="#redemption-fee-configuration">Redemption Fee Configuration</a></h2>
+<p>With <code>CASHU_REDEEM_ON_LIGHTNING=true</code>, one worker periodically melts received tokens to your Lightning backend. In LNURL mode that needs <code>LNURL_ADDRESS</code> or <code>l402_lnurl_addr</code>; with neither, nginx warns at startup and the ecash accumulates unredeemed.</p>
 <pre><code class="language-bash"># Minimum balance to attempt melting (default: 10 sats)
 Environment=CASHU_MELT_MIN_BALANCE_SATS=10
 
@@ -282,15 +301,18 @@ Environment=CASHU_MAX_PROOFS_PER_MELT=1000
 <h2 id="sqlite-database-setup"><a class="header" href="#sqlite-database-setup">SQLite Database Setup</a></h2>
 <pre><code class="language-bash"># One-time setup — persists across restarts
 sudo mkdir -p /var/lib/nginx
-sudo chown nginx:nginx /var/lib/nginx
-sudo chmod 750 /var/lib/nginx
+sudo chown root:nginx /var/lib/nginx
+sudo chmod 1770 /var/lib/nginx
 </code></pre>
 <p>The <code>cdk-sqlite</code> crate automatically creates the database file and tables. Database location: <code>/var/lib/nginx/cashu_tokens.db</code></p>
 <blockquote class="blockquote-tag blockquote-tag-note">
 <p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path></svg>Note</p>
 <p>This directory holds the token database and, when the mnemonic is
-auto-generated, <code>wallet.mnemonic</code> (mode <code>0600</code>). Keep it owned by the nginx
-user, and include both files in your encrypted backups.</p>
+auto-generated, <code>wallet.mnemonic</code> (mode <code>0600</code>). Root owns it and nginx writes
+through the group; the sticky bit (the <code>1</code> in <code>1770</code>) lets nginx delete or
+rename only its own files, so it can’t remove or replace the phrase. The module
+refuses a phrase file it doesn’t own, and the Docker image sets all this up on
+every start. Include both files in your encrypted backups.</p>
 </blockquote>
 
                     </main>
@@ -345,7 +367,7 @@ user, and include both files in your encrypted backups.</p>
 
         <!-- Custom JS scripts -->
         <script src="mermaid-eefea253.min.js"></script>
-        <script src="mermaid-init-ccf746f1.js"></script>
+        <script src="mermaid-init-53b67c53.js"></script>
 
 
 

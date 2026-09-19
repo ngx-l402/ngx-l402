@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-6b30a7d8.js";
+            window.path_to_searchindex_js = "searchindex-e802f3f3.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-b5966016.js"></script>
+        <script src="toc-c42dc3ae.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -275,7 +275,7 @@ Rust logger. A minimal example (formatted for readability):</p>
 <tr><td><code>price_msat</code></td><td>Effective price in millisatoshis.</td></tr>
 <tr><td><code>price_source</code></td><td><code>static</code> (from <code>nginx.conf</code>) or <code>dynamic</code> (from Redis).</td></tr>
 <tr><td><code>backend</code></td><td>LN backend type snapshot: <code>LND</code>, <code>LNURL</code>, <code>NWC</code>, <code>CLN</code>, <code>BOLT12</code>, <code>ECLAIR</code>.</td></tr>
-<tr><td><code>client_ip</code></td><td>From <code>X-Real-IP</code> → <code>X-Forwarded-For</code> → socket address.</td></tr>
+<tr><td><code>client_ip</code></td><td>The connection’s source address. Proxy headers are not trusted; configure nginx’s realip module to substitute the real client address.</td></tr>
 <tr><td><code>auth_state</code></td><td><code>missing</code>, <code>valid</code>, or <code>invalid</code>.</td></tr>
 <tr><td><code>would_return</code></td><td>HTTP status enforce mode <em>would</em> have used (<code>200</code>, <code>401</code>, <code>402</code>).</td></tr>
 <tr><td><code>rate_limited</code></td><td><code>true</code> when <code>l402_invoice_rate_limit</code> would have produced a <code>429</code> — challenge synthesis was skipped to protect the LN backend.</td></tr>
@@ -291,14 +291,19 @@ Rust logger. A minimal example (formatted for readability):</p>
 <h2 id="prometheus-metrics"><a class="header" href="#prometheus-metrics">Prometheus metrics</a></h2>
 <p>The <code>l402_metrics</code> directive turns a location into a Prometheus scrape
 endpoint. It serves counters in text exposition format v0.0.4.</p>
+<p>The shipped <code>nginx.conf</code> closes it to everything but localhost, because the
+counters carry invoice volume and revenue signals and that file ships inside the
+Docker image. Widen <code>allow</code> to reach it from your scrape host:</p>
 <pre><code class="language-nginx">location = /metrics {
-    l402_metrics;
-
-    # Production: restrict to your scrape network.
-    allow 10.0.0.0/8;
+    allow 127.0.0.1;
+    allow ::1;
+    allow 10.0.0.0/8;      # your Prometheus host or monitoring subnet
     deny  all;
+    l402_metrics;
 }
 </code></pre>
+<p>Scraping from another container puts the request on the Docker bridge, not
+loopback — allow that network rather than removing <code>deny all</code>.</p>
 <p>Scrape it with a standard Prometheus config:</p>
 <pre><code class="language-yaml">scrape_configs:
   - job_name: ngx_l402
@@ -430,7 +435,7 @@ disables enforcement without touching upstream code paths.</p>
 
         <!-- Custom JS scripts -->
         <script src="mermaid-eefea253.min.js"></script>
-        <script src="mermaid-init-ccf746f1.js"></script>
+        <script src="mermaid-init-53b67c53.js"></script>
 
 
 

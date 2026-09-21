@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-e802f3f3.js";
+            window.path_to_searchindex_js = "searchindex-993d879f.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c42dc3ae.js"></script>
@@ -244,6 +244,7 @@ docker run -d \
   ghcr.io/ngx-l402/ngx-l402:latest
 </code></pre>
 <h3 id="5-nwc-backend-nostr-wallet-connect"><a class="header" href="#5-nwc-backend-nostr-wallet-connect">5. NWC Backend (Nostr Wallet Connect)</a></h3>
+<p>Receives into your NWC wallet; the connection needs only <code>make_invoice</code> (plus <code>lookup_invoice</code> for auto-detect), no spending permissions.</p>
 <pre><code class="language-bash">docker run -d \
   --name l402-nginx \
   -p 8000:8000 \

@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-e802f3f3.js";
+            window.path_to_searchindex_js = "searchindex-993d879f.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-c42dc3ae.js"></script>
@@ -241,10 +241,12 @@ Environment=ROOT_KEY=your-root-key
 </code></pre>
 <p>The username must match the LUD-16 charset (<code>a-z 0-9 - _ .</code>); addresses like <code>user+tag@example.com</code> are rejected since l402_middleware 2.3.4.</p>
 <h2 id="nwc-nostr-wallet-connect"><a class="header" href="#nwc-nostr-wallet-connect">NWC (Nostr Wallet Connect)</a></h2>
+<p>NWC receives payments too: the wallet creates each invoice and is paid directly, no node needed.</p>
 <pre><code class="language-bash">Environment=LN_CLIENT_TYPE=NWC
 Environment=NWC_URI=nostr+walletconnect://&lt;pubkey&gt;?relay=&lt;relay_url&gt;&amp;secret=&lt;secret&gt;
 Environment=ROOT_KEY=your-root-key
 </code></pre>
+<p>Grant the connection <code>make_invoice</code>, plus <code>lookup_invoice</code> for auto-detect. It never pays, so leave the spending permissions off. The wallet must return <code>payment_hash</code> in its <code>make_invoice</code> reply.</p>
 <h2 id="bolt12-reusable-offers"><a class="header" href="#bolt12-reusable-offers">BOLT12 (Reusable Offers)</a></h2>
 <pre><code class="language-bash">Environment=LN_CLIENT_TYPE=BOLT12
 Environment=BOLT12_OFFER=lno1...

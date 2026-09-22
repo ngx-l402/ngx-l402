@@ -901,10 +901,7 @@ pub async fn restore_wallets_state() {
                 Ok(wallet) => wallet
                     .restore()
                     .await
-                    .map(|amount| {
-                        let v: u64 = amount.into();
-                        v
-                    })
+                    .map(|restored| u64::from(restored.unspent))
                     .map_err(|e| e.to_string()),
                 Err(e) => Err(e.to_string()),
             }
@@ -998,6 +995,21 @@ pub fn get_whitelisted_mints() -> Option<&'static HashSet<String>> {
     WHITELISTED_MINTS.get()
 }
 
+/// `Token::proofs` expands a v4 token's short keyset ids against
+/// `KeySetInfo`s, while the wallet hands out full `KeySet`s.
+fn keyset_infos(keysets: &[cdk::nuts::KeySet]) -> Vec<cdk::nuts::KeySetInfo> {
+    keysets
+        .iter()
+        .map(|k| cdk::nuts::KeySetInfo {
+            id: k.id,
+            unit: k.unit.clone(),
+            active: k.active.unwrap_or(false),
+            input_fee_ppk: k.input_fee_ppk,
+            final_expiry: k.final_expiry,
+        })
+        .collect()
+}
+
 fn get_lnurl_from_proof(proof: &cdk::nuts::Proof) -> Result<Option<String>, String> {
     // Without Redis no mapping was ever recorded, so the default address is
     // right. A configured Redis that can't be reached still holds the tenant's
@@ -1063,6 +1075,32 @@ fn set_proof_to_lnurl(
     }
 
     Ok(())
+}
+
+/// Melt `quote_id` with exactly `proofs`, or with proofs the wallet picks. Given
+/// proofs go to the mint as they are: a tenant's must not be swapped for other
+/// proofs, and P2PK ones arrive already signed for this melt.
+async fn melt_quote_with(
+    wallet: &cdk::wallet::Wallet,
+    quote_id: &str,
+    proofs: Option<cdk::nuts::Proofs>,
+) -> Result<cdk::types::FinalizedMelt, cdk::Error> {
+    match proofs {
+        Some(proofs) => {
+            wallet
+                .prepare_melt_proofs(quote_id, proofs, HashMap::new())
+                .await?
+                .confirm_with_options(cdk::wallet::MeltConfirmOptions::skip_swap())
+                .await
+        }
+        None => {
+            wallet
+                .prepare_melt(quote_id, HashMap::new())
+                .await?
+                .confirm()
+                .await
+        }
+    }
 }
 
 /// Remove proof-to-lnurl mappings from Redis after proofs have been melted
@@ -1345,6 +1383,36 @@ pub async fn verify_cashu_token(
         .await
         .map_err(CashuError::Internal)?;
 
+    // The mint takes its input fee out of the swap, so the token pays only what
+    // is left. Caught here, a shortfall is the payer's 400; once the swap fails
+    // it can only be a 500. A 1-sat token on a mint charging any input fee
+    // leaves nothing.
+    let keysets = wallet
+        .keysets(Default::default())
+        .await
+        .map_err(|e| CashuError::Internal(format!("Failed to load keysets: {}", e)))?;
+    let proofs = token_decoded
+        .proofs(&keyset_infos(&keysets))
+        .map_err(|e| CashuError::BadCredential(format!("Failed to extract proofs: {}", e)))?;
+    let input_fee = wallet
+        .get_proofs_fee(&proofs)
+        .await
+        .map_err(|e| CashuError::Internal(format!("Failed to get input fee: {}", e)))?
+        .total;
+    // Mint-supplied: saturate, never wrap.
+    let input_fee_msat = if wallet.unit == cdk::nuts::CurrencyUnit::Sat {
+        ngx_l402_core::sat_to_msat(u64::from(input_fee))
+    } else {
+        u64::from(input_fee)
+    };
+    let net_amount_msat = total_amount_msat.saturating_sub(input_fee_msat);
+    if net_amount_msat < amount_msat as u64 {
+        return Err(CashuError::Unacceptable(format!(
+            "Cashu token amount insufficient after the mint's {} msat input fee: {} msat (required: {} msat)",
+            input_fee_msat, net_amount_msat, amount_msat
+        )));
+    }
+
     // A tenant's proofs have to be mapped as the wallet will redeem them, and
     // `receive` can't: it swaps them for new proofs and returns only an amount.
     let received = if is_multi_tenant_enabled() {
@@ -1423,19 +1491,28 @@ async fn receive_for_tenant(
     use cdk::nuts::State;
     use cdk::types::ProofInfo;
 
-    let keysets = wallet.get_mint_keysets().await.map_err(|e| e.to_string())?;
-    let proofs = token.proofs(&keysets).map_err(|e| e.to_string())?;
+    let keysets = wallet
+        .keysets(Default::default())
+        .await
+        .map_err(|e| e.to_string())?;
+    let proofs = token
+        .proofs(&keyset_infos(&keysets))
+        .map_err(|e| e.to_string())?;
     let fee = wallet
         .get_proofs_fee(&proofs)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .total;
     let amount = proofs
         .total_amount()
         .map_err(|e| e.to_string())?
         .checked_sub(fee)
         .ok_or("token does not cover the mint's input fee")?;
 
-    // As `receive_proofs` does: record the inputs, so a failed swap can reclaim them.
+    // `swap` reserves its inputs, and only Unspent proofs can be reserved. Map
+    // them first: a redemption sweep that catches them before the swap does
+    // then pays this tenant, not the default address.
+    set_proof_to_lnurl(proofs.clone(), lnurl_addr.clone())?;
     let inputs = proofs
         .iter()
         .cloned()
@@ -1443,7 +1520,7 @@ async fn receive_for_tenant(
             ProofInfo::new(
                 p,
                 wallet.mint_url.clone(),
-                State::Pending,
+                State::Unspent,
                 wallet.unit.clone(),
             )
         })
@@ -1455,14 +1532,41 @@ async fn receive_for_tenant(
         .await
         .map_err(|e| e.to_string())?;
 
-    let received = wallet
-        .swap(Some(amount), SplitTarget::default(), proofs, None, false)
+    let received = match wallet
+        .swap(
+            Some(amount),
+            SplitTarget::default(),
+            proofs.clone(),
+            None,
+            false,
+            false,
+        )
         .await
-        .map_err(|e| e.to_string())?
-        .ok_or("mint swap returned no proofs")?;
+    {
+        Ok(Some(received)) => received,
+        result => {
+            // Out of the sweep's reach, as before cdk 0.18: kept for reclaim.
+            let ys = proofs.ys().map_err(|e| e.to_string())?;
+            if let Err(e) = wallet
+                .localstore
+                .update_proofs_state(ys, State::Pending)
+                .await
+            {
+                warn!("⚠️ Failed to set unswapped proofs pending: {}", e);
+            }
+            return Err(match result {
+                Err(e) => e.to_string(),
+                _ => "mint swap returned no proofs".to_string(),
+            });
+        }
+    };
 
     if let Err(e) = set_proof_to_lnurl(received.clone(), lnurl_addr) {
         warn!("⚠️ Failed to set proof-to-lnurl mapping: {}", e);
+    }
+    // The inputs are spent: nothing reads their mappings again.
+    if let Err(e) = remove_proof_lnurl_mappings(&proofs) {
+        warn!("⚠️ Failed to remove spent proofs' mappings: {}", e);
     }
 
     wallet
@@ -1572,24 +1676,15 @@ pub async fn verify_cashu_token_p2pk(
         .await
         .map_err(CashuError::Internal)?;
 
-    // Get keysets (use cached if available, fetch once if not)
-    let keysets_info = match wallet.get_mint_keysets().await {
-        Ok(keysets) => {
-            debug!("Using cached keysets");
-            keysets
-        }
-        Err(_) => {
-            info!("📡 Fetching keysets (one-time per mint)");
-            wallet
-                .load_mint_keysets()
-                .await
-                .map_err(|e| CashuError::Internal(format!("Failed to load keysets: {}", e)))?
-        }
-    };
+    // Keysets with their keys: cached, fetched from the mint once if not.
+    let keysets = wallet
+        .keysets(Default::default())
+        .await
+        .map_err(|e| CashuError::Internal(format!("Failed to load keysets: {}", e)))?;
 
     // Extract proofs using keysets
     let proofs = token_decoded
-        .proofs(&keysets_info)
+        .proofs(&keyset_infos(&keysets))
         .map_err(|e| CashuError::BadCredential(format!("Failed to extract proofs: {}", e)))?;
 
     // Compute a canonical replay key from sorted proof Y-values so that
@@ -1655,34 +1750,25 @@ pub async fn verify_cashu_token_p2pk(
     // check a forger could submit proofs that are (a) from a whitelisted mint
     // and (b) correctly P2PK-locked to us, yet NOT actually signed by the mint —
     // getting free service while the operator never gets paid. DLEQ lets us
-    // verify the mint's signature offline using only the keysets we already
-    // loaded above (no extra mint round-trip: `load_keyset_keys` reads the same
-    // metadata cache that `get_mint_keysets` just warmed). Done before the
-    // NUT-07 network check below so forged proofs are rejected without a hop.
+    // verify the mint's signature offline using the keys of the keysets loaded
+    // above (no extra mint round-trip). Done before the NUT-07 network check
+    // below so forged proofs are rejected without a hop.
     let require_dleq = cashu_require_dleq();
-    // A token's proofs commonly share a keyset_id; cache by id to avoid
-    // calling load_keyset_keys once per proof.
-    let mut keyset_keys_cache = HashMap::new();
     for proof in &proofs {
         // Only resolve the per-amount key when the proof actually carries DLEQ;
         // the missing-DLEQ policy is handled inside `verify_proof_dleq_offline`.
         let amount_key = if proof.dleq.is_some() {
-            let keys = match keyset_keys_cache.get(&proof.keyset_id) {
-                Some(keys) => keys,
-                None => {
-                    let keys = wallet
-                        .load_keyset_keys(proof.keyset_id)
-                        .await
-                        .map_err(|e| {
-                            CashuError::Internal(format!(
-                                "Failed to load keyset keys for DLEQ verification: {}",
-                                e
-                            ))
-                        })?;
-                    keyset_keys_cache.entry(proof.keyset_id).or_insert(keys)
-                }
-            };
-            keys.amount_key(proof.amount)
+            keysets
+                .iter()
+                .find(|k| k.id == proof.keyset_id)
+                .ok_or_else(|| {
+                    CashuError::Internal(format!(
+                        "No keys for keyset {} to verify DLEQ",
+                        proof.keyset_id
+                    ))
+                })?
+                .keys
+                .amount_key(proof.amount)
         } else {
             None
         };
@@ -1745,6 +1831,9 @@ pub async fn verify_cashu_token_p2pk(
                 state: State::Unspent,
                 unit: unit.clone(),
                 spending_condition: Some(spending_condition.clone()),
+                derivation_index: None,
+                used_by_operation: None,
+                created_by_operation: None,
             })
         })
         .collect::<Result<Vec<_>, CashuError>>()?;
@@ -2219,8 +2308,10 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                 match wallet_clone.get_proofs_fee(&proofs_to_melt).await {
                     // Keyset fees are mint-supplied: saturate, never wrap.
                     Ok(fee) => match wallet.unit {
-                        cdk::nuts::CurrencyUnit::Sat => ngx_l402_core::sat_to_msat(u64::from(fee)),
-                        cdk::nuts::CurrencyUnit::Msat => u64::from(fee),
+                        cdk::nuts::CurrencyUnit::Sat => {
+                            ngx_l402_core::sat_to_msat(u64::from(fee.total))
+                        }
+                        cdk::nuts::CurrencyUnit::Msat => u64::from(fee.total),
                         ref unit => {
                             let msg = format!(
                                 "❌ Unsupported wallet unit {} for input fee of {}, skipping",
@@ -2377,7 +2468,15 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                 proofs_to_melt.len()
             ));
 
-            let quote = match wallet_clone.melt_quote(invoice.clone(), None).await {
+            let quote = match wallet_clone
+                .melt_quote(
+                    cdk::nuts::PaymentMethod::BOLT11,
+                    invoice.clone(),
+                    None,
+                    None,
+                )
+                .await
+            {
                 Ok(q) => {
                     let actual_fee_reserve_sats: u64 = q.fee_reserve.into();
                     let amount_sats: u64 = q.amount.into();
@@ -2459,20 +2558,19 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                         continue;
                     }
 
-                    wallet_clone.melt_proofs(&quote.id, signed_proofs).await
+                    melt_quote_with(&wallet_clone, &quote.id, Some(signed_proofs)).await
                 } else {
-                    wallet_clone.melt(&quote.id).await
+                    melt_quote_with(&wallet_clone, &quote.id, None).await
                 }
             } else if is_multi_tenant {
                 // Melt this tenant's proofs, not whatever the wallet selects.
-                // `melt` picks inputs from every unspent proof, so it could spend
-                // another tenant's proofs while this tenant's stay unspent with
-                // their mappings deleted below, and redeem to the default address.
-                wallet_clone
-                    .melt_proofs(&quote.id, proofs_to_melt.clone())
-                    .await
+                // Left to choose, the wallet picks inputs from every unspent
+                // proof, so it could spend another tenant's proofs while this
+                // tenant's stay unspent with their mappings deleted below, and
+                // redeem to the default address.
+                melt_quote_with(&wallet_clone, &quote.id, Some(proofs_to_melt.clone())).await
             } else {
-                wallet_clone.melt(&quote.id).await
+                melt_quote_with(&wallet_clone, &quote.id, None).await
             };
 
             // Process melt result
@@ -2515,7 +2613,7 @@ pub async fn redeem_to_lightning() -> Result<bool, String> {
                     // It is this tenant's money: map it, or the next cycle pays it
                     // to the default address.
                     if is_multi_tenant {
-                        if let Some(change) = result.change {
+                        if let Some(change) = result.change().cloned() {
                             if let Err(e) = set_proof_to_lnurl(change, Some(client_id.clone())) {
                                 let msg = format!(
                                     "⚠️ Failed to map melt change for {}: {}",

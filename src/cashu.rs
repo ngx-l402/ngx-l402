@@ -950,14 +950,18 @@ pub async fn reconcile_pending_proofs() {
         let unit = cdk::nuts::CurrencyUnit::Sat;
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             match cdk::wallet::Wallet::new(mint_url, unit, db.clone(), seed, None) {
-                Ok(wallet) => wallet
-                    .check_all_pending_proofs()
-                    .await
-                    .map(|amount| {
-                        let v: u64 = amount.into();
-                        v
-                    })
-                    .map_err(|e| e.to_string()),
+                Ok(wallet) => {
+                    // A swap that timed out leaves its proofs tagged to the saga,
+                    // which check_all_pending_proofs skips.
+                    if let Err(e) = wallet.recover_incomplete_sagas().await {
+                        warn!("⚠️ Saga recovery failed for {}: {}", wallet.mint_url, e);
+                    }
+                    wallet
+                        .check_all_pending_proofs()
+                        .await
+                        .map(u64::from)
+                        .map_err(|e| e.to_string())
+                }
                 Err(e) => Err(e.to_string()),
             }
         })

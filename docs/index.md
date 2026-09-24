@@ -57,7 +57,7 @@ graph TD;
 | `200` | Payment verified — the upstream response is returned |
 | `402` | No credential presented, or auto-detect found the invoice unpaid. Carries the `WWW-Authenticate` L402 challenge, and `X-Cashu` when Cashu is enabled |
 | `401` | A credential was presented and failed: malformed, tampered, replayed, or the preimage does not match. Carries `WWW-Authenticate: L402`; retry without a credential for a fresh challenge |
-| `400` | A Cashu token from an unlisted mint, in the wrong unit, or below the price |
+| `400` | A Cashu token from an unlisted mint, in the wrong unit, or below the price once the mint's input fee is taken out |
 | `429` | Invoice rate limit hit (`l402_invoice_rate_limit`) |
 | `500` | The gateway failed — an unreachable mint, Lightning node or Redis, or a failed database write, not a problem with your payment |
 | `503` | A Lightning credential arrived while `REDIS_URL` is set but Redis is unreachable; retry once it is back |

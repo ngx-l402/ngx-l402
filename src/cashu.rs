@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use tokio::runtime::Runtime;
 use url::Url;
 
@@ -928,6 +928,8 @@ pub async fn restore_wallets_state() {
 /// forever. Best-effort and timeout-bounded so an unreachable mint at startup
 /// doesn't block the worker.
 pub async fn reconcile_pending_proofs() {
+    use cdk::nuts::State;
+
     let whitelisted_mints = match get_whitelisted_mints() {
         Some(mints) => mints,
         None => return,
@@ -951,16 +953,33 @@ pub async fn reconcile_pending_proofs() {
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             match cdk::wallet::Wallet::new(mint_url, unit, db.clone(), seed, None) {
                 Ok(wallet) => {
+                    // Both steps below delete proofs the mint reports spent.
+                    let in_flight = wallet
+                        .localstore
+                        .get_proofs(
+                            Some(wallet.mint_url.clone()),
+                            None,
+                            Some(vec![State::Pending, State::Reserved, State::PendingSpent]),
+                            None,
+                        )
+                        .await
+                        .unwrap_or_else(|e| {
+                            warn!("⚠️ Cannot list in-flight proofs for {}: {}", mint_url, e);
+                            Vec::new()
+                        });
+
                     // A swap that timed out leaves its proofs tagged to the saga,
                     // which check_all_pending_proofs skips.
                     if let Err(e) = wallet.recover_incomplete_sagas().await {
                         warn!("⚠️ Saga recovery failed for {}: {}", wallet.mint_url, e);
                     }
-                    wallet
+                    let reclaimable = wallet
                         .check_all_pending_proofs()
                         .await
                         .map(u64::from)
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| e.to_string());
+                    record_orphaned_mappings(&wallet, in_flight).await;
+                    reclaimable
                 }
                 Err(e) => Err(e.to_string()),
             }
@@ -1029,17 +1048,8 @@ fn get_lnurl_from_proof(proof: &cdk::nuts::Proof) -> Result<Option<String>, Stri
         .get()
         .map_err(|e| format!("Failed to get redis connection from pool: {}", e))?;
 
-    let secret = proof.secret.to_string();
-
-    let mut hasher = Sha256::new();
-    hasher.update(secret.as_bytes());
-
-    let proof_hash = hex::encode(hasher.finalize());
-
-    let redis_key = format!("cashu:proof_lnurl:{}", proof_hash);
-
     let lnurl: Option<String> = conn
-        .get(&redis_key)
+        .get(ngx_l402_core::proof_mapping_key(&proof.secret.to_string()))
         .map_err(|e| format!("Failed to get proof mapping: {}", e))?;
 
     Ok(lnurl)
@@ -1064,16 +1074,9 @@ fn set_proof_to_lnurl(
 
     // No expiry. A missing mapping redeems to the default address, so a key
     // that expired before its proofs melted would pay the tenant's funds to
-    // the operator. Keys are deleted once their proofs melt.
+    // the operator. Keys are deleted once their proofs are spent.
     for proof in proofs {
-        let secret = proof.secret.to_string();
-
-        let mut hasher = Sha256::new();
-        hasher.update(secret.as_bytes());
-
-        let proof_hash = hex::encode(hasher.finalize());
-
-        let redis_key = format!("cashu:proof_lnurl:{}", proof_hash);
+        let redis_key = ngx_l402_core::proof_mapping_key(&proof.secret.to_string());
         conn.set::<_, _, ()>(&redis_key, &lnurl)
             .map_err(|e| format!("Failed to set proof mapping: {}", e))?;
     }
@@ -1107,29 +1110,144 @@ async fn melt_quote_with(
     }
 }
 
-/// Remove proof-to-lnurl mappings from Redis after proofs have been melted
+/// Remove proof-to-lnurl mappings from Redis after proofs have been spent.
+/// A mapping this misses is removed by `sweep_spent_proof_mappings`.
 fn remove_proof_lnurl_mappings(proofs: &cdk::nuts::Proofs) -> Result<(), String> {
-    let pool = crate::redis_pool().ok_or_else(|| crate::redis_absence_reason().to_string())?;
+    let keys: Vec<String> = proofs
+        .iter()
+        .map(|p| ngx_l402_core::proof_mapping_key(&p.secret.to_string()))
+        .collect();
+    delete_mapping_keys(&keys)
+}
 
+/// Mappings of proofs that startup reconciliation removed from the wallet.
+/// Found in the master, which must not open Redis, and deleted by the first
+/// sweep in the worker holding the redemption lease.
+static ORPHANED_MAPPING_KEYS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Record the mappings of `in_flight` proofs that are no longer in the wallet.
+/// Nothing reads a mapping once its proof is gone.
+async fn record_orphaned_mappings(
+    wallet: &cdk::wallet::Wallet,
+    in_flight: Vec<cdk::types::ProofInfo>,
+) {
+    if in_flight.is_empty() {
+        return;
+    }
+    let remaining: HashSet<_> = match wallet
+        .localstore
+        .get_proofs_by_ys(in_flight.iter().map(|p| p.y).collect())
+        .await
+    {
+        Ok(proofs) => proofs.into_iter().map(|p| p.y).collect(),
+        Err(e) => {
+            warn!("⚠️ Cannot list proofs left after reconciliation: {}", e);
+            return;
+        }
+    };
+    ORPHANED_MAPPING_KEYS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .extend(
+            in_flight
+                .into_iter()
+                .filter(|p| !remaining.contains(&p.y))
+                .map(|p| ngx_l402_core::proof_mapping_key(&p.proof.secret.to_string())),
+        );
+}
+
+/// Delete the Redis mappings of proofs this wallet has spent, then the proofs.
+///
+/// Swaps and melts delete their inputs' mappings, but a Redis failure there
+/// leaves them behind for good. cdk keeps those inputs as `State::Spent`, so
+/// their secrets are still here. A proof is removed only once its mapping is
+/// confirmed deleted: the next pass retries what this one missed, and each
+/// pass only sees proofs spent since the last.
+pub async fn sweep_spent_proof_mappings() {
+    use cdk::cdk_database::WalletDatabase;
+    use cdk::nuts::State;
+
+    // Without Redis nothing was mapped.
+    if matches!(
+        crate::redis_absence_reason(),
+        crate::ReplayClaimError::NotConfigured
+    ) {
+        return;
+    }
+
+    let orphans = std::mem::take(
+        &mut *ORPHANED_MAPPING_KEYS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner),
+    );
+    if let Err(e) = delete_mapping_keys(&orphans) {
+        warn!("⚠️ Failed to delete mappings of reconciled proofs: {}", e);
+        ORPHANED_MAPPING_KEYS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend(orphans);
+    }
+
+    let db = match get_db().await {
+        Ok(db) => db,
+        Err(e) => {
+            warn!("⚠️ Cashu database unavailable for the mapping sweep: {}", e);
+            return;
+        }
+    };
+    let spent = match db
+        .get_proofs(None, None, Some(vec![State::Spent]), None)
+        .await
+    {
+        Ok(spent) => spent,
+        Err(e) => {
+            warn!("⚠️ Cannot list spent proofs for the mapping sweep: {}", e);
+            return;
+        }
+    };
+
+    // A saga still running may yet read its proofs.
+    let mut running = HashSet::new();
+    let mut finished = HashSet::new();
+    for op in spent.iter().filter_map(|p| p.used_by_operation) {
+        if running.contains(&op) || finished.contains(&op) {
+            continue;
+        }
+        match db.get_saga(&op).await {
+            Ok(None) => finished.insert(op),
+            Ok(Some(_)) | Err(_) => running.insert(op),
+        };
+    }
+    let spent: Vec<_> = spent
+        .into_iter()
+        .filter(|p| !p.used_by_operation.is_some_and(|op| running.contains(&op)))
+        .map(|p| (p.y, p.proof.secret.to_string()))
+        .collect();
+
+    let (swept, err) = ngx_l402_core::delete_proof_mappings(spent, delete_mapping_keys);
+    if let Some(e) = err {
+        warn!("⚠️ Mapping sweep stopped, retrying next cycle: {}", e);
+    }
+    if swept.is_empty() {
+        return;
+    }
+    let count = swept.len();
+    match db.update_proofs(vec![], swept).await {
+        Ok(()) => info!("🧹 Removed {} spent proofs and their mappings", count),
+        Err(e) => warn!("⚠️ Failed to remove swept spent proofs: {}", e),
+    }
+}
+
+fn delete_mapping_keys(keys: &[String]) -> Result<(), String> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let pool = crate::redis_pool().ok_or_else(|| crate::redis_absence_reason().to_string())?;
     let mut conn = pool
         .get()
         .map_err(|e| format!("Failed to get redis connection from pool: {}", e))?;
-
-    for proof in proofs {
-        let secret = proof.secret.to_string();
-
-        let mut hasher = Sha256::new();
-        hasher.update(secret.as_bytes());
-
-        let proof_hash = hex::encode(hasher.finalize());
-
-        let redis_key = format!("cashu:proof_lnurl:{}", proof_hash);
-        let _: Result<(), _> = conn
-            .del(&redis_key)
-            .map_err(|e| format!("Failed to delete proof mapping: {}", e));
-    }
-
-    Ok(())
+    conn.del::<_, ()>(keys)
+        .map_err(|e| format!("Failed to delete proof mappings: {}", e))
 }
 
 /// Group proofs by their associated lnurl address for multi-tenant redemption

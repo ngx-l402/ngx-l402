@@ -29,13 +29,14 @@ wait_http() {
 }
 
 # Wait until <container> logs match <pattern>. Use for readiness signals that
-# aren't HTTP, e.g. "start worker processes".
-#   wait_log <container> <pattern> [timeout_secs]
+# aren't HTTP, e.g. "start worker processes". With <since>, only lines logged
+# after it count.
+#   wait_log <container> <pattern> [timeout_secs] [since]
 wait_log() {
-    local container=$1 pattern=$2 timeout=${3:-90}
+    local container=$1 pattern=$2 timeout=${3:-90} since=${4:-}
     local waited=0
     while [ "$waited" -lt "$timeout" ]; do
-        if docker logs "$container" 2>&1 | grep -q "$pattern"; then
+        if docker logs ${since:+--since "$since"} "$container" 2>&1 | grep -q "$pattern"; then
             [ "$waited" -gt 0 ] && echo "  ✓ $container logged '$pattern' after ${waited}s"
             return 0
         fi

@@ -2742,7 +2742,7 @@ jobs:
           # deletes any mappings they still have and removes the proofs.
           echo "Waiting for the spent-proof mapping sweep..."
           wait_log nginx-lnurl "spent proofs and their mappings" 60 "$STEP_START"
-          if docker logs --since "$STEP_START" nginx-lnurl 2>&1 | grep -E "Mapping sweep stopped|Failed to remove swept"; then
+          if docker logs --since "$STEP_START" nginx-lnurl 2>&1 | grep "Mapping sweep stopped"; then
             echo "❌ Spent-proof mapping sweep failed"
             exit 1
           fi

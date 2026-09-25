@@ -2657,6 +2657,19 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
     info!("🚀 Starting L402 module initialization");
     ngx_log_error!(NGX_LOG_INFO, log, "Starting module initialization");
 
+    // nginx may already have registered OpenSSL's exit-time cleanup; the fast
+    // exit skips it. If not, initialising with OPENSSL_INIT_NO_ATEXIT first
+    // stops anything from registering it later, after the fast exit.
+    openssl::init();
+    if let Err(e) = ngx_l402_core::install_fast_exit() {
+        ngx_log_error!(
+            NGX_LOG_WARN,
+            log,
+            "ngx_l402: fast exit unavailable ({}); an exiting worker can crash in library teardown",
+            e
+        );
+    }
+
     // libsodium's RNG is only thread-safe once initialised, and every 402 mints
     // a macaroon from multiple workers at once. Done here, before nginx forks.
     if let Err(e) = macaroon::initialize() {

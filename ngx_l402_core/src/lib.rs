@@ -30,7 +30,7 @@ pub use info::{render as render_info, GlobalInfo, LocationInfo};
 pub use l402_header::parse_l402_header_value;
 pub use p2pk::{parse_p2pk_secret_key, InvalidP2pkKey};
 pub use payment_page::render_payment_page;
-pub use proof_mapping::{delete_proof_mappings, proof_mapping_key, MAPPING_DELETE_BATCH};
+pub use proof_mapping::proof_mapping_key;
 pub use rate_limit::{invoice_rate_limit_key, parse_rate_limit};
 pub use redact::redact_redis_url;
 pub use replay_cache::{ReplayCache, DEFAULT_REPLAY_CACHE_CAP};

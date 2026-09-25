@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, OnceLock};
 use tokio::runtime::Runtime;
 use url::Url;
 
@@ -978,7 +978,7 @@ pub async fn reconcile_pending_proofs() {
                         .await
                         .map(u64::from)
                         .map_err(|e| e.to_string());
-                    record_orphaned_mappings(&wallet, in_flight).await;
+                    keep_reconciled_proofs_for_sweep(&wallet, in_flight).await;
                     reclaimable
                 }
                 Err(e) => Err(e.to_string()),
@@ -1120,14 +1120,13 @@ fn remove_proof_lnurl_mappings(proofs: &cdk::nuts::Proofs) -> Result<(), String>
     delete_mapping_keys(&keys)
 }
 
-/// Mappings of proofs that startup reconciliation removed from the wallet.
-/// Found in the master, which must not open Redis, and deleted by the first
-/// sweep in the worker holding the redemption lease.
-static ORPHANED_MAPPING_KEYS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// Keys per `DEL`, and proofs per wallet-DB delete, in one sweep step.
+const SWEEP_BATCH: usize = 500;
 
-/// Record the mappings of `in_flight` proofs that are no longer in the wallet.
-/// Nothing reads a mapping once its proof is gone.
-async fn record_orphaned_mappings(
+/// Put back, as Spent, the `in_flight` proofs reconciliation deleted, so the
+/// mapping sweep still finds their keys. A deleted proof can't be redeemed, so
+/// storing it as Spent changes nothing else.
+async fn keep_reconciled_proofs_for_sweep(
     wallet: &cdk::wallet::Wallet,
     in_flight: Vec<cdk::types::ProofInfo>,
 ) {
@@ -1145,49 +1144,40 @@ async fn record_orphaned_mappings(
             return;
         }
     };
-    ORPHANED_MAPPING_KEYS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .extend(
-            in_flight
-                .into_iter()
-                .filter(|p| !remaining.contains(&p.y))
-                .map(|p| ngx_l402_core::proof_mapping_key(&p.proof.secret.to_string())),
+    let removed: Vec<_> = in_flight
+        .into_iter()
+        .filter(|p| !remaining.contains(&p.y))
+        .map(|p| cdk::types::ProofInfo {
+            state: cdk::nuts::State::Spent,
+            ..p
+        })
+        .collect();
+    if removed.is_empty() {
+        return;
+    }
+    if let Err(e) = wallet.localstore.update_proofs(removed, vec![]).await {
+        warn!(
+            "⚠️ Failed to keep reconciled proofs for the mapping sweep: {}",
+            e
         );
+    }
 }
 
 /// Delete the Redis mappings of proofs this wallet has spent, then the proofs.
 ///
 /// Swaps and melts delete their inputs' mappings, but a Redis failure there
 /// leaves them behind for good. cdk keeps those inputs as `State::Spent`, so
-/// their secrets are still here. A proof is removed only once its mapping is
-/// confirmed deleted: the next pass retries what this one missed, and each
+/// their secrets are still here. A proof is removed only after its mapping's
+/// `DEL` succeeds, so the next pass retries what this one missed, and each
 /// pass only sees proofs spent since the last.
 pub async fn sweep_spent_proof_mappings() {
     use cdk::cdk_database::WalletDatabase;
     use cdk::nuts::State;
 
     // Without Redis nothing was mapped.
-    if matches!(
-        crate::redis_absence_reason(),
-        crate::ReplayClaimError::NotConfigured
-    ) {
+    if crate::REDIS_URL.get().is_none() {
         return;
     }
-
-    let orphans = std::mem::take(
-        &mut *ORPHANED_MAPPING_KEYS
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner),
-    );
-    if let Err(e) = delete_mapping_keys(&orphans) {
-        warn!("⚠️ Failed to delete mappings of reconciled proofs: {}", e);
-        ORPHANED_MAPPING_KEYS
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend(orphans);
-    }
-
     let db = match get_db().await {
         Ok(db) => db,
         Err(e) => {
@@ -1208,33 +1198,41 @@ pub async fn sweep_spent_proof_mappings() {
 
     // A saga still running may yet read its proofs.
     let mut running = HashSet::new();
-    let mut finished = HashSet::new();
-    for op in spent.iter().filter_map(|p| p.used_by_operation) {
-        if running.contains(&op) || finished.contains(&op) {
-            continue;
+    for op in spent
+        .iter()
+        .filter_map(|p| p.used_by_operation)
+        .collect::<HashSet<_>>()
+    {
+        if !matches!(db.get_saga(&op).await, Ok(None)) {
+            running.insert(op);
         }
-        match db.get_saga(&op).await {
-            Ok(None) => finished.insert(op),
-            Ok(Some(_)) | Err(_) => running.insert(op),
-        };
     }
     let spent: Vec<_> = spent
         .into_iter()
         .filter(|p| !p.used_by_operation.is_some_and(|op| running.contains(&op)))
-        .map(|p| (p.y, p.proof.secret.to_string()))
         .collect();
 
-    let (swept, err) = ngx_l402_core::delete_proof_mappings(spent, delete_mapping_keys);
-    if let Some(e) = err {
-        warn!("⚠️ Mapping sweep stopped, retrying next cycle: {}", e);
+    let mut swept = 0;
+    for batch in spent.chunks(SWEEP_BATCH) {
+        let keys: Vec<String> = batch
+            .iter()
+            .map(|p| ngx_l402_core::proof_mapping_key(&p.proof.secret.to_string()))
+            .collect();
+        if let Err(e) = delete_mapping_keys(&keys) {
+            warn!("⚠️ Mapping sweep stopped, retrying next cycle: {}", e);
+            break;
+        }
+        if let Err(e) = db
+            .update_proofs(vec![], batch.iter().map(|p| p.y).collect())
+            .await
+        {
+            warn!("⚠️ Mapping sweep stopped, retrying next cycle: {}", e);
+            break;
+        }
+        swept += batch.len();
     }
-    if swept.is_empty() {
-        return;
-    }
-    let count = swept.len();
-    match db.update_proofs(vec![], swept).await {
-        Ok(()) => info!("🧹 Removed {} spent proofs and their mappings", count),
-        Err(e) => warn!("⚠️ Failed to remove swept spent proofs: {}", e),
+    if swept > 0 {
+        info!("🧹 Removed {} spent proofs and their mappings", swept);
     }
 }
 

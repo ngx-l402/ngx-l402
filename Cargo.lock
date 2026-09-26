@@ -2482,6 +2482,7 @@ dependencies = [
  "hex",
  "qrcode-generator",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

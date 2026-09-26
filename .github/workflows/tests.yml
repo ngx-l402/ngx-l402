@@ -2779,6 +2779,8 @@ jobs:
       - name: Run Integration Tests - Multi-tenant LNURL Cashu Redemption
         run: |
           echo "🏢 Testing Multi-tenant LNURL Cashu Redemption with 2 tenants..."
+          source .github/scripts/ci-wait.sh
+          STEP_START=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
           # Flush Redis for clean test
           echo "Setting up Redis for multi-tenant testing..."
@@ -2832,6 +2834,17 @@ jobs:
             echo "❌ No proof mappings found in Redis"
             exit 1
           fi
+
+          # ========== VERIFY THE SPENT-PROOF MAPPING SWEEP ==========
+          # The swaps above left their inputs Spent. The next redemption cycle
+          # deletes any mappings they still have and removes the proofs.
+          echo "Waiting for the spent-proof mapping sweep..."
+          wait_log nginx-lnurl "spent proofs and their mappings" 60 "$STEP_START"
+          if docker logs --since "$STEP_START" nginx-lnurl 2>&1 | grep "Mapping sweep stopped"; then
+            echo "❌ Spent-proof mapping sweep failed"
+            exit 1
+          fi
+          echo "✅ Spent proofs swept"
 
           echo "✅ Multi-tenant LNURL Cashu Redemption integration test completed with 2 tenants!"
 

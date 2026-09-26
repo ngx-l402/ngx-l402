@@ -3024,7 +3024,13 @@ fn spawn_cashu_redemption_thread(interval_secs: u64) {
                     // Guarded so a panic here doesn't end the thread and stop all
                     // later redemption cycles.
                     let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                        || thread_rt.block_on(async { cashu::redeem_to_lightning().await }),
+                        || {
+                            thread_rt.block_on(async {
+                                let redeemed = cashu::redeem_to_lightning().await;
+                                cashu::sweep_spent_proof_mappings().await;
+                                redeemed
+                            })
+                        },
                     )) {
                         Ok(r) => r,
                         Err(_) => {

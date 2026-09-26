@@ -299,6 +299,7 @@ These are set inside `location {}` blocks in `nginx.conf` (not environment varia
 | `l402_metrics` | no arguments | — | Serve Prometheus counters from this location; the shipped `nginx.conf` allows only localhost — see [dry-run.md](dry-run.md#prometheus-metrics) |
 | `l402_manifest` | no arguments | — | Serve the JSON manifest of this server's paid routes, normally at `/.well-known/l402-services` — see [manifest.md](manifest.md) |
 | `l402_manifest_hide` | no arguments | — | Leave this location out of the manifest |
+| `l402_info_endpoint` | no arguments | — | Serve a JSON runtime-introspection document (active backend, Redis/Cashu status, post-merge per-location config) from this location — restrict access yourself, see [info.md](info.md) |
 | `l402_log_format` | `json` or `text` | `text` | Emit one structured JSON line per L402 access event (verify, challenge, challenge error, rate-limited) — see [logging.md](logging.md) |
 | `l402_payment_html` | boolean¹ | `on` | Serve the browser payment page with a `402`. Turn it `off` for API and agent routes to return the challenge headers with an empty body |
 

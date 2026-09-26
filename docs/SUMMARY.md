@@ -29,3 +29,4 @@
 - [Logging](./logging.md)
 - [Dry-Run (Shadow) Mode](./dry-run.md)
 - [Capability Manifest](./manifest.md)
+- [Runtime Introspection](./info.md)

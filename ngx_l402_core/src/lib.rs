@@ -11,6 +11,7 @@
 mod cashu_error;
 mod escaping;
 mod fee;
+mod info;
 mod l402_header;
 mod p2pk;
 mod payment_page;
@@ -22,6 +23,7 @@ mod wallet_seed;
 pub use cashu_error::CashuError;
 pub use escaping::{escape_json, html_escape};
 pub use fee::{fee_reserve_msat, melt_reserve_msat, sat_to_msat, MSAT_PER_SAT};
+pub use info::{render as render_info, GlobalInfo, LocationInfo};
 pub use l402_header::parse_l402_header_value;
 pub use p2pk::{parse_p2pk_secret_key, InvalidP2pkKey};
 pub use payment_page::render_payment_page;

@@ -1406,7 +1406,7 @@ pub struct ModuleConfig {
     manifest_hidden: bool,
 }
 
-pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 16] = [
+pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 17] = [
     ngx_command_t {
         name: ngx_string!("l402"),
         type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1) as ngx_uint_t,
@@ -1524,6 +1524,14 @@ pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 16] = [
         name: ngx_string!("l402_exempt_methods"),
         type_: (NGX_HTTP_LOC_CONF | NGX_CONF_1MORE) as ngx_uint_t,
         set: Some(ngx_http_l402_exempt_methods_set),
+        conf: NGX_HTTP_LOC_CONF_OFFSET,
+        offset: 0,
+        post: std::ptr::null_mut(),
+    },
+    ngx_command_t {
+        name: ngx_string!("l402_info_endpoint"),
+        type_: (NGX_HTTP_LOC_CONF | NGX_CONF_NOARGS) as ngx_uint_t,
+        set: Some(ngx_http_l402_info_endpoint_set),
         conf: NGX_HTTP_LOC_CONF_OFFSET,
         offset: 0,
         post: std::ptr::null_mut(),
@@ -3275,64 +3283,15 @@ fn dry_run_runtime() -> &'static Runtime {
 }
 
 /// Content-phase handler for `l402_metrics`. Serves the Prometheus text
-/// exposition format at the configured location (e.g. `/metrics`).
-///
-/// Only `GET` and `HEAD` are accepted; anything else returns `405`.
+/// exposition format at the configured location (e.g. `/metrics`) via
+/// `send_body` (GET/HEAD only, else 405).
 ///
 /// # Safety
 /// `r` must be the non-null, valid request pointer Nginx passes to
 /// content-phase handlers; it stays valid for the handler's lifetime.
 pub unsafe extern "C" fn l402_metrics_content_handler(r: *mut ngx_http_request_t) -> ngx_int_t {
-    // SAFETY: nginx passes a non-null, valid request pointer to content
-    // phase handlers for the lifetime of the call.
-    let r_ref = unsafe { &mut *r };
-
-    let method = r_ref.method as u32;
-    if method & (NGX_HTTP_GET | NGX_HTTP_HEAD) == 0 {
-        return NGX_HTTP_NOT_ALLOWED as ngx_int_t;
-    }
-
-    let rc = unsafe { ngx_http_discard_request_body(r) };
-    if rc != NGX_OK as ngx_int_t {
-        return rc;
-    }
-
     let body = metrics::render();
-    let body_len = body.len();
-
-    // SAFETY: `r` is valid; `Request::from_ngx_http_request` just wraps the
-    // pointer, `pool()` returns a Pool tied to the request lifetime.
-    let req = unsafe { Request::from_ngx_http_request(r) };
-    let pool = req.pool();
-
-    let Some(mut buf) = pool.create_buffer_from_str(&body) else {
-        return NGX_HTTP_INTERNAL_SERVER_ERROR as ngx_int_t;
-    };
-    buf.set_last_buf(true);
-    buf.set_last_in_chain(true);
-
-    let chain = pool.alloc_type::<ngx_chain_t>();
-    if chain.is_null() {
-        return NGX_HTTP_INTERNAL_SERVER_ERROR as ngx_int_t;
-    }
-    // SAFETY: `chain` was allocated above from the request pool.
-    unsafe {
-        (*chain).buf = buf.as_ngx_buf_mut();
-        (*chain).next = std::ptr::null_mut();
-    }
-
-    req.set_status(HTTPStatus::OK);
-    req.set_content_length_n(body_len);
-    let _ = req.add_header_out("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
-
-    let status = req.send_header();
-    if status.0 == NGX_ERROR as ngx_int_t || status.0 > NGX_OK as ngx_int_t || req.header_only() {
-        return status.0;
-    }
-
-    // SAFETY: `chain` is non-null, was just initialised, and lives for the
-    // request via the request pool.
-    unsafe { req.output_filter(&mut *chain).0 }
+    unsafe { send_body(r, &body, "text/plain; version=0.0.4; charset=utf-8", &[]) }
 }
 
 /// Directive handler for `l402_payment_html on|off;`.
@@ -3593,17 +3552,23 @@ pub unsafe extern "C" fn ngx_http_l402_manifest_hide_set(
     std::ptr::null_mut()
 }
 
-/// Content-phase handler for `l402_manifest`. Serves the
-/// `.well-known/l402-services` capability manifest as JSON.
-///
-/// Only `GET` and `HEAD` are accepted; anything else returns `405`. The
-/// manifest is rebuilt on every request — cheap because the registry is
-/// in-process and small (one entry per l402-protected location).
+/// Send a text body from a GET/HEAD content handler: rejects other methods
+/// with 405, discards the request body, then sends `body` with
+/// `content_type` plus any `extra_headers`. Shared by the metrics, manifest
+/// and introspection handlers so buffer/chain/HEAD handling lives in one
+/// place.
 ///
 /// # Safety
 /// `r` must be the non-null, valid request pointer Nginx passes to
-/// content-phase handlers; it stays valid for the handler's lifetime.
-pub unsafe extern "C" fn l402_manifest_content_handler(r: *mut ngx_http_request_t) -> ngx_int_t {
+/// content-phase handlers; it stays valid for the call's lifetime.
+unsafe fn send_body(
+    r: *mut ngx_http_request_t,
+    body: &str,
+    content_type: &str,
+    extra_headers: &[(&str, &str)],
+) -> ngx_int_t {
+    // SAFETY: nginx passes a non-null, valid request pointer to content
+    // phase handlers for the lifetime of the call.
     let r_ref = unsafe { &mut *r };
 
     let method = r_ref.method as u32;
@@ -3616,14 +3581,12 @@ pub unsafe extern "C" fn l402_manifest_content_handler(r: *mut ngx_http_request_
         return rc;
     }
 
-    let snapshots = collect_route_snapshots();
-    let body = manifest::render(&snapshots);
-    let body_len = body.len();
-
+    // SAFETY: `r` is valid; `Request::from_ngx_http_request` just wraps the
+    // pointer, `pool()` returns a Pool tied to the request lifetime.
     let req = unsafe { Request::from_ngx_http_request(r) };
     let pool = req.pool();
 
-    let Some(mut buf) = pool.create_buffer_from_str(&body) else {
+    let Some(mut buf) = pool.create_buffer_from_str(body) else {
         return NGX_HTTP_INTERNAL_SERVER_ERROR as ngx_int_t;
     };
     buf.set_last_buf(true);
@@ -3640,8 +3603,11 @@ pub unsafe extern "C" fn l402_manifest_content_handler(r: *mut ngx_http_request_
     }
 
     req.set_status(HTTPStatus::OK);
-    req.set_content_length_n(body_len);
-    let _ = req.add_header_out("Content-Type", "application/json; charset=utf-8");
+    req.set_content_length_n(body.len());
+    let _ = req.add_header_out("Content-Type", content_type);
+    for (name, value) in extra_headers {
+        let _ = req.add_header_out(name, value);
+    }
 
     let status = req.send_header();
     if status.0 == NGX_ERROR as ngx_int_t || status.0 > NGX_OK as ngx_int_t || req.header_only() {
@@ -3651,6 +3617,32 @@ pub unsafe extern "C" fn l402_manifest_content_handler(r: *mut ngx_http_request_
     // SAFETY: `chain` is non-null, initialised, and lives for the request
     // via the request pool.
     unsafe { req.output_filter(&mut *chain).0 }
+}
+
+/// `send_body` with an `application/json` content type.
+///
+/// # Safety
+/// Same contract as `send_body`.
+unsafe fn send_json(
+    r: *mut ngx_http_request_t,
+    body: &str,
+    extra_headers: &[(&str, &str)],
+) -> ngx_int_t {
+    unsafe { send_body(r, body, "application/json; charset=utf-8", extra_headers) }
+}
+
+/// Content-phase handler for `l402_manifest`. Serves the
+/// `.well-known/l402-services` capability manifest as JSON via `send_json`
+/// (GET/HEAD only, else 405). The manifest is rebuilt on every request —
+/// cheap because the registry is in-process and small (one entry per
+/// l402-protected location).
+///
+/// # Safety
+/// `r` must be the non-null, valid request pointer Nginx passes to
+/// content-phase handlers; it stays valid for the handler's lifetime.
+pub unsafe extern "C" fn l402_manifest_content_handler(r: *mut ngx_http_request_t) -> ngx_int_t {
+    let body = manifest::render(&collect_route_snapshots());
+    unsafe { send_json(r, &body, &[]) }
 }
 
 /// Read each registered route's `ModuleConfig` and build a snapshot. Called
@@ -3683,6 +3675,95 @@ fn collect_route_snapshots() -> Vec<manifest::RouteSnapshot> {
                 rate_limit: conf.invoice_rate_limit,
                 auto_detect_payment: conf.auto_detect_payment,
                 hidden: conf.manifest_hidden,
+            })
+        })
+        .collect()
+}
+
+/// `l402_info_endpoint;` (no args): registers the introspection content
+/// handler for the location.
+///
+/// # Safety
+/// Same guarantees as `ngx_http_l402_manifest_set`: `cf` is the valid config
+/// pointer Nginx passes to directive-parsing callbacks, and the core
+/// location config obtained through it is null-checked before use.
+pub unsafe extern "C" fn ngx_http_l402_info_endpoint_set(
+    cf: *mut ngx_conf_t,
+    _cmd: *mut ngx_command_t,
+    _conf: *mut c_void,
+) -> *mut c_char {
+    // SAFETY: same guarantees as `ngx_http_l402_manifest_set` above.
+    unsafe {
+        let clcf: *mut ngx::ffi::ngx_http_core_loc_conf_t =
+            NgxHttpCoreModule::location_conf_mut(&*cf)
+                .map(|r| r as *mut _)
+                .unwrap_or(std::ptr::null_mut());
+        if clcf.is_null() {
+            return c"l402_info_endpoint: missing core loc conf".as_ptr() as *mut c_char;
+        }
+        if (*clcf).handler.is_some() {
+            error!("l402_info_endpoint: another content handler is already registered for this location");
+            return c"l402_info_endpoint: conflicts with another content handler in this location"
+                .as_ptr() as *mut c_char;
+        }
+        (*clcf).handler = Some(l402_info_content_handler);
+    }
+    info!("⚙️ l402_info_endpoint registered (runtime config introspection)");
+    std::ptr::null_mut()
+}
+
+/// Content-phase handler for `l402_info_endpoint`. Serves the introspection
+/// document as JSON via `send_json` (GET/HEAD only, else 405), rebuilt per
+/// request — cheap because the registry is in-process and small (one entry
+/// per l402-protected location).
+///
+/// No module-level auth by design; operators restrict the location with
+/// standard nginx access controls (`allow`/`deny`, `auth_basic`, a
+/// localhost-only server).
+///
+/// # Safety
+/// `r` must be the non-null, valid request pointer Nginx passes to
+/// content-phase handlers; it stays valid for the handler's lifetime.
+pub unsafe extern "C" fn l402_info_content_handler(r: *mut ngx_http_request_t) -> ngx_int_t {
+    let global = ngx_l402_core::GlobalInfo {
+        backend: backend_label().to_string(),
+        redis_configured: REDIS_URL.get().is_some(),
+        cashu_enabled: manifest::cashu_enabled(),
+    };
+    let locations = collect_info_locations();
+    let body = ngx_l402_core::render_info(&global, &locations);
+
+    // The document maps the protected surface; shared caches must not keep it.
+    unsafe { send_json(r, &body, &[("Cache-Control", "no-store")]) }
+}
+
+/// Walks the same route registry as the capability manifest, so
+/// reload-clearing and post-merge semantics are identical.
+fn collect_info_locations() -> Vec<ngx_l402_core::LocationInfo> {
+    let Ok(registry) = manifest_registry().lock() else {
+        return Vec::new();
+    };
+    registry
+        .iter()
+        .filter_map(|entry| {
+            if entry.conf.0.is_null() {
+                return None;
+            }
+            // SAFETY: the pointer was captured during config parse; the
+            // pointee lives in nginx's cycle pool for the lifetime of the
+            // worker process. No mutable aliasing — we hold a shared ref.
+            let conf = unsafe { &*entry.conf.0 };
+            if !conf.enable {
+                return None;
+            }
+            Some(ngx_l402_core::LocationInfo {
+                path: entry.path.clone(),
+                dry_run: conf.dry_run.unwrap_or(false),
+                indefinite_access: conf.indefinite_access.unwrap_or(false),
+                auto_detect_payment: conf.auto_detect_payment,
+                default_amount_msat: conf.amount_msat,
+                macaroon_timeout_secs: conf.macaroon_timeout,
+                manifest_hidden: conf.manifest_hidden,
             })
         })
         .collect()

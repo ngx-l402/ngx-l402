@@ -76,6 +76,13 @@ fn env_snapshot() -> &'static EnvSnapshot {
     ENV_SNAPSHOT.get_or_init(EnvSnapshot::default)
 }
 
+/// Cashu support flag from the master-process env snapshot — workers
+/// cannot read the environment themselves. Shared with the
+/// `l402_info_endpoint` handler.
+pub fn cashu_enabled() -> bool {
+    env_snapshot().cashu_enabled
+}
+
 /// Snapshot of a single l402-protected location, taken at manifest-render
 /// time (after all `merge_loc_conf` passes have completed).
 #[derive(Clone, Debug)]

@@ -1362,6 +1362,89 @@ jobs:
           fi
           echo "✅ /.well-known/l402-services manifest returned valid JSON"
 
+          # ACL'd to localhost in nginx.conf, so scrape from inside the
+          # container's network namespace (same trick as /metrics).
+          echo "Testing /l402/info introspection endpoint..."
+          info_resp=$(docker run --rm --network container:nginx-lnd curlimages/curl:8.11.1 \
+            -s -i -w "\n%{http_code}" --max-time 30 -H "Connection: close" \
+            http://127.0.0.1:8000/l402/info) || true
+          info_code=$(echo "$info_resp" | tail -n1); info_code=${info_code:-000}
+          if [ "$info_code" -ne 200 ]; then
+            echo "Error: /l402/info returned $info_code, expected 200"
+            echo "$info_resp"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          if ! echo "$info_resp" | grep -qi "application/json"; then
+            echo "Error: /l402/info Content-Type is not application/json"
+            echo "$info_resp"
+            exit 1
+          fi
+          info_json=$(echo "$info_resp" | sed -n '/^{/,/^}/p')
+          if [ "$(echo "$info_json" | jq -r '.backend')" != "LND" ]; then
+            echo "Error: /l402/info backend is $(echo "$info_json" | jq -r '.backend'), expected LND"
+            echo "$info_json"
+            exit 1
+          fi
+          # Per-location knobs must reflect post-merge values, not defaults.
+          for check in \
+            '/protected-indefinite .indefinite_access true' \
+            '/protected-indefinite .macaroon_timeout_secs 60' \
+            '/protected-auto .auto_detect_payment true' \
+            '/shadow .dry_run true' \
+            '/manifest-hidden .manifest_hidden true' \
+            '/protected .default_amount_msat 10000'; do
+            path=$(echo "$check" | cut -d' ' -f1)
+            field=$(echo "$check" | cut -d' ' -f2)
+            want=$(echo "$check" | cut -d' ' -f3)
+            got=$(echo "$info_json" | jq -r ".locations[] | select(.path == \"$path\") | $field")
+            if [ "$got" != "$want" ]; then
+              echo "Error: /l402/info $path $field is $got, expected $want"
+              echo "$info_json"
+              exit 1
+            fi
+          done
+          # The introspection document must never carry secrets.
+          if echo "$info_json" | grep -qiE 'MACAROON_FILE_PATH|NWC_URI|redis://|rediss://|mnemonic'; then
+            echo "Error: /l402/info response contains a secret reference"
+            echo "$info_json"
+            exit 1
+          fi
+          echo "✅ /l402/info returned valid introspection JSON"
+
+          # Only GET/HEAD are introspection methods.
+          info_post_code=$(docker run --rm --network container:nginx-lnd curlimages/curl:8.11.1 \
+            -s -o /dev/null -w "%{http_code}" --max-time 15 -X POST \
+            http://127.0.0.1:8000/l402/info || echo 000)
+          if [ "$info_post_code" != "405" ]; then
+            echo "Error: POST /l402/info returned $info_post_code, expected 405"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "✅ /l402/info rejects POST with 405"
+
+          # HEAD must return 200 with headers only (header_only path).
+          info_head_code=$(docker run --rm --network container:nginx-lnd curlimages/curl:8.11.1 \
+            -s -o /dev/null -w "%{http_code}" --max-time 15 -I \
+            http://127.0.0.1:8000/l402/info || echo 000)
+          if [ "$info_head_code" != "200" ]; then
+            echo "Error: HEAD /l402/info returned $info_head_code, expected 200"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "✅ /l402/info answers HEAD with 200"
+
+          # Regression guard: this ACL ships in the Docker image, so it
+          # must deny off-host access.
+          info_ext_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 \
+            -H "Connection: close" http://0.0.0.0:8000/l402/info || echo 000)
+          if [ "$info_ext_code" != "403" ]; then
+            echo "Error: /l402/info reachable from outside the container (got $info_ext_code, expected 403)"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "✅ /l402/info denied from outside (403)"
+
           # Test protected route without header
           echo "Testing protected route without header..."
           response=$(curl -s -i -w "\n%{http_code}" --max-time 30 -L http://0.0.0.0:8000/protected) || true
@@ -1601,6 +1684,21 @@ jobs:
             exit 1
           fi
           echo "✅ Reload safety: manifest still serves routes after nginx -s reload"
+
+          # /l402/info walks the same registry, so it has the same reload
+          # contract: still serve post-merge locations, not dangle into the
+          # freed previous cycle.
+          info_resp=$(docker run --rm --network container:nginx-lnd curlimages/curl:8.11.1 \
+            -s -w "\n%{http_code}" --max-time 30 -H "Connection: close" \
+            http://127.0.0.1:8000/l402/info) || true
+          info_code=$(echo "$info_resp" | tail -n1); info_code=${info_code:-000}
+          if [ "$info_code" -ne 200 ] || ! echo "$info_resp" | grep -q '"locations"'; then
+            echo "Error: /l402/info after reload returned $info_code, expected 200 with locations"
+            echo "$info_resp"
+            docker logs nginx-lnd
+            exit 1
+          fi
+          echo "✅ Reload safety: /l402/info still serves locations after nginx -s reload"
 
           # Test L402 method binding: a token paid for one HTTP
           # method must not be redeemable on a different method on the same

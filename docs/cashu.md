@@ -125,6 +125,8 @@ Environment=CASHU_MAX_PROOFS_PER_MELT=1000
 
 > Actual melt quote fees are verified against the reserve; warnings appear if the reserve was insufficient.
 
+> The wallet database doesn't keep spent proofs: after each redemption cycle, spent proofs are removed along with their Redis mappings. This needs `CASHU_REDEEM_ON_LIGHTNING=true` and `REDIS_URL`; without either, spent proofs stay in the database as before.
+
 > **Note on `CASHU_WHITELISTED_MINTS`**: If not configured, all mints are accepted in standard mode. **In P2PK mode, whitelisted mints are REQUIRED** for security and the payment request (NUT-24).
 
 ---

@@ -24,9 +24,13 @@ pub fn install_fast_exit() -> io::Result<()> {
     }
 
     extern "C" fn exit_now(status: libc::c_int, _arg: *mut libc::c_void) {
+        // SAFETY: _exit takes any status and never returns. Skipping the
+        // remaining exit handlers is the point.
         unsafe { libc::_exit(status) };
     }
 
+    // SAFETY: on_exit has the glibc signature declared above, exit_now matches
+    // the callback type, and the null argument is never read.
     if unsafe { on_exit(exit_now, std::ptr::null_mut()) } != 0 {
         return Err(io::Error::other("on_exit failed"));
     }

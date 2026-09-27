@@ -2464,6 +2464,7 @@ dependencies = [
  "macaroon",
  "ngx",
  "ngx_l402_core",
+ "openssl",
  "openssl-probe 0.1.6",
  "r2d2",
  "redis",
@@ -2480,6 +2481,7 @@ dependencies = [
  "bip39",
  "cdk",
  "hex",
+ "libc",
  "qrcode-generator",
  "serde_json",
 ]

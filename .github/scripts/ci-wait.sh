@@ -103,9 +103,22 @@ resolve_crash_offsets() {
         return 0
     fi
 
+    # Where the module ends in memory. Offsets past it are in another library,
+    # which addr2line would print as `??`.
+    local end=0 vaddr memsz
+    while read -r vaddr memsz; do
+        if [ $((vaddr + memsz)) -gt "$end" ]; then
+            end=$((vaddr + memsz))
+        fi
+    done < <(readelf -lW "$so" 2>/dev/null | awk '$1 == "LOAD" { print $3, $6 }')
+
     echo "  --- crash site ---"
     for off in $offsets; do
-        echo "      $off  ->  $(addr2line -f -C -e "$so" "$off" 2>/dev/null | head -1)"
+        if [ "$end" -gt 0 ] && [ $((off)) -ge "$end" ]; then
+            printf '      %s  ->  outside the module (it ends at 0x%x): another library\n' "$off" "$end"
+        else
+            echo "      $off  ->  $(addr2line -f -C -e "$so" "$off" 2>/dev/null | head -1)"
+        fi
     done
     rm -f "$so"
 }

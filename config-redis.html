@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-993d879f.js";
+            window.path_to_searchindex_js = "searchindex-14d0a645.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-c42dc3ae.js"></script>
+        <script src="toc-247960a4.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -263,7 +263,7 @@ Environment=L402_CASHU_TOKEN_TTL_SECONDS=86400   # Default: 24 hours
 <tr><td><code>l402:cashu_token:&lt;sha256&gt;</code></td><td>Spent Cashu token: a hash of the token, or in P2PK mode of its proofs, so a re-encoded token still matches</td><td><code>L402_CASHU_TOKEN_TTL_SECONDS</code></td></tr>
 <tr><td><code>l402:settled:&lt;payment hash&gt;</code></td><td>Settled preimage cached by auto-detect</td><td><code>L402_PREIMAGE_TTL_SECONDS</code></td></tr>
 <tr><td><code>l402:invoice_rate:&lt;sha256&gt;</code></td><td>Invoice rate-limit counter for a client and route</td><td>The rate-limit window</td></tr>
-<tr><td><code>cashu:proof_lnurl:&lt;sha256&gt;</code></td><td>Which tenant a Cashu proof belongs to</td><td>20 redemption intervals — see <a href="./config-multi-tenant.html">Multi-Tenant</a></td></tr>
+<tr><td><code>cashu:proof_lnurl:&lt;sha256&gt;</code></td><td>Which tenant a Cashu proof belongs to</td><td>Until the proof is spent — see <a href="./config-multi-tenant.html">Multi-Tenant</a></td></tr>
 </tbody>
 </table>
 </div>

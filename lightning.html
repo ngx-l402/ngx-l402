@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-993d879f.js";
+            window.path_to_searchindex_js = "searchindex-14d0a645.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-c42dc3ae.js"></script>
+        <script src="toc-247960a4.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -289,9 +289,9 @@
 <p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path></svg>Note</p>
 <p><strong>NWC works for <em>accepting</em> payments, not just paying.</strong> A common misconception is that Nostr Wallet Connect (NIP-47) is only a spending protocol. <code>LN_CLIENT_TYPE=NWC</code> uses the connection to <strong>receive</strong>: it creates each L402 invoice with <code>make_invoice</code> and verifies payment with <code>lookup_invoice</code>. The catch is that both are <strong>optional</strong> NIP-47 methods — not every wallet implements them, and a given connection secret may be permission-scoped (e.g. pay-only). Use a wallet and connection that grant <code>make_invoice</code> <strong>and</strong> <code>lookup_invoice</code> (a wallet advertises its supported commands in its NIP-47 info event); a pay-only connection can spend but cannot accept.</p>
 </blockquote>
-<blockquote class="blockquote-tag blockquote-tag-warning">
-<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path></svg>Warning</p>
-<p>Some wallets (e.g. <a href="https://www.walletofsatoshi.com/">Wallet of Satoshi</a>) return <strong>48-byte non-standard preimages</strong>, which are <strong>not compatible</strong> with this module. Use a wallet that returns a standard 32-byte preimage.</p>
+<blockquote class="blockquote-tag blockquote-tag-note">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path></svg>Note</p>
+<p>The payer needs the payment’s preimage: 32 bytes, 64 hex characters. Most wallets show it after paying. Some don’t, notably custodial wallets when payer and payee share the provider, since the payment settles inside their database and no preimage comes back. For those payers, turn on <a href="#auto-detect-payment-server-side-settlement-lookup">auto-detect</a>: the gateway checks the invoice itself.</p>
 </blockquote>
 <hr>
 <h2 id="also-supported-cashu-ecash"><a class="header" href="#also-supported-cashu-ecash">Also Supported: Cashu eCash</a></h2>

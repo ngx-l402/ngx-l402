@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-993d879f.js";
+            window.path_to_searchindex_js = "searchindex-14d0a645.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-c42dc3ae.js"></script>
+        <script src="toc-247960a4.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -241,7 +241,7 @@
 <tr><td><code>200</code></td><td>Payment verified — the upstream response is returned</td></tr>
 <tr><td><code>402</code></td><td>No credential presented, or auto-detect found the invoice unpaid. Carries the <code>WWW-Authenticate</code> L402 challenge, and <code>X-Cashu</code> when Cashu is enabled</td></tr>
 <tr><td><code>401</code></td><td>A credential was presented and failed: malformed, tampered, replayed, or the preimage does not match. Carries <code>WWW-Authenticate: L402</code>; retry without a credential for a fresh challenge</td></tr>
-<tr><td><code>400</code></td><td>A Cashu token from an unlisted mint, in the wrong unit, or below the price</td></tr>
+<tr><td><code>400</code></td><td>A Cashu token from an unlisted mint, in the wrong unit, or below the price once the mint’s input fee is taken out</td></tr>
 <tr><td><code>429</code></td><td>Invoice rate limit hit (<code>l402_invoice_rate_limit</code>)</td></tr>
 <tr><td><code>500</code></td><td>The gateway failed — an unreachable mint, Lightning node or Redis, or a failed database write, not a problem with your payment</td></tr>
 <tr><td><code>503</code></td><td>A Lightning credential arrived while <code>REDIS_URL</code> is set but Redis is unreachable; retry once it is back</td></tr>

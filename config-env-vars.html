@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-993d879f.js";
+            window.path_to_searchindex_js = "searchindex-14d0a645.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-c42dc3ae.js"></script>
+        <script src="toc-247960a4.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -439,6 +439,7 @@ Environment=L402_PERF_LOG=true
 <tr><td><code>l402_metrics</code></td><td>no arguments</td><td>—</td><td>Serve Prometheus counters from this location; the shipped <code>nginx.conf</code> allows only localhost — see <a href="dry-run.html#prometheus-metrics">dry-run.md</a></td></tr>
 <tr><td><code>l402_manifest</code></td><td>no arguments</td><td>—</td><td>Serve the JSON manifest of this server’s paid routes, normally at <code>/.well-known/l402-services</code> — see <a href="manifest.html">manifest.md</a></td></tr>
 <tr><td><code>l402_manifest_hide</code></td><td>no arguments</td><td>—</td><td>Leave this location out of the manifest</td></tr>
+<tr><td><code>l402_info_endpoint</code></td><td>no arguments</td><td>—</td><td>Serve a JSON runtime-introspection document (active backend, Redis/Cashu status, post-merge per-location config) from this location — restrict access yourself, see <a href="info.html">info.md</a></td></tr>
 <tr><td><code>l402_log_format</code></td><td><code>json</code> or <code>text</code></td><td><code>text</code></td><td>Emit one structured JSON line per L402 access event (verify, challenge, challenge error, rate-limited) — see <a href="logging.html">logging.md</a></td></tr>
 <tr><td><code>l402_payment_html</code></td><td>boolean¹</td><td><code>on</code></td><td>Serve the browser payment page with a <code>402</code>. Turn it <code>off</code> for API and agent routes to return the challenge headers with an empty body</td></tr>
 </tbody>

@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-993d879f.js";
+            window.path_to_searchindex_js = "searchindex-14d0a645.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-c42dc3ae.js"></script>
+        <script src="toc-247960a4.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -230,6 +230,13 @@ cargo build --release --features export-modules
 <ol start="4">
 <li>Follow the remaining <a href="./install-manual.html">manual installation steps</a>.</li>
 </ol>
+<hr>
+<h2 id="how-worker-processes-exit"><a class="header" href="#how-worker-processes-exit">How Worker Processes Exit</a></h2>
+<p>When nginx starts, the module registers an exit handler that ends each exiting process with <code>_exit()</code>. This stops a worker crashing while OpenSSL frees its state at exit and the module’s background threads are still using it (<a href="https://github.com/ngx-l402/ngx-l402/issues/201">#201</a>).</p>
+<ul>
+<li><strong>Earlier exit handlers are skipped.</strong> Exit handlers run in reverse order, so this one skips every handler registered before the module loaded, not only OpenSSL’s: nginx core’s, those of modules loaded earlier, and the stdio flush. nginx writes its logs with <code>write()</code>, so no log lines are lost. A module that needs an <code>atexit</code> handler to run should load after this one.</li>
+<li><strong>glibc only.</strong> The handler uses glibc’s <code>on_exit</code>. On musl builds, such as Alpine, it isn’t installed: nginx logs <code>ngx_l402: fast exit unavailable</code> at startup, and an exiting worker can still crash in OpenSSL’s cleanup. The crash happens only as the worker exits, so no requests are lost, but it shows up as a <code>SIGSEGV</code> in the error log. The Docker image is glibc-based and isn’t affected.</li>
+</ul>
 
                     </main>
 

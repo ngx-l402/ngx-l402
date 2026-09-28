@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-993d879f.js";
+            window.path_to_searchindex_js = "searchindex-14d0a645.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-c42dc3ae.js"></script>
+        <script src="toc-247960a4.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -197,7 +197,10 @@
 <li><strong>No <code>REDIS_URL</code></strong>: nothing can be mapped, so every tenant’s proofs are redeemed to <code>LNURL_ADDRESS</code>.</li>
 <li><strong>Redis configured but unreachable</strong>: redemption pauses rather than guess, and the proofs stay unspent until Redis is back.</li>
 </ul>
-<p>A mapping lives for 20 redemption intervals, between one and thirty days and never less than two intervals. Proofs still unredeemed after that go to <code>LNURL_ADDRESS</code>.</p>
+<p>Mappings don’t expire. A mapping is deleted once its proofs are swapped or melted. If that delete fails, for example because Redis blipped, the worker running redemption removes it on its next pass, along with the spent proofs in the wallet database.</p>
+<blockquote>
+<p><strong>Note</strong>: That cleanup pass runs after each redemption cycle, so it needs <code>CASHU_REDEEM_ON_LIGHTNING=true</code>. With redemption off, mappings are still deleted when their proofs are spent, but nothing retries a failed delete.</p>
+</blockquote>
 <hr>
 <h2 id="nginx-configuration"><a class="header" href="#nginx-configuration">Nginx Configuration</a></h2>
 <pre><code class="language-nginx"># Tenant 1 — payments go to alice@getalby.com

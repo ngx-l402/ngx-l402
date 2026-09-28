@@ -17,7 +17,9 @@ If Redis is missing or down:
 - **No `REDIS_URL`**: nothing can be mapped, so every tenant's proofs are redeemed to `LNURL_ADDRESS`.
 - **Redis configured but unreachable**: redemption pauses rather than guess, and the proofs stay unspent until Redis is back.
 
-A mapping lives for 20 redemption intervals, between one and thirty days and never less than two intervals. Proofs still unredeemed after that go to `LNURL_ADDRESS`.
+Mappings don't expire. A mapping is deleted once its proofs are swapped or melted. If that delete fails, for example because Redis blipped, the worker running redemption removes it on its next pass, along with the spent proofs in the wallet database.
+
+> **Note**: That cleanup pass runs after each redemption cycle, so it needs `CASHU_REDEEM_ON_LIGHTNING=true`. With redemption off, mappings are still deleted when their proofs are spent, but nothing retries a failed delete.
 
 ---
 

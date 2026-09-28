@@ -106,10 +106,11 @@ The keys that matter:
 - `CASHU_REDEEM_ON_LIGHTNING=true` melts received ecash to your configured
   Lightning backend (the LNURL address, in this example).
 
-The wallet and replay state persist in the `cashu-data` volume. The compose
-`command` chowns it to `nginx` on start (the image's own chown script only runs
-under a plain `nginx` command, which a custom command like this one bypasses); if
-you change the command, keep that chown or the wallet can't be written.
+The wallet and replay state persist in the `cashu-data` volume. A custom
+`command` like this one skips the image's entrypoint scripts, so it runs the
+Cashu permissions script itself: root keeps the wallet phrase, nginx writes the
+database. If you change the command, keep that script, or Cashu refuses the
+phrase after the next restart.
 
 Verify the challenge before pointing a client at it:
 

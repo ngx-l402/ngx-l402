@@ -75,16 +75,17 @@ services:
         condition: service_started
       certbot:
         condition: service_healthy
-    # Give the cashu volume to nginx (the image's own chown script is skipped by a
-    # custom command like this one), render ${DOMAIN} into the config, then run
-    # nginx and reload every 6h so renewed certs are picked up. The 6h delay is
+    # A custom command skips the image's entrypoint scripts, so run its Cashu
+    # permissions script here: the module refuses a wallet phrase nginx owns.
+    # Then render ${DOMAIN} into the config, run nginx and reload every 6h so
+    # renewed certs are picked up. The 6h delay is
     # safe: Let's Encrypt renews ~30 days before expiry, so nginx never serves an
     # expired cert while waiting for the next reload (and `nginx -s reload` is
     # graceful — no dropped connections).
     command:
       - sh
       - -c
-      - "chown -R nginx:nginx /cashu 2>/dev/null; chmod 750 /cashu 2>/dev/null; envsubst '$$DOMAIN' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && { while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g 'daemon off;'; }"
+      - "/docker-entrypoint.d/05-cashu-data-perms.sh && envsubst '$$DOMAIN' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && { while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g 'daemon off;'; }"
 
 volumes:
   redis-data:

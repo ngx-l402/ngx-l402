@@ -44,9 +44,8 @@ impl ContentService for ContentServiceImpl {
 
     async fn get_protected_content(
         &self,
-        request: Request<ContentRequest>,
+        _request: Request<ContentRequest>,
     ) -> Result<Response<ContentResponse>, Status> {
-        let req = request.into_inner();
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -65,9 +64,8 @@ impl ContentService for ContentServiceImpl {
 
     async fn get_free_content(
         &self,
-        request: Request<ContentRequest>,
+        _request: Request<ContentRequest>,
     ) -> Result<Response<ContentResponse>, Status> {
-        let req = request.into_inner();
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()

@@ -11,7 +11,5 @@ git-repository-url = "https://github.com/ngx-l402/ngx-l402"
 edit-url-template = "https://github.com/ngx-l402/ngx-l402/edit/main/docs/{path}"
 additional-js = ["mermaid.min.js", "mermaid-init.js"]
 
-[preprocessor.links]
-
 [preprocessor.mermaid]
 command = "mdbook-mermaid"

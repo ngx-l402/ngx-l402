@@ -25,8 +25,7 @@ pub fn sat_to_msat(sats: u64) -> u64 {
 
 /// Compute the Lightning fee reserve, in millisatoshis, to hold back from a
 /// redemption of `amount_msat`: `percent`% of the amount, but never less than
-/// `min_reserve_msat`. Matches the truncating `as u64` behaviour of the
-/// production melt loop exactly.
+/// `min_reserve_msat`.
 pub fn fee_reserve_msat(amount_msat: u64, percent: f64, min_reserve_msat: u64) -> u64 {
     let percentage_fee = ((amount_msat as f64) * (percent / 100.0)) as u64;
     percentage_fee.max(min_reserve_msat)

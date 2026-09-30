@@ -2482,6 +2482,7 @@ dependencies = [
  "cdk",
  "hex",
  "libc",
+ "log",
  "qrcode-generator",
  "serde_json",
  "sha2",

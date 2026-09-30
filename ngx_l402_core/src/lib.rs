@@ -3,12 +3,13 @@
 //!
 //! The main crate is a `cdylib` that links nginx via `nginx-sys`; a test binary
 //! built from it can't resolve nginx's runtime-provided symbols, so it can't
-//! host runnable unit tests. The custody-critical pure pieces — wallet-seed
-//! derivation today — live here instead, where `cargo test -p ngx_l402_core`
+//! host runnable unit tests. The custody-critical pure pieces live here
+//! instead, where `cargo test -p ngx_l402_core`
 //! runs in seconds with no nginx and no Docker. A silent change to any of these
 //! can strand user funds, so each is pinned by tests in its own module.
 
 mod cashu_error;
+mod dleq;
 mod escaping;
 mod fast_exit;
 mod fee;
@@ -23,6 +24,7 @@ mod replay_cache;
 mod wallet_seed;
 
 pub use cashu_error::CashuError;
+pub use dleq::{parse_require_dleq, verify_proof_dleq_offline};
 pub use escaping::{escape_json, html_escape};
 pub use fast_exit::install_fast_exit;
 pub use fee::{fee_reserve_msat, melt_reserve_msat, sat_to_msat, MSAT_PER_SAT};

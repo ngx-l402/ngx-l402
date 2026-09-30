@@ -3,7 +3,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tonic::{transport::Server, Request, Response, Status};
 use tonic_reflection::server::Builder as ReflectionBuilder;
 
-// Import the generated protobuf code
 pub mod content {
     tonic::include_proto!("content");
 }
@@ -87,7 +86,6 @@ impl ContentService for ContentServiceImpl {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize logger
     env_logger::init();
 
     let addr = "0.0.0.0:50051".parse()?;

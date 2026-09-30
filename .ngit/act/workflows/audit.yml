@@ -24,6 +24,4 @@ jobs:
 
       - name: Run cargo audit
         # Audit the dependency tree against the RustSec advisory database.
-        # `lightning 0.0.125` and `tonic 0.7` are known-outdated; once they are
-        # upgraded, drop the corresponding --ignore flags so regressions fail CI.
         run: cargo audit

@@ -127,8 +127,6 @@ async fn run_benchmark(
     let status_codes_map: Arc<tokio::sync::Mutex<std::collections::HashMap<u16, usize>>> =
         Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
 
-    // Latency tracking - use atomic u64 array approach for thread safety
-    // We'll collect latencies in a channel
     let (latency_tx, mut latency_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
 
     // Memory tracking

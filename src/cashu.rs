@@ -1476,7 +1476,6 @@ pub async fn verify_cashu_token(
         total_amount_msat, amount_msat
     );
 
-    // Extract mint URL from the token
     // Extract and normalize the mint URL from the token immediately so that
     // any extra trailing slash or whitespace in the token metadata is stripped
     // before the whitelist check, wallet creation, and logging.

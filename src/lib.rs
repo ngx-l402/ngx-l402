@@ -1977,10 +1977,10 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
 
     // Fetch dynamic config (price + lnurl) from Redis only when it can affect the
     // outcome: the Cashu auth path needs the per-path amount + lnurl for verification,
-    // and the no-auth path needs them for the 402 challenge. The L402 macaroon path
-    // uses neither, so we skip the Redis round-trip entirely for it.
+    // and every path that ends in a 402 challenge needs them to quote the price. The
+    // L402 macaroon path uses neither, so we skip the Redis round-trip entirely for it.
     let needs_dynamic_config = match auth_header.as_deref() {
-        Some(s) => s.starts_with("Cashu "),
+        Some(s) => !ngx_l402_core::is_l402_scheme(s),
         None => true,
     };
 
@@ -2446,7 +2446,7 @@ pub fn l402_access_handler(
                     return 500;
                 }
             }
-        } else {
+        } else if ngx_l402_core::is_l402_scheme(&auth_str) {
             // ── Determine whether the header has a preimage suffix ──────────
             // Classic:     L402 <macaroon>:<hex-preimage>
             // Auto-detect: L402 <macaroon>           (no colon / preimage)
@@ -2607,7 +2607,7 @@ pub fn l402_access_handler(
         }
     }
 
-    debug!("🚨 No authorization header found, sending L402 challenge");
+    debug!("🚨 No L402 credential presented, sending L402 challenge");
     402
 }
 

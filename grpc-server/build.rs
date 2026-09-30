@@ -5,7 +5,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tonic_build::configure()
         .build_server(true)
-        .build_client(true)
         .file_descriptor_set_path(format!("{}/content_descriptor.bin", out_dir))
         .compile(proto_files, include_dirs)?;
 

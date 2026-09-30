@@ -1,9 +1,19 @@
 name: Security Audit
 
+# Run only when the audit's inputs change: the workspace lockfile, the
+# manifests, and this workflow itself (the --ignore flags live here). The
+# weekly cron still catches advisories against an unchanged lockfile.
+# stress-test/Cargo.lock is outside the workspace and never audited (known
+# gap).
 on:
   push:
     branches:
       - main
+    paths:
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'ngx_l402_core/Cargo.toml'
+      - '.github/workflows/audit.yml'
   pull_request:
   schedule:
     # Re-run weekly so newly-disclosed advisories are caught even without a push.

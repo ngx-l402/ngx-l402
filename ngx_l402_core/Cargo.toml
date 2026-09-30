@@ -21,6 +21,9 @@ cdk = { version = "0.18.1", default-features = false, features = ["wallet"] }
 # macaroon as JSON literals inside an inline <script>.
 qrcode-generator = "4"
 serde_json = "1.0"
+# The DLEQ policy admit-without-verification path warns through this facade;
+# the main crate installs the actual logger.
+log = "0.4"
 # glibc's exit handlers, for `install_fast_exit`.
 libc = "0.2.189"
 # Proof-to-tenant mapping keys hash the proof secret.

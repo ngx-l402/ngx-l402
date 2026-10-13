@@ -1,4 +1,3 @@
-version: '3.8'
 name: ngx-l402
 
 services:
@@ -252,8 +251,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        - NGX_MODULE=ngx_http_l402_module.so
     ports:
       - "8000:8000"
     environment:
@@ -285,8 +282,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        - NGX_MODULE=ngx_http_l402_module.so
     ports:
       - "8000:8000"
     environment:
@@ -305,8 +300,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        - NGX_MODULE=ngx_http_l402_module.so
     ports:
       - "8000:8000"
     environment:
@@ -324,8 +317,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        - NGX_MODULE=ngx_http_l402_module.so
     ports:
       - "8000:8000"
     environment:
@@ -346,8 +337,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        - NGX_MODULE=ngx_http_l402_module.so
     ports:
       - "8000:8000"
     environment:
@@ -361,7 +350,7 @@ services:
       - CASHU_WALLET_MNEMONIC=${CASHU_WALLET_MNEMONIC}
       - CASHU_REDEEM_ON_LIGHTNING=true
       - CASHU_REDEMPTION_INTERVAL_SECS=15
-      - CASHU_WHITELISTED_MINTS=http://cashu-mint:3338,http://cashu-mint1:3338
+      - CASHU_WHITELISTED_MINTS=http://cashu-mint:3338
       - CASHU_P2PK_MODE=${CASHU_P2PK_MODE:-false}
       - CASHU_P2PK_PRIVATE_KEY=${CASHU_P2PK_PRIVATE_KEY:-}
       - CASHU_REQUIRE_DLEQ=${CASHU_REQUIRE_DLEQ:-true}
@@ -379,8 +368,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        - NGX_MODULE=ngx_http_l402_module.so
     ports:
       - "8000:8000"
     environment:
@@ -424,8 +411,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        - NGX_MODULE=ngx_http_l402_module.so
     ports:
       - "8000:8000"
     environment:

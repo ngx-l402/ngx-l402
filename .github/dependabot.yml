@@ -1,0 +1,34 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+
+  # grpc-server is a standalone crate (excluded from the root workspace).
+  - package-ecosystem: cargo
+    directory: /grpc-server
+    schedule:
+      interval: weekly
+
+  # stress-test is also a standalone crate (excluded from the root workspace).
+  - package-ecosystem: cargo
+    directory: /stress-test
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+
+  # grpc-server has its own Dockerfile (FROM rust:1.85).
+  - package-ecosystem: docker
+    directory: /grpc-server
+    schedule:
+      interval: weekly

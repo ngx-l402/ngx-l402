@@ -59,7 +59,7 @@ jobs:
           CURRENCY: USD
           AMOUNT: 0.01
         run: |
-          sudo curl -L "https://github.com/docker/compose/releases/download/v2.29.1/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+          sudo curl -fL --connect-timeout 15 --max-time 300 --retry 3 "https://github.com/docker/compose/releases/download/v2.29.1/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
           sudo chmod +x /usr/local/bin/docker-compose
           docker-compose -f docker-compose.yml up -d bitcoind
 
@@ -474,7 +474,8 @@ jobs:
 
           # Install grpcurl for testing gRPC endpoints
           echo "Installing grpcurl..."
-          curl -L https://github.com/fullstorydev/grpcurl/releases/download/v1.8.9/grpcurl_1.8.9_linux_x86_64.tar.gz | tar -xzf - -C /tmp
+          curl -fL --connect-timeout 15 --max-time 300 --retry 3 https://github.com/fullstorydev/grpcurl/releases/download/v1.8.9/grpcurl_1.8.9_linux_x86_64.tar.gz -o /tmp/grpcurl.tar.gz
+          tar -xzf /tmp/grpcurl.tar.gz -C /tmp
           sudo mv /tmp/grpcurl /usr/local/bin/
 
           # Test gRPC service reflection

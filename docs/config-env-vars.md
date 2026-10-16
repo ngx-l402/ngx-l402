@@ -290,6 +290,7 @@ These are set inside `location {}` blocks in `nginx.conf` (not environment varia
 | `l402_amount_msat_default` | integer | — | Price in millisatoshis (overridden by Redis dynamic pricing). Cashu payment requests carry a whole number of sats, so a sub-sat price is advertised rounded **up** while Lightning is charged exactly; the module warns at startup when the two diverge |
 | `l402_macaroon_timeout` | integer (seconds) | `0` (disabled) | Macaroon validity window; `0` = no expiry |
 | `l402_lnurl_addr` | string | — | Per-location LNURL address for multi-tenant setups |
+| `l402_tenant_ref` | tenant name | — | Pay this location's revenue to a tenant defined with `l402_tenant`; see [config-multi-tenant.md](config-multi-tenant.md#named-tenants) |
 | `l402_invoice_rate_limit` | `<N>r/s`, `<N>r/m`, `<N>r/h`, or `<N>` (per minute) | disabled | Max invoice generation rate per IP per route |
 | `l402_auto_detect_payment` | boolean¹ | `off` | Server-side payment detection — queries the Lightning node instead of requiring the client to supply the preimage |
 | `l402_indefinite_access` | boolean¹ | `off` | Skip the single-use preimage replay check — a single payment stays valid for the macaroon lifetime |
@@ -304,6 +305,12 @@ These are set inside `location {}` blocks in `nginx.conf` (not environment varia
 | `l402_payment_html` | boolean¹ | `on` | Serve the browser payment page with a `402`. Turn it `off` for API and agent routes to return the challenge headers with an empty body |
 
 > ¹ **Boolean directives** accept: `on` / `off` / `true` / `false` / `1` / `0` / `yes` / `no` (case-insensitive).
+
+### `http`-level directives
+
+| Directive | Form | Description |
+|---|---|---|
+| `l402_tenant` | `<name> lnurl=<address>` | Define a named tenant for locations to reference with `l402_tenant_ref`; see [config-multi-tenant.md](config-multi-tenant.md#named-tenants) |
 
 ### API routes: skipping the payment page
 

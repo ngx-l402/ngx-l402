@@ -218,6 +218,9 @@ jobs:
 
           echo "✅ Multi-tenant LNURL Lightning integration tests completed!"
 
+      - name: Run Integration Tests - Named Tenants
+        run: bash .github/scripts/test-tenant-config.sh nginx-lnurl
+
       - name: Run Integration Tests - Exempt Methods
         run: |
           source .github/scripts/ci-wait.sh

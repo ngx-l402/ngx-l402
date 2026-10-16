@@ -8,7 +8,7 @@ The module supports **multi-tenant mode**, allowing different API routes to use 
 
 ## How It Works
 
-1. **Per-location LNURL addresses**: Use the `l402_lnurl_addr` directive to specify a different LNURL address per Nginx location block.
+1. **Per-location LNURL addresses**: Name each tenant once with `l402_tenant` and point locations at it with `l402_tenant_ref`, or give a location its address directly with `l402_lnurl_addr`.
 2. **Proof tracking**: When a Cashu token is received, the proofs are mapped to the tenant's LNURL address in Redis, in both standard and P2PK mode.
 3. **Grouped redemption**: The automatic redemption task groups proofs by tenant and redeems each group to the correct LNURL address.
 
@@ -24,6 +24,39 @@ Mappings don't expire. A mapping is deleted once its proofs are swapped or melte
 ---
 
 ## Nginx Configuration
+
+### Named tenants
+
+Define each tenant once at `http` level, then reference it by name:
+
+```nginx
+http {
+    l402_tenant alice lnurl=alice@getalby.com;
+    l402_tenant bob   lnurl=bob@getalby.com;
+
+    server {
+        location /api/alice/ { l402 on; l402_amount_msat_default 10000; l402_tenant_ref alice; }
+        location /api/bob/   { l402 on; l402_amount_msat_default 15000; l402_tenant_ref bob; }
+    }
+}
+```
+
+A tenant name is letters, digits, `-` and `_`. `lnurl=` is the only key so far and is required.
+
+A location that sets neither `l402_tenant_ref` nor `l402_lnurl_addr` inherits its parent's destination. Setting either one replaces it.
+
+nginx refuses to start when:
+
+- `l402_tenant_ref` names a tenant that no `l402_tenant` defines. The error lists the tenants that are defined.
+- two `l402_tenant` lines use the same name.
+- one location sets both `l402_tenant_ref` and `l402_lnurl_addr`.
+- `l402_tenant_ref` is used with `CASHU_ECASH_SUPPORT=true` and an `LN_CLIENT_TYPE` other than `LNURL`. Only LNURL mode redeems Cashu per tenant, so on any other backend the tenant would be paid for Lightning and the operator would keep the Cashu.
+
+The same backend mismatch with `l402_lnurl_addr` only logs a warning, so configs that start today keep starting.
+
+### Addresses per location
+
+`l402_lnurl_addr` sets an address on a single location. It is the shorter form when a tenant has only one route:
 
 ```nginx
 # Tenant 1 — payments go to alice@getalby.com
@@ -79,7 +112,7 @@ Environment=CASHU_REDEMPTION_INTERVAL_SECS=60
 
 ## Dynamic LNURL Override via Redis
 
-You can also override the LNURL address per path dynamically without reloading Nginx:
+You can also override the LNURL address per path dynamically without reloading Nginx. The override takes precedence over both `l402_tenant_ref` and `l402_lnurl_addr`:
 
 ```bash
 SET lnurl:/api/tenant1 alice@getalby.com

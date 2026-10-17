@@ -127,7 +127,8 @@ The endpoint maps your entire protected surface, so treat it like
   so an `/l402/info` location sitting under an `l402 on;` parent (or one
   where you add `l402 on;` directly) answers with 402 challenges instead of
   JSON. That's a valid way to sell access to your own introspection, but it
-  is almost never what you want for a debugging endpoint.
+  is almost never what you want for a debugging endpoint. Add `l402 off;`
+  to a nested endpoint location to keep it free.
 - **Per-worker registry.** Like the manifest, the route registry is
   rebuilt per worker from the shared config, so every worker renders the
   same document.

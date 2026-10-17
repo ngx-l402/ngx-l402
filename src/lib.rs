@@ -1362,7 +1362,10 @@ unsafe impl HttpModuleServerConf for L402Module {
 
 #[derive(Debug, Default)]
 pub struct ModuleConfig {
-    enable: bool,
+    // `None` means unset (inherit from the parent scope); `Some(false)` is an
+    // explicit `l402 off;`, which stops a parent `on` from reaching this
+    // location. Off when never set anywhere.
+    enable: Option<bool>,
     // HTTP methods (uppercase) exempt from the paywall for this location, set via
     // `l402_exempt_methods HEAD;`. Exempt requests pass through unpaywalled — e.g.
     // an informational `HEAD` presence check that should not require payment.
@@ -1379,7 +1382,9 @@ pub struct ModuleConfig {
     // (max_requests, window_secs): e.g. (5, 60) means 5 invoices per minute per IP per route.
     // None means rate limiting is disabled for this location.
     invoice_rate_limit: Option<(u32, u64)>,
-    auto_detect_payment: bool,
+    // Tri-state like `enable`, so `l402_auto_detect_payment off;` in an inner
+    // location overrides `on` from the outer scope.
+    auto_detect_payment: Option<bool>,
     // Shadow mode: evaluate pricing and generate challenges but never block
     // the request. Used for safe production rollouts. `None` means unset
     // (inherit from parent scope); `Some(false)` explicitly turns it off and
@@ -1591,9 +1596,11 @@ pub static mut ngx_http_l402_module: ngx_module_t = ngx_module_t {
 
 impl Merge for ModuleConfig {
     fn merge(&mut self, prev: &ModuleConfig) -> Result<(), MergeConfigError> {
-        if prev.enable {
-            self.enable = true;
-        };
+        // Child wins if set: `l402 off;` in an inner location must free it
+        // even when the outer scope charges.
+        if self.enable.is_none() {
+            self.enable = prev.enable;
+        }
         if prev.amount_msat > 0 && self.amount_msat == 0 {
             self.amount_msat = prev.amount_msat;
         }
@@ -1609,8 +1616,8 @@ impl Merge for ModuleConfig {
         if self.invoice_rate_limit.is_none() {
             self.invoice_rate_limit = prev.invoice_rate_limit;
         }
-        if prev.auto_detect_payment {
-            self.auto_detect_payment = true;
+        if self.auto_detect_payment.is_none() {
+            self.auto_detect_payment = prev.auto_detect_payment;
         }
         // Standard "child wins if set" merge — `l402_dry_run off;` in an inner
         // location overrides `l402_dry_run on;` on the outer scope.
@@ -1639,7 +1646,10 @@ impl Merge for ModuleConfig {
         // first request claims it and the replay check rejects the rest, so
         // without indefinite access the operator has sold exactly one request.
         // env_logger is not up during config parse — stderr is what nginx shows.
-        if self.enable && self.realm.is_some() && !self.indefinite_access.unwrap_or(false) {
+        if self.enable.unwrap_or(false)
+            && self.realm.is_some()
+            && !self.indefinite_access.unwrap_or(false)
+        {
             eprintln!(
                 "ngx_l402: l402_realm requires l402_indefinite_access on. Without it the \
                  realm token is accepted once and every later request in the realm is \
@@ -1654,7 +1664,7 @@ impl Merge for ModuleConfig {
         let cashu_on = std::env::var("CASHU_ECASH_SUPPORT")
             .map(|v| v.trim().eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        if self.enable && cashu_on && self.amount_msat % 1000 != 0 {
+        if self.enable.unwrap_or(false) && cashu_on && self.amount_msat % 1000 != 0 {
             eprintln!(
                 "ngx_l402: price {} msat is not a whole number of sats; Cashu clients are \
                  asked for {} sat while Lightning is charged {} msat.",
@@ -1897,7 +1907,7 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         // by Nginx before the access phase runs.
         let conf = &*((*loc_conf.add(ngx_http_l402_module.ctx_index)) as *const ModuleConfig);
 
-        if !conf.enable {
+        if !conf.enable.unwrap_or(false) {
             ngx_log_error!(NGX_LOG_INFO, log_ref, "L402 is disabled for this location");
             return NGX_DECLINED as isize;
         }
@@ -1930,7 +1940,7 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
 
         let lnurl_addr = conf.lnurl_addr.clone();
         let invoice_rate_limit = conf.invoice_rate_limit;
-        let auto_detect_payment = conf.auto_detect_payment;
+        let auto_detect_payment = conf.auto_detect_payment.unwrap_or(false);
         let dry_run = conf.dry_run.unwrap_or(false);
         let payment_html = conf.payment_html.unwrap_or(true);
         let indefinite_access = conf.indefinite_access.unwrap_or(false);
@@ -3681,7 +3691,7 @@ fn collect_route_snapshots() -> Vec<manifest::RouteSnapshot> {
             // pointee lives in nginx's cycle pool for the lifetime of the
             // worker process. No mutable aliasing — we hold a shared ref.
             let conf = unsafe { &*entry.conf.0 };
-            if !conf.enable {
+            if !conf.enable.unwrap_or(false) {
                 // `l402 off;` in a child location overrides a parent `on`.
                 return None;
             }
@@ -3692,7 +3702,7 @@ fn collect_route_snapshots() -> Vec<manifest::RouteSnapshot> {
                 lnurl_addr: conf.lnurl_addr.clone(),
                 realm: conf.realm.clone(),
                 rate_limit: conf.invoice_rate_limit,
-                auto_detect_payment: conf.auto_detect_payment,
+                auto_detect_payment: conf.auto_detect_payment.unwrap_or(false),
                 hidden: conf.manifest_hidden,
             })
         })
@@ -3772,14 +3782,14 @@ fn collect_info_locations() -> Vec<ngx_l402_core::LocationInfo> {
             // pointee lives in nginx's cycle pool for the lifetime of the
             // worker process. No mutable aliasing — we hold a shared ref.
             let conf = unsafe { &*entry.conf.0 };
-            if !conf.enable {
+            if !conf.enable.unwrap_or(false) {
                 return None;
             }
             Some(ngx_l402_core::LocationInfo {
                 path: entry.path.clone(),
                 dry_run: conf.dry_run.unwrap_or(false),
                 indefinite_access: conf.indefinite_access.unwrap_or(false),
-                auto_detect_payment: conf.auto_detect_payment,
+                auto_detect_payment: conf.auto_detect_payment.unwrap_or(false),
                 default_amount_msat: conf.amount_msat,
                 macaroon_timeout_secs: conf.macaroon_timeout,
                 manifest_hidden: conf.manifest_hidden,
@@ -3817,7 +3827,7 @@ pub unsafe extern "C" fn ngx_http_l402_set(
 
         match val.as_str() {
             "on" | "true" | "1" | "yes" => {
-                conf.enable = true;
+                conf.enable = Some(true);
                 info!("⚙️ Enabled L402 for this location");
                 // Snapshot the location's path now and remember the conf
                 // pointer; the `.well-known/l402-services` handler re-reads the conf
@@ -3837,7 +3847,7 @@ pub unsafe extern "C" fn ngx_http_l402_set(
                 }
             }
             "off" | "false" | "0" | "no" => {
-                conf.enable = false;
+                conf.enable = Some(false);
                 info!("⚙️ Disabled L402 for this location");
             }
             _ => {
@@ -4298,11 +4308,11 @@ pub unsafe extern "C" fn ngx_http_l402_auto_detect_payment_set(
 
         match val.as_str() {
             "on" | "true" | "1" | "yes" => {
-                conf.auto_detect_payment = true;
+                conf.auto_detect_payment = Some(true);
                 info!("⚙️ Enabled L402 auto-detect payment for this location");
             }
             "off" | "false" | "0" | "no" => {
-                conf.auto_detect_payment = false;
+                conf.auto_detect_payment = Some(false);
                 info!("⚙️ Disabled L402 auto-detect payment for this location");
             }
             _ => {

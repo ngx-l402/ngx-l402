@@ -286,12 +286,12 @@ These are set inside `location {}` blocks in `nginx.conf` (not environment varia
 
 | Directive | Type | Default | Description |
 |---|---|---|---|
-| `l402` | boolean¹ | `off` | Enable L402 protection for this location |
+| `l402` | boolean¹ | `off` | Enable L402 protection for this location; nested locations inherit it, and `l402 off` in one of them leaves it free |
 | `l402_amount_msat_default` | integer | — | Price in millisatoshis (overridden by Redis dynamic pricing). Cashu payment requests carry a whole number of sats, so a sub-sat price is advertised rounded **up** while Lightning is charged exactly; the module warns at startup when the two diverge |
 | `l402_macaroon_timeout` | integer (seconds) | `0` (disabled) | Macaroon validity window; `0` = no expiry |
 | `l402_lnurl_addr` | string | — | Per-location LNURL address for multi-tenant setups |
 | `l402_invoice_rate_limit` | `<N>r/s`, `<N>r/m`, `<N>r/h`, or `<N>` (per minute) | disabled | Max invoice generation rate per IP per route |
-| `l402_auto_detect_payment` | boolean¹ | `off` | Server-side payment detection — queries the Lightning node instead of requiring the client to supply the preimage |
+| `l402_auto_detect_payment` | boolean¹ | `off` | Server-side payment detection — queries the Lightning node instead of requiring the client to supply the preimage; nested locations inherit it, and `off` in one of them turns it back off |
 | `l402_indefinite_access` | boolean¹ | `off` | Skip the single-use preimage replay check — a single payment stays valid for the macaroon lifetime |
 | `l402_realm` | string | — | Bind the macaroon to a named protection space instead of the exact request path, so one payment authorizes every location sharing the name |
 | `l402_exempt_methods` | one or more HTTP methods | — | Methods served without payment, e.g. `HEAD`; nested locations inherit it |

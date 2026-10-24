@@ -1,0 +1,84 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps)"
+    cooldown:
+      default-days: 7
+    groups:
+      # `cdk` and the `cdk-*` crates all pin `cdk-common` to an exact version,
+      # so they must bump together — a PR updating only one of them won't build.
+      cdk:
+        patterns:
+          - "cdk"
+          - "cdk-*"
+
+  # grpc-server is a standalone crate (excluded from the root workspace).
+  - package-ecosystem: cargo
+    directory: /grpc-server
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps)"
+    cooldown:
+      default-days: 7
+    groups:
+      # The code tonic-build generates and the tonic-reflection service only
+      # work with the matching tonic, and prost moves with them — bump as one
+      # family so a PR never mixes two tonic versions.
+      tonic:
+        patterns:
+          - "tonic*"
+          - "prost*"
+
+  # stress-test is also a standalone crate (excluded from the root workspace).
+  - package-ecosystem: cargo
+    directory: /stress-test
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps)"
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci"
+    cooldown:
+      default-days: 7
+    groups:
+      # One PR for all action updates: every Actions PR fails the mirror sync
+      # check by design (Dependabot never touches .ngit/act), so a group
+      # means one PR and one manual sync per week instead of one per action.
+      actions:
+        patterns:
+          - "*"
+
+  # The final stage is FROM nginx:${NGX_VERSION} — Dependabot can't resolve
+  # the variable, so only the rust builder image gets updates here. nginx is
+  # pinned on purpose; its security fixes arrive via manual NGX_VERSION bumps,
+  # not Dependabot.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps)"
+    cooldown:
+      default-days: 7
+
+  # grpc-server has its own Dockerfile (FROM rust:1.85).
+  - package-ecosystem: docker
+    directory: /grpc-server
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps)"
+    cooldown:
+      default-days: 7

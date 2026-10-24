@@ -268,6 +268,11 @@ git add -A .ngit/act/workflows
 The `fmt` job fails on both pipelines if you forget. See
 [.ngit/act/README.md](.ngit/act/README.md) for what the sync transforms.
 
+Dependabot updates `.github/workflows/` but not the mirror, so its Actions
+PRs fail the sync check by design. Don't push the fix to the Dependabot
+branch. Instead, after `git merge --no-ff <dependabot branch>`, run
+`./.ngit/act/sync.sh`, commit the regenerated mirror, then push `main`.
+
 ---
 
 ## Performance Testing

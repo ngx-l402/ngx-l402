@@ -24,4 +24,9 @@ jobs:
 
       - name: Run cargo audit
         # Audit the dependency tree against the RustSec advisory database.
-        run: cargo audit
+        # The root scan covers the workspace lockfile only; stress-test is a
+        # standalone crate with its own Cargo.lock, so it gets an explicit
+        # scan of its own. (grpc-server builds lockless by design.)
+        run: |
+          cargo audit
+          cargo audit --file stress-test/Cargo.lock

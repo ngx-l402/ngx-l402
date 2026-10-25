@@ -57,6 +57,21 @@ impl ReplayCache {
         true
     }
 
+    /// Claim every key in `keys`, or none of them: `true` only when none was
+    /// claimed before. For a credential that spends two things at once (a Nano
+    /// block and the challenge it pays), so one cannot be spent without the
+    /// other. The cache is per worker and single-threaded, so check-then-claim
+    /// is atomic here.
+    pub fn claim_all(&mut self, keys: &[&str]) -> bool {
+        if keys.iter().any(|k| self.seen.contains(*k)) {
+            return false;
+        }
+        for k in keys {
+            self.claim(k);
+        }
+        true
+    }
+
     /// Whether `key` has been claimed. Read-only; does not claim.
     pub fn contains(&self, key: &str) -> bool {
         self.seen.contains(key)
@@ -107,6 +122,18 @@ mod tests {
         assert!(c.claim("b"));
         assert!(!c.claim("a"));
         assert!(!c.claim("b"));
+    }
+
+    #[test]
+    fn claim_all_is_all_or_nothing() {
+        let mut c = ReplayCache::with_capacity(8);
+        assert!(c.claim_all(&["block", "challenge"]));
+        // Either half already spent refuses the pair and claims nothing new.
+        assert!(!c.claim_all(&["block", "challenge2"]));
+        assert!(!c.contains("challenge2"));
+        assert!(!c.claim_all(&["block2", "challenge"]));
+        assert!(!c.contains("block2"));
+        assert!(c.claim_all(&["block2", "challenge2"]));
     }
 
     #[test]

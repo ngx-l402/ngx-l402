@@ -163,9 +163,10 @@ counters, which under-report by roughly a factor of `worker_processes`.)
 | `l402_requests_total` | Every request that entered the access handler with `l402 on;`. Incremented for both enforce and shadow traffic. |
 | `l402_challenges_issued_total` | Requests that received a `402` response (enforce mode), counted *after* the rate-limit gate. |
 | `l402_rate_limited_total` | Requests rejected with `429` by `l402_invoice_rate_limit` (enforce mode). |
-| `l402_payments_valid_total` | Authorization headers that verified successfully — Lightning + Cashu (enforce mode only — dry-run traffic goes to `l402_dry_run_*`). |
+| `l402_payments_valid_total` | Authorization headers that verified successfully — Lightning + Cashu + Nano (enforce mode only — dry-run traffic goes to `l402_dry_run_*`). |
 | `l402_payments_lightning_total` | Successful payments settled via a Lightning macaroon (classic preimage *or* auto-detect). |
 | `l402_payments_cashu_total` | Successful payments settled via a Cashu token redemption. |
+| `l402_payments_nano_total` | Successful payments settled via a confirmed Nano send block (see [Nano](./nano.md)). |
 | `l402_payments_invalid_total` | Authorization headers that failed verification (enforce mode only). |
 | `l402_payments_missing_total` | Requests without an Authorization header (enforce mode only). |
 | `l402_invoices_generated_total` | Lightning invoices successfully generated for L402 challenges (enforce mode only). |

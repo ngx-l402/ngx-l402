@@ -26,3 +26,7 @@ libc = "0.2.189"
 # Proof-to-tenant mapping keys hash the proof secret.
 sha2 = "0.10"
 hex = "0.4"
+# Nano address checksums are a 5-byte BLAKE2b digest of the public key.
+blake2 = "0.10.6"
+# Nano challenge ids are an HMAC-SHA256 so any worker can check one it did not issue.
+hmac = "0.12"

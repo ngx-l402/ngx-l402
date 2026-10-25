@@ -39,6 +39,7 @@ mod cashu;
 mod cashu_redemption_logger;
 mod manifest;
 mod metrics;
+mod nano;
 
 static MODULE: OnceLock<L402Module> = OnceLock::new();
 
@@ -720,6 +721,82 @@ fn cashu_token_redis_key(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
     format!("l402:cashu_token:{}", hex::encode(hasher.finalize()))
+}
+
+// Per-worker fallback for the replay keys claimed by `claim_nano_payment`
+// when Redis was never configured (same policy as the preimage path).
+thread_local! {
+    static NANO_KEY_CACHE: std::cell::RefCell<ngx_l402_core::ReplayCache> =
+        std::cell::RefCell::new(ngx_l402_core::ReplayCache::default());
+}
+
+/// Fast-fail pre-check for a key claimed by [`claim_nano_payment`].
+/// Not the admission gate — the atomic claim is.
+pub fn is_replay_key_claimed(key: &str) -> bool {
+    let redis_key = format!("l402:{}", key);
+    let Some(pool) = redis_pool() else {
+        return NANO_KEY_CACHE.with(|c| c.borrow().contains(&redis_key));
+    };
+    match pool.get() {
+        Ok(mut conn) => conn.exists::<_, bool>(&redis_key).unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+/// Claims a Nano block hash (no expiry) and the challenge it pays (expiring
+/// after `ARGV[1]` seconds) together, or neither. Runs as one Lua script, so
+/// Redis executes it atomically: two concurrent requests cannot both spend the
+/// same block, nor pay the same challenge with two blocks.
+const CLAIM_NANO_PAYMENT_LUA: &str = r#"
+if redis.call('EXISTS', KEYS[1]) == 1 or redis.call('EXISTS', KEYS[2]) == 1 then
+  return 0
+end
+redis.call('SET', KEYS[1], 'used')
+redis.call('SET', KEYS[2], 'used', 'EX', ARGV[1])
+return 1
+"#;
+
+/// Atomically spend a verified Nano payment: the block hash `block_key`, kept
+/// forever because a hash never expires on its own (a TTL would reopen it to
+/// replay), and the challenge `challenge_key`, kept for `challenge_ttl_secs`.
+/// `Ok(true)` = first use of both. Unconfigured Redis falls back to the
+/// per-worker cache; a configured Redis that fails is an `Err` so the caller
+/// fails closed.
+pub fn claim_nano_payment(
+    block_key: &str,
+    challenge_key: &str,
+    challenge_ttl_secs: u64,
+) -> Result<bool, ReplayClaimError> {
+    let block_key = format!("l402:{}", block_key);
+    let challenge_key = format!("l402:{}", challenge_key);
+    let Some(pool) = redis_pool() else {
+        return match redis_absence_reason() {
+            ReplayClaimError::NotConfigured => {
+                warn_replay_is_in_process_only();
+                Ok(NANO_KEY_CACHE.with(|c| {
+                    c.borrow_mut()
+                        .claim_all(&[block_key.as_str(), challenge_key.as_str()])
+                }))
+            }
+            e => Err(e),
+        };
+    };
+    let mut conn = pool
+        .get()
+        .map_err(|e| ReplayClaimError::Unavailable(format!("connection: {}", e)))?;
+    match redis::Script::new(CLAIM_NANO_PAYMENT_LUA)
+        .key(&block_key)
+        .key(&challenge_key)
+        .arg(challenge_ttl_secs.max(1))
+        .invoke::<i64>(&mut *conn)
+    {
+        Ok(1) => Ok(true),
+        Ok(_) => Ok(false),
+        Err(e) => Err(ReplayClaimError::Unavailable(format!(
+            "claim script: {}",
+            e
+        ))),
+    }
 }
 
 /// Look up a previously-cached preimage for a settled invoice.
@@ -1945,11 +2022,13 @@ unsafe fn send_empty_response(r: *mut ngx_http_request_t, status: u16) -> isize 
 // payment method satisfied a successful verification. The wrapper consumes it
 // only in enforce mode (after the dry-run early return) so shadow traffic
 // doesn't pollute `l402_payments_lightning_total` / `l402_payments_cashu_total`
-// and the invariant `valid = lightning + cashu` holds.
+// / `l402_payments_nano_total` and the invariant `valid = lightning + cashu +
+// nano` holds.
 #[derive(Clone, Copy)]
 enum PaymentMethod {
     Lightning,
     Cashu,
+    Nano,
 }
 
 thread_local! {
@@ -2190,7 +2269,7 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
     // Enforce-mode outcome counters. Deliberately skipped above for dry-run
     // so shadow traffic doesn't pollute enforce-mode SLO dashboards. The
     // per-method counters are consumed from the thread-local set by
-    // `l402_access_handler` so the invariant `valid = lightning + cashu`
+    // `l402_access_handler` so the invariant `valid = lightning + cashu + nano`
     // holds and shadow traffic never ticks them.
     match result {
         r if r == NGX_DECLINED as isize => {
@@ -2201,12 +2280,14 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
                     metrics::inc(metrics::Metric::PaymentsLightningTotal)
                 }
                 Some(PaymentMethod::Cashu) => metrics::inc(metrics::Metric::PaymentsCashuTotal),
+                Some(PaymentMethod::Nano) => metrics::inc(metrics::Metric::PaymentsNanoTotal),
                 None => {}
             }
             if log_format_json {
                 let method_field = match payment_method {
                     Some(PaymentMethod::Lightning) => ",\"method\":\"lightning\"",
                     Some(PaymentMethod::Cashu) => ",\"method\":\"cashu\"",
+                    Some(PaymentMethod::Nano) => ",\"method\":\"nano\"",
                     None => "",
                 };
                 log_json_event(
@@ -2350,6 +2431,20 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
                 "X-Cashu header not sent (cashu={})",
                 cashu_ecash_support
             );
+        }
+
+        // Nano is opt-in: with NANO_ADDRESS unset `challenge` is `None` and the
+        // 402 is exactly what it was before. The challenge is signed over the
+        // same binding as the macaroon, so it only pays for this request.
+        if let Some((nano_challenge, nano_challenge_id)) =
+            nano::challenge(final_amount, &binding.to_caveats())
+        {
+            // SAFETY: `request` is the valid pointer nginx passed to this handler.
+            unsafe {
+                let req = Request::from_ngx_http_request(request);
+                req.add_header_out(ngx_l402_core::NANO_CHALLENGE_HEADER, &nano_challenge);
+                req.add_header_out(ngx_l402_core::NANO_CHALLENGE_ID_HEADER, &nano_challenge_id);
+            }
         }
 
         // Always send L402 header as well (for Lightning payments)
@@ -2586,6 +2681,20 @@ pub fn l402_access_handler(
                     return 500;
                 }
             }
+        } else if nano::config().is_some() && auth_str.starts_with(ngx_l402_core::NANO_AUTH_SCHEME)
+        {
+            let credential = auth_str.trim_start_matches(ngx_l402_core::NANO_AUTH_SCHEME);
+            let status = nano::verify(
+                credential,
+                amount_msat,
+                &binding.to_caveats(),
+                get_handler_runtime(),
+                NGX_DECLINED as isize,
+            );
+            if status == NGX_DECLINED as isize {
+                LAST_PAYMENT_METHOD.with(|m| m.set(Some(PaymentMethod::Nano)));
+            }
+            return status;
         } else if ngx_l402_core::is_l402_scheme(&auth_str) {
             // ── Determine whether the header has a preimage suffix ──────────
             // Classic:     L402 <macaroon>:<hex-preimage>
@@ -2831,6 +2940,7 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
     get_preimage_ttl();
     get_cashu_token_ttl();
     perf_log_enabled();
+    nano::init_from_env();
 
     // Cache the LN backend type string for structured log lines. We can't
     // read env vars from worker threads, so snapshot it here.
@@ -3888,6 +3998,7 @@ pub unsafe extern "C" fn l402_info_content_handler(r: *mut ngx_http_request_t) -
         backend: backend_label().to_string(),
         redis_configured: REDIS_URL.get().is_some(),
         cashu_enabled: manifest::cashu_enabled(),
+        nano_enabled: nano::config().is_some(),
     };
     let locations = collect_info_locations();
     let body = ngx_l402_core::render_info(&global, &locations);

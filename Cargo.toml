@@ -39,6 +39,9 @@ lightning = "0.2.2"
 openssl-probe = "0.1.5"
 libc = "0.2.189"
 openssl = "0.10.80"
+# One bounded `block_info` POST to verify an opt-in Nano payment. Already in
+# the tree through l402_middleware; listed so the dependency is explicit.
+reqwest = { version = "0.12.28", default-features = false, features = ["default-tls"] }
 
 [features]
 default = []

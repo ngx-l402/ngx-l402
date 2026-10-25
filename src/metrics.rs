@@ -35,7 +35,8 @@ pub enum Metric {
     /// Requests that resulted in a 402 Payment Required response (enforced mode).
     ChallengesIssuedTotal,
     /// Requests whose Authorization header verified successfully. Aggregate of
-    /// [`Metric::PaymentsLightningTotal`] and [`Metric::PaymentsCashuTotal`].
+    /// [`Metric::PaymentsLightningTotal`], [`Metric::PaymentsCashuTotal`] and
+    /// [`Metric::PaymentsNanoTotal`].
     PaymentsValidTotal,
     /// Successful payments settled via a Lightning macaroon (classic preimage
     /// path *or* auto-detect path).
@@ -66,12 +67,14 @@ pub enum Metric {
     /// Sum of msat prices evaluated for dry-run requests. Divide by
     /// `l402_dry_run_requests_total` for an average-price gauge.
     DryRunPriceMsatSum,
+    /// Successful payments settled via a confirmed Nano send block.
+    PaymentsNanoTotal,
 }
 
 impl Metric {
     /// Number of counters in [`MetricsBlock`]. Must equal the count of [`Metric`]
     /// variants and the length of [`ENTRIES`].
-    pub const COUNT: usize = 16;
+    pub const COUNT: usize = 17;
 }
 
 // Compile-time guards keeping the enum, `COUNT`, and `ENTRIES` in lockstep:
@@ -81,7 +84,7 @@ impl Metric {
 //     `COUNT` by the array type itself.
 // Together these make a misindexed Prometheus label impossible to introduce
 // silently.
-const _: () = assert!(Metric::DryRunPriceMsatSum as usize + 1 == Metric::COUNT);
+const _: () = assert!(Metric::PaymentsNanoTotal as usize + 1 == Metric::COUNT);
 
 /// Prometheus metric name + HELP text for each counter, in [`Metric`] order.
 /// The index of each row must match the corresponding [`Metric`] discriminant.
@@ -96,7 +99,7 @@ static ENTRIES: [(&str, &str); Metric::COUNT] = [
     ),
     (
         "l402_payments_valid_total",
-        "Authorization headers that verified successfully (Lightning + Cashu).",
+        "Authorization headers that verified successfully (Lightning + Cashu + Nano).",
     ),
     (
         "l402_payments_lightning_total",
@@ -150,6 +153,10 @@ static ENTRIES: [(&str, &str); Metric::COUNT] = [
         "l402_dry_run_price_msat_sum",
         "Cumulative msat price evaluated across dry-run requests.",
     ),
+    (
+        "l402_payments_nano_total",
+        "Successful payments settled via a confirmed Nano send block.",
+    ),
 ];
 
 /// Sentinel written into a freshly-initialised [`MetricsBlock`]. Lets the shm
@@ -157,7 +164,7 @@ static ENTRIES: [(&str, &str); Metric::COUNT] = [
 /// *compatible* build and reuse its counters; a mismatch (e.g. after a binary
 /// upgrade that changed the layout) triggers re-initialisation. Bump the low
 /// bytes whenever [`Metric`]/[`MetricsBlock`] layout changes.
-const MAGIC: u64 = 0x4c34_3032_4d54_0001; // 'L402MT' + layout version 0001
+const MAGIC: u64 = 0x4c34_3032_4d54_0002; // 'L402MT' + layout version 0002
 
 /// Fixed-layout block of counters placed either in process-local memory or in
 /// an nginx shared-memory zone. `#[repr(C)]` keeps the field order stable so a

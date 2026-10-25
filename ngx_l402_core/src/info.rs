@@ -22,6 +22,8 @@ pub struct GlobalInfo {
     pub redis_configured: bool,
     /// Cashu ecash support enabled (`CASHU_ECASH_SUPPORT`).
     pub cashu_enabled: bool,
+    /// Nano payments offered (`NANO_ADDRESS`, rate and RPC all valid).
+    pub nano_enabled: bool,
 }
 
 /// Post-merge snapshot of one l402-protected location's operator knobs.
@@ -46,6 +48,7 @@ pub fn render(global: &GlobalInfo, locations: &[LocationInfo]) -> String {
         "backend": global.backend,
         "redis_configured": global.redis_configured,
         "cashu_enabled": global.cashu_enabled,
+        "nano_enabled": global.nano_enabled,
         "locations": locations.iter().map(location_block).collect::<Vec<_>>(),
     });
 
@@ -77,6 +80,7 @@ mod tests {
             backend: "LND".to_string(),
             redis_configured: true,
             cashu_enabled: false,
+            nano_enabled: false,
         }
     }
 
@@ -99,6 +103,7 @@ mod tests {
         assert_eq!(doc["backend"], "LND");
         assert_eq!(doc["redis_configured"], true);
         assert_eq!(doc["cashu_enabled"], false);
+        assert_eq!(doc["nano_enabled"], false);
         assert_eq!(doc["locations"], json!([]));
     }
 
@@ -133,6 +138,14 @@ mod tests {
         let locations = doc["locations"].as_array().unwrap();
         assert_eq!(locations[0]["manifest_hidden"], true);
         assert!(locations[1].get("manifest_hidden").is_none());
+    }
+
+    #[test]
+    fn renders_nano_enabled() {
+        let mut g = global();
+        g.nano_enabled = true;
+        let doc: Value = serde_json::from_str(&render(&g, &[])).unwrap();
+        assert_eq!(doc["nano_enabled"], true);
     }
 
     #[test]

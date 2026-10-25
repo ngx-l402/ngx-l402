@@ -15,6 +15,7 @@ mod fast_exit;
 mod fee;
 mod info;
 mod l402_header;
+mod nano;
 mod p2pk;
 mod payment_page;
 mod proof_mapping;
@@ -31,6 +32,14 @@ pub use fast_exit::install_fast_exit;
 pub use fee::{fee_reserve_msat, melt_reserve_msat, sat_to_msat, MSAT_PER_SAT};
 pub use info::{render as render_info, GlobalInfo, LocationInfo};
 pub use l402_header::{is_l402_scheme, parse_l402_header_value};
+pub use nano::{
+    block_info_request, check_challenge, derive_challenge_key, encode_nano_address,
+    issue_challenge, judge_block_info, msat_to_raw, nano_challenge, nano_replay_key,
+    parse_block_hash, parse_nano_address, parse_nano_credential, parse_raw_per_sat,
+    ChallengeReject, InvalidNanoAddress, NanoChallenge, NanoConfig, NanoReject,
+    DEFAULT_NANO_CHALLENGE_TTL_SECS, DEFAULT_NANO_RPC_TIMEOUT_MS, NANO_AUTH_SCHEME,
+    NANO_CHALLENGE_HEADER, NANO_CHALLENGE_ID_HEADER, NANO_TAG_SPACE,
+};
 pub use p2pk::{parse_p2pk_secret_key, InvalidP2pkKey};
 pub use payment_page::render_payment_page;
 pub use proof_mapping::proof_mapping_key;

@@ -22,6 +22,7 @@
 
 - [Lightning Network](./lightning.md)
 - [Cashu eCash](./cashu.md)
+- [Nano](./nano.md)
 
 # Advanced
 

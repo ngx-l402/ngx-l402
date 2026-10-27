@@ -15,6 +15,7 @@ mod fast_exit;
 mod fee;
 mod info;
 mod l402_header;
+mod mcp;
 mod p2pk;
 mod payment_page;
 mod proof_mapping;
@@ -31,6 +32,10 @@ pub use fast_exit::install_fast_exit;
 pub use fee::{fee_reserve_msat, melt_reserve_msat, sat_to_msat, MSAT_PER_SAT};
 pub use info::{render as render_info, GlobalInfo, LocationInfo};
 pub use l402_header::{is_l402_scheme, parse_l402_header_value};
+pub use mcp::{
+    classify as classify_mcp_request, decode_mcp_name, jsonrpc_error_body, mcp_tool_price_key,
+    McpDecision, McpHeaders, MCP_HEADER_MISMATCH, MCP_MIN_HEADER_VERSION, MCP_PAYMENT_REQUIRED,
+};
 pub use p2pk::{parse_p2pk_secret_key, InvalidP2pkKey};
 pub use payment_page::render_payment_page;
 pub use proof_mapping::proof_mapping_key;

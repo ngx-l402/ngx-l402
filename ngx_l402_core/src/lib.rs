@@ -31,7 +31,7 @@ pub use fast_exit::install_fast_exit;
 pub use fee::{fee_reserve_msat, melt_reserve_msat, sat_to_msat, MSAT_PER_SAT};
 pub use info::{render as render_info, GlobalInfo, LocationInfo};
 pub use l402_header::{is_l402_scheme, parse_l402_header_value};
-pub use p2pk::{parse_p2pk_secret_key, InvalidP2pkKey};
+pub use p2pk::{parse_p2pk_secret_key, verify_permanent_p2pk_lock, InvalidP2pkKey};
 pub use payment_page::render_payment_page;
 pub use proof_mapping::proof_mapping_key;
 pub use rate_limit::{invoice_rate_limit_key, parse_rate_limit};

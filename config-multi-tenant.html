@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-14d0a645.js";
+            window.path_to_searchindex_js = "searchindex-c96a2a6f.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-247960a4.js"></script>
@@ -188,7 +188,7 @@
 <hr>
 <h2 id="how-it-works"><a class="header" href="#how-it-works">How It Works</a></h2>
 <ol>
-<li><strong>Per-location LNURL addresses</strong>: Use the <code>l402_lnurl_addr</code> directive to specify a different LNURL address per Nginx location block.</li>
+<li><strong>Per-location LNURL addresses</strong>: Name each tenant once with <code>l402_tenant</code> and point locations at it with <code>l402_tenant_ref</code>, or give a location its address directly with <code>l402_lnurl_addr</code>.</li>
 <li><strong>Proof tracking</strong>: When a Cashu token is received, the proofs are mapped to the tenant’s LNURL address in Redis, in both standard and P2PK mode.</li>
 <li><strong>Grouped redemption</strong>: The automatic redemption task groups proofs by tenant and redeems each group to the correct LNURL address.</li>
 </ol>
@@ -203,6 +203,31 @@
 </blockquote>
 <hr>
 <h2 id="nginx-configuration"><a class="header" href="#nginx-configuration">Nginx Configuration</a></h2>
+<h3 id="named-tenants"><a class="header" href="#named-tenants">Named tenants</a></h3>
+<p>Define each tenant once at <code>http</code> level, then reference it by name:</p>
+<pre><code class="language-nginx">http {
+    l402_tenant alice lnurl=alice@getalby.com;
+    l402_tenant bob   lnurl=bob@getalby.com;
+
+    server {
+        location /api/alice/ { l402 on; l402_amount_msat_default 10000; l402_tenant_ref alice; }
+        location /api/bob/   { l402 on; l402_amount_msat_default 15000; l402_tenant_ref bob; }
+    }
+}
+</code></pre>
+<p>A tenant name is letters, digits, <code>-</code> and <code>_</code>. <code>lnurl=</code> is the only key so far and is required.</p>
+<p>A location that sets neither <code>l402_tenant_ref</code> nor <code>l402_lnurl_addr</code> inherits its parent’s destination. Setting either one replaces it.</p>
+<p>nginx refuses to start when:</p>
+<ul>
+<li>an <code>l402_tenant</code> name uses anything but letters, digits, <code>-</code> and <code>_</code>, or the line is missing <code>lnurl=</code>, gives a key other than <code>lnurl</code>, repeats a key, or leaves a value empty.</li>
+<li><code>l402_tenant_ref</code> names a tenant that no <code>l402_tenant</code> defines. The error lists the tenants that are defined.</li>
+<li>two <code>l402_tenant</code> lines use the same name.</li>
+<li>one location sets both <code>l402_tenant_ref</code> and <code>l402_lnurl_addr</code>.</li>
+<li><code>l402_tenant_ref</code> is used with <code>CASHU_ECASH_SUPPORT=true</code> and an <code>LN_CLIENT_TYPE</code> other than <code>LNURL</code>. Only LNURL mode redeems Cashu per tenant, so on any other backend the tenant would be paid for Lightning and the operator would keep the Cashu.</li>
+</ul>
+<p>The same backend mismatch with <code>l402_lnurl_addr</code> only logs a warning, so configs that start today keep starting.</p>
+<h3 id="addresses-per-location"><a class="header" href="#addresses-per-location">Addresses per location</a></h3>
+<p><code>l402_lnurl_addr</code> sets an address on a single location. It is the shorter form when a tenant has only one route:</p>
 <pre><code class="language-nginx"># Tenant 1 — payments go to alice@getalby.com
 location /api/tenant1 {
     l402 on;
@@ -249,7 +274,7 @@ Environment=CASHU_REDEMPTION_INTERVAL_SECS=60
 </code></pre>
 <hr>
 <h2 id="dynamic-lnurl-override-via-redis"><a class="header" href="#dynamic-lnurl-override-via-redis">Dynamic LNURL Override via Redis</a></h2>
-<p>You can also override the LNURL address per path dynamically without reloading Nginx:</p>
+<p>You can also override the LNURL address per path dynamically without reloading Nginx. The override takes precedence over both <code>l402_tenant_ref</code> and <code>l402_lnurl_addr</code>:</p>
 <pre><code class="language-bash">SET lnurl:/api/tenant1 alice@getalby.com
 SET lnurl:/api/tenant2 bob@getalby.com
 </code></pre>

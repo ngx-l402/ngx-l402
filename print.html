@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-14d0a645.js";
+            window.path_to_searchindex_js = "searchindex-c96a2a6f.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-247960a4.js"></script>
@@ -509,7 +509,7 @@ docker stop l402-nginx
 </code></pre>
 <hr>
 <h2 id="specific-versions"><a class="header" href="#specific-versions">Specific Versions</a></h2>
-<pre><code class="language-bash">docker pull ghcr.io/ngx-l402/ngx-l402:&lt;version&gt;   # e.g. 1.3.1
+<pre><code class="language-bash">docker pull ghcr.io/ngx-l402/ngx-l402:&lt;version&gt;   # e.g. 1.3.2
 </code></pre>
 <p>See the <a href="https://github.com/orgs/ngx-l402/packages/container/package/ngx-l402">available tags</a>.</p>
 <div style="break-before: page; page-break-before: always;"></div>
@@ -830,12 +830,13 @@ Environment=L402_PERF_LOG=true
 <tr><th>Directive</th><th>Type</th><th>Default</th><th>Description</th></tr>
 </thead>
 <tbody>
-<tr><td><code>l402</code></td><td>boolean¹</td><td><code>off</code></td><td>Enable L402 protection for this location</td></tr>
+<tr><td><code>l402</code></td><td>boolean¹</td><td><code>off</code></td><td>Enable L402 protection for this location; nested locations inherit it, and <code>l402 off</code> in one of them leaves it free</td></tr>
 <tr><td><code>l402_amount_msat_default</code></td><td>integer</td><td>—</td><td>Price in millisatoshis (overridden by Redis dynamic pricing). Cashu payment requests carry a whole number of sats, so a sub-sat price is advertised rounded <strong>up</strong> while Lightning is charged exactly; the module warns at startup when the two diverge</td></tr>
 <tr><td><code>l402_macaroon_timeout</code></td><td>integer (seconds)</td><td><code>0</code> (disabled)</td><td>Macaroon validity window; <code>0</code> = no expiry</td></tr>
 <tr><td><code>l402_lnurl_addr</code></td><td>string</td><td>—</td><td>Per-location LNURL address for multi-tenant setups</td></tr>
+<tr><td><code>l402_tenant_ref</code></td><td>tenant name</td><td>—</td><td>Pay this location’s revenue to a tenant defined with <code>l402_tenant</code>; see <a href="#named-tenants">config-multi-tenant.md</a></td></tr>
 <tr><td><code>l402_invoice_rate_limit</code></td><td><code>&lt;N&gt;r/s</code>, <code>&lt;N&gt;r/m</code>, <code>&lt;N&gt;r/h</code>, or <code>&lt;N&gt;</code> (per minute)</td><td>disabled</td><td>Max invoice generation rate per IP per route</td></tr>
-<tr><td><code>l402_auto_detect_payment</code></td><td>boolean¹</td><td><code>off</code></td><td>Server-side payment detection — queries the Lightning node instead of requiring the client to supply the preimage</td></tr>
+<tr><td><code>l402_auto_detect_payment</code></td><td>boolean¹</td><td><code>off</code></td><td>Server-side payment detection — queries the Lightning node instead of requiring the client to supply the preimage; nested locations inherit it, and <code>off</code> in one of them turns it back off</td></tr>
 <tr><td><code>l402_indefinite_access</code></td><td>boolean¹</td><td><code>off</code></td><td>Skip the single-use preimage replay check — a single payment stays valid for the macaroon lifetime</td></tr>
 <tr><td><code>l402_realm</code></td><td>string</td><td>—</td><td>Bind the macaroon to a named protection space instead of the exact request path, so one payment authorizes every location sharing the name</td></tr>
 <tr><td><code>l402_exempt_methods</code></td><td>one or more HTTP methods</td><td>—</td><td>Methods served without payment, e.g. <code>HEAD</code>; nested locations inherit it</td></tr>
@@ -852,6 +853,17 @@ Environment=L402_PERF_LOG=true
 <blockquote>
 <p>¹ <strong>Boolean directives</strong> accept: <code>on</code> / <code>off</code> / <code>true</code> / <code>false</code> / <code>1</code> / <code>0</code> / <code>yes</code> / <code>no</code> (case-insensitive).</p>
 </blockquote>
+<h3 id="http-level-directives"><a class="header" href="#http-level-directives"><code>http</code>-level directives</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Directive</th><th>Form</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>l402_tenant</code></td><td><code>&lt;name&gt; lnurl=&lt;address&gt;</code></td><td>Define a named tenant for locations to reference with <code>l402_tenant_ref</code>; see <a href="#named-tenants">config-multi-tenant.md</a></td></tr>
+</tbody>
+</table>
+</div>
 <h3 id="api-routes-skipping-the-payment-page"><a class="header" href="#api-routes-skipping-the-payment-page">API routes: skipping the payment page</a></h3>
 <p>A <code>402</code> normally carries a full HTML page — QR code, copy button, Cashu tab —
 for a human paying in a browser. An API client or AI agent reads
@@ -1069,7 +1081,7 @@ Environment=L402_CASHU_TOKEN_TTL_SECONDS=86400   # Default: 24 hours
 <hr>
 <h2 id="how-it-works-1"><a class="header" href="#how-it-works-1">How It Works</a></h2>
 <ol>
-<li><strong>Per-location LNURL addresses</strong>: Use the <code>l402_lnurl_addr</code> directive to specify a different LNURL address per Nginx location block.</li>
+<li><strong>Per-location LNURL addresses</strong>: Name each tenant once with <code>l402_tenant</code> and point locations at it with <code>l402_tenant_ref</code>, or give a location its address directly with <code>l402_lnurl_addr</code>.</li>
 <li><strong>Proof tracking</strong>: When a Cashu token is received, the proofs are mapped to the tenant’s LNURL address in Redis, in both standard and P2PK mode.</li>
 <li><strong>Grouped redemption</strong>: The automatic redemption task groups proofs by tenant and redeems each group to the correct LNURL address.</li>
 </ol>
@@ -1084,6 +1096,31 @@ Environment=L402_CASHU_TOKEN_TTL_SECONDS=86400   # Default: 24 hours
 </blockquote>
 <hr>
 <h2 id="nginx-configuration"><a class="header" href="#nginx-configuration">Nginx Configuration</a></h2>
+<h3 id="named-tenants"><a class="header" href="#named-tenants">Named tenants</a></h3>
+<p>Define each tenant once at <code>http</code> level, then reference it by name:</p>
+<pre><code class="language-nginx">http {
+    l402_tenant alice lnurl=alice@getalby.com;
+    l402_tenant bob   lnurl=bob@getalby.com;
+
+    server {
+        location /api/alice/ { l402 on; l402_amount_msat_default 10000; l402_tenant_ref alice; }
+        location /api/bob/   { l402 on; l402_amount_msat_default 15000; l402_tenant_ref bob; }
+    }
+}
+</code></pre>
+<p>A tenant name is letters, digits, <code>-</code> and <code>_</code>. <code>lnurl=</code> is the only key so far and is required.</p>
+<p>A location that sets neither <code>l402_tenant_ref</code> nor <code>l402_lnurl_addr</code> inherits its parent’s destination. Setting either one replaces it.</p>
+<p>nginx refuses to start when:</p>
+<ul>
+<li>an <code>l402_tenant</code> name uses anything but letters, digits, <code>-</code> and <code>_</code>, or the line is missing <code>lnurl=</code>, gives a key other than <code>lnurl</code>, repeats a key, or leaves a value empty.</li>
+<li><code>l402_tenant_ref</code> names a tenant that no <code>l402_tenant</code> defines. The error lists the tenants that are defined.</li>
+<li>two <code>l402_tenant</code> lines use the same name.</li>
+<li>one location sets both <code>l402_tenant_ref</code> and <code>l402_lnurl_addr</code>.</li>
+<li><code>l402_tenant_ref</code> is used with <code>CASHU_ECASH_SUPPORT=true</code> and an <code>LN_CLIENT_TYPE</code> other than <code>LNURL</code>. Only LNURL mode redeems Cashu per tenant, so on any other backend the tenant would be paid for Lightning and the operator would keep the Cashu.</li>
+</ul>
+<p>The same backend mismatch with <code>l402_lnurl_addr</code> only logs a warning, so configs that start today keep starting.</p>
+<h3 id="addresses-per-location"><a class="header" href="#addresses-per-location">Addresses per location</a></h3>
+<p><code>l402_lnurl_addr</code> sets an address on a single location. It is the shorter form when a tenant has only one route:</p>
 <pre><code class="language-nginx"># Tenant 1 — payments go to alice@getalby.com
 location /api/tenant1 {
     l402 on;
@@ -1130,7 +1167,7 @@ Environment=CASHU_REDEMPTION_INTERVAL_SECS=60
 </code></pre>
 <hr>
 <h2 id="dynamic-lnurl-override-via-redis"><a class="header" href="#dynamic-lnurl-override-via-redis">Dynamic LNURL Override via Redis</a></h2>
-<p>You can also override the LNURL address per path dynamically without reloading Nginx:</p>
+<p>You can also override the LNURL address per path dynamically without reloading Nginx. The override takes precedence over both <code>l402_tenant_ref</code> and <code>l402_lnurl_addr</code>:</p>
 <pre><code class="language-bash">SET lnurl:/api/tenant1 alice@getalby.com
 SET lnurl:/api/tenant2 bob@getalby.com
 </code></pre>
@@ -2069,7 +2106,8 @@ nested locations, and the access phase runs before the content handler —
 so an <code>/l402/info</code> location sitting under an <code>l402 on;</code> parent (or one
 where you add <code>l402 on;</code> directly) answers with 402 challenges instead of
 JSON. That’s a valid way to sell access to your own introspection, but it
-is almost never what you want for a debugging endpoint.</li>
+is almost never what you want for a debugging endpoint. Add <code>l402 off;</code>
+to a nested endpoint location to keep it free.</li>
 <li><strong>Per-worker registry.</strong> Like the manifest, the route registry is
 rebuilt per worker from the shared config, so every worker renders the
 same document.</li>

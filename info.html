@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-14d0a645.js";
+            window.path_to_searchindex_js = "searchindex-c96a2a6f.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-247960a4.js"></script>
@@ -296,7 +296,8 @@ nested locations, and the access phase runs before the content handler —
 so an <code>/l402/info</code> location sitting under an <code>l402 on;</code> parent (or one
 where you add <code>l402 on;</code> directly) answers with 402 challenges instead of
 JSON. That’s a valid way to sell access to your own introspection, but it
-is almost never what you want for a debugging endpoint.</li>
+is almost never what you want for a debugging endpoint. Add <code>l402 off;</code>
+to a nested endpoint location to keep it free.</li>
 <li><strong>Per-worker registry.</strong> Like the manifest, the route registry is
 rebuilt per worker from the shared config, so every worker renders the
 same document.</li>

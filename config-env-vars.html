@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-14d0a645.js";
+            window.path_to_searchindex_js = "searchindex-c96a2a6f.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-247960a4.js"></script>
@@ -426,12 +426,13 @@ Environment=L402_PERF_LOG=true
 <tr><th>Directive</th><th>Type</th><th>Default</th><th>Description</th></tr>
 </thead>
 <tbody>
-<tr><td><code>l402</code></td><td>boolean¹</td><td><code>off</code></td><td>Enable L402 protection for this location</td></tr>
+<tr><td><code>l402</code></td><td>boolean¹</td><td><code>off</code></td><td>Enable L402 protection for this location; nested locations inherit it, and <code>l402 off</code> in one of them leaves it free</td></tr>
 <tr><td><code>l402_amount_msat_default</code></td><td>integer</td><td>—</td><td>Price in millisatoshis (overridden by Redis dynamic pricing). Cashu payment requests carry a whole number of sats, so a sub-sat price is advertised rounded <strong>up</strong> while Lightning is charged exactly; the module warns at startup when the two diverge</td></tr>
 <tr><td><code>l402_macaroon_timeout</code></td><td>integer (seconds)</td><td><code>0</code> (disabled)</td><td>Macaroon validity window; <code>0</code> = no expiry</td></tr>
 <tr><td><code>l402_lnurl_addr</code></td><td>string</td><td>—</td><td>Per-location LNURL address for multi-tenant setups</td></tr>
+<tr><td><code>l402_tenant_ref</code></td><td>tenant name</td><td>—</td><td>Pay this location’s revenue to a tenant defined with <code>l402_tenant</code>; see <a href="config-multi-tenant.html#named-tenants">config-multi-tenant.md</a></td></tr>
 <tr><td><code>l402_invoice_rate_limit</code></td><td><code>&lt;N&gt;r/s</code>, <code>&lt;N&gt;r/m</code>, <code>&lt;N&gt;r/h</code>, or <code>&lt;N&gt;</code> (per minute)</td><td>disabled</td><td>Max invoice generation rate per IP per route</td></tr>
-<tr><td><code>l402_auto_detect_payment</code></td><td>boolean¹</td><td><code>off</code></td><td>Server-side payment detection — queries the Lightning node instead of requiring the client to supply the preimage</td></tr>
+<tr><td><code>l402_auto_detect_payment</code></td><td>boolean¹</td><td><code>off</code></td><td>Server-side payment detection — queries the Lightning node instead of requiring the client to supply the preimage; nested locations inherit it, and <code>off</code> in one of them turns it back off</td></tr>
 <tr><td><code>l402_indefinite_access</code></td><td>boolean¹</td><td><code>off</code></td><td>Skip the single-use preimage replay check — a single payment stays valid for the macaroon lifetime</td></tr>
 <tr><td><code>l402_realm</code></td><td>string</td><td>—</td><td>Bind the macaroon to a named protection space instead of the exact request path, so one payment authorizes every location sharing the name</td></tr>
 <tr><td><code>l402_exempt_methods</code></td><td>one or more HTTP methods</td><td>—</td><td>Methods served without payment, e.g. <code>HEAD</code>; nested locations inherit it</td></tr>
@@ -448,6 +449,17 @@ Environment=L402_PERF_LOG=true
 <blockquote>
 <p>¹ <strong>Boolean directives</strong> accept: <code>on</code> / <code>off</code> / <code>true</code> / <code>false</code> / <code>1</code> / <code>0</code> / <code>yes</code> / <code>no</code> (case-insensitive).</p>
 </blockquote>
+<h3 id="http-level-directives"><a class="header" href="#http-level-directives"><code>http</code>-level directives</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Directive</th><th>Form</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>l402_tenant</code></td><td><code>&lt;name&gt; lnurl=&lt;address&gt;</code></td><td>Define a named tenant for locations to reference with <code>l402_tenant_ref</code>; see <a href="config-multi-tenant.html#named-tenants">config-multi-tenant.md</a></td></tr>
+</tbody>
+</table>
+</div>
 <h3 id="api-routes-skipping-the-payment-page"><a class="header" href="#api-routes-skipping-the-payment-page">API routes: skipping the payment page</a></h3>
 <p>A <code>402</code> normally carries a full HTML page — QR code, copy button, Cashu tab —
 for a human paying in a browser. An API client or AI agent reads

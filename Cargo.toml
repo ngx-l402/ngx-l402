@@ -1,6 +1,6 @@
 [package]
 name = "ngx_l402"
-version = "1.3.1"
+version = "1.3.2"
 edition = "2021"
 
 [lib]
@@ -17,7 +17,7 @@ exclude = ["grpc-server", "stress-test"]
 
 [dependencies]
 ngx = { version = "0.5.1" }
-l402_middleware = { version = "2.3.4", default-features = false }
+l402_middleware = { version = "2.3.5", default-features = false }
 ngx_l402_core = { path = "ngx_l402_core" }
 tokio = { version = "1.33.0", features = ["full"] }
 futures = "0.3"

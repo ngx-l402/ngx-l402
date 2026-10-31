@@ -36,7 +36,7 @@ pub use mcp::{
     classify as classify_mcp_request, decode_mcp_name, jsonrpc_error_body, mcp_tool_price_key,
     McpDecision, McpHeaders, MCP_HEADER_MISMATCH, MCP_MIN_HEADER_VERSION, MCP_PAYMENT_REQUIRED,
 };
-pub use p2pk::{parse_p2pk_secret_key, InvalidP2pkKey};
+pub use p2pk::{parse_p2pk_secret_key, verify_permanent_p2pk_lock, InvalidP2pkKey};
 pub use payment_page::render_payment_page;
 pub use proof_mapping::proof_mapping_key;
 pub use rate_limit::{invoice_rate_limit_key, parse_rate_limit};

@@ -24,7 +24,10 @@ thread_local! {
 
 // MSAT_PER_SAT: single definition, shared with `sat_to_msat` so the two can
 // never disagree.
-use ngx_l402_core::{parse_require_dleq, verify_proof_dleq_offline, DleqCheck, MSAT_PER_SAT};
+use ngx_l402_core::{
+    parse_require_dleq, verify_permanent_p2pk_lock, verify_proof_dleq_offline, DleqCheck,
+    MSAT_PER_SAT,
+};
 
 // Database singleton using cdk-sqlite. Opened in the master; `CASHU_DB_PID`
 // records who opened it so a forked worker knows to open its own instead of
@@ -1808,6 +1811,11 @@ pub async fn verify_cashu_token_p2pk(
         .map_err(|e| {
             CashuError::Unacceptable(format!("Token not locked to our public key: {}", e))
         })?;
+
+    // cdk's check above ignores the locktime of proofs without refund keys.
+    for proof in &proofs {
+        verify_permanent_p2pk_lock(proof).map_err(CashuError::Unacceptable)?;
+    }
 
     info!("✅ Token verified as P2PK-locked to our public key");
 

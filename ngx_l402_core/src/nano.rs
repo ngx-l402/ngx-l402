@@ -476,6 +476,28 @@ pub fn judge_block_info(
     Ok(paid_raw)
 }
 
+/// True when the authority of a plain-HTTP URL (text after `http://`) is a
+/// loopback host. A block lookup over cleartext HTTP to anything else lets a
+/// network attacker forge the reply that admits a payment.
+fn is_loopback_http_host(rest: &str) -> bool {
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // Anything with userinfo is refused: `127.0.0.1@evil` must not pass.
+    if authority.contains('@') {
+        return false;
+    }
+    let host = if let Some(v6) = authority.strip_prefix('[') {
+        v6.split(']').next().unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
 /// Operator configuration, read once from the environment at startup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NanoConfig {
@@ -520,6 +542,11 @@ impl NanoConfig {
             .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
             .ok_or("NANO_RPC_URL must be set to an http(s) URL")?
             .to_string();
+        if rpc_url.starts_with("http://") && !is_loopback_http_host(&rpc_url["http://".len()..]) {
+            return Err(
+                "NANO_RPC_URL must use https unless it points at a loopback host".to_string(),
+            );
+        }
         let rpc_timeout_ms = match rpc_timeout_ms.map(str::trim) {
             None | Some("") => DEFAULT_NANO_RPC_TIMEOUT_MS,
             Some(t) => t
@@ -1057,5 +1084,27 @@ mod tests {
                 .challenge_ttl_secs,
             120
         );
+    }
+
+    #[test]
+    fn plain_http_rpc_must_be_loopback() {
+        let cfg =
+            |u: &str| NanoConfig::from_values(Some(GENESIS), Some("1000"), Some(u), None, None);
+        for ok in [
+            "http://127.0.0.1:7076",
+            "http://localhost:7076/rpc",
+            "http://[::1]:7076",
+            "https://node.example.com/rpc",
+        ] {
+            assert!(cfg(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "http://node.example.com/rpc",
+            "http://10.0.0.5:7076",
+            "http://127.0.0.1@evil.example/rpc",
+            "http://localhost.evil.example/rpc",
+        ] {
+            assert!(cfg(bad).is_err(), "{bad}");
+        }
     }
 }

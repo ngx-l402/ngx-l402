@@ -10,6 +10,7 @@ sudo apt-get install -y \
   clang \
   libclang-dev \
   libc6-dev \
+  libpcre2-dev \
   zlib1g-dev \
   pkg-config \
   libssl-dev \

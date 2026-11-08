@@ -250,9 +250,15 @@ backend. The job is sequential and stateful, so:
 - **Stop what you started.** Every `nginx-*` service binds port 8000, so a new
   section must stop its containers before the next one runs.
 
-A new protected route also needs a `location` block in `nginx.conf` **and** a
+A new protected route also needs a `location` block in `nginx.conf` —
+without one, the route is normally not challenged. Mind `/protected-*`
+names: nginx's longest-prefix match sends `/protected-foo` to the existing
+`location /protected`, so it answers with that block's settings and hides
+the missing block. And a file must sit behind the route, either a
 `COPY index.html /usr/share/nginx/html/<route>/index.html` line in the
-`Dockerfile`, or it 404s before the module ever runs.
+`Dockerfile` or a `try_files` fallback to `/index.html` — without one, the
+*paid* request 404s. The access-phase handler runs before
+`try_files … =404`, so the unpaid request still gets its 402 either way.
 
 ### Never hand-edit `.ngit/act/workflows/`
 

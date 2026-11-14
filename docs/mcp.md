@@ -9,6 +9,7 @@ binds each **tool call** instead, without adding payment code to the server:
 location /mcp {
     l402                      on;
     l402_mcp                  on;
+    l402_mcp_upstream_validates on;          # see "Trust model" below
     l402_amount_msat_default  1000;          # price of a tool without its own line
     l402_mcp_tool  summarize  5000;          # a tool with its own price
     proxy_pass                http://mcp-server;
@@ -46,8 +47,13 @@ So header-based pricing is only as strong as the upstream's validation:
 - **The upstream must implement 2026-07-28 or later** and enforce the
   header/body check. Against a server that ignores the headers, a client can pay
   for the cheapest tool and run any other.
-- The module trusts the headers only when `MCP-Protocol-Version` is
-  `2026-07-28` or later. Anything older is refused (see below).
+- **You declare that it does** with `l402_mcp_upstream_validates on;`. The
+  module can't see whether the upstream checks, and the client's
+  `MCP-Protocol-Version` can't vouch for it either, because the client chooses
+  it. nginx refuses to start with `l402_mcp on` and no declaration.
+- The client's version is checked as well: the headers are trusted only when
+  `MCP-Protocol-Version` is a real date, `2026-07-28` or later. Anything older is
+  refused (see below).
 
 ---
 
@@ -61,7 +67,7 @@ So header-based pricing is only as strong as the upstream's validation:
 | No `Mcp-Method` | `400` |
 | `tools/call`, `resources/read` or `prompts/get` without `Mcp-Name` | `400` |
 | A duplicated `Mcp-Method`, `Mcp-Name` or `MCP-Protocol-Version` | `400` |
-| An `Mcp-Name` that is malformed or doesn't decode | `400` |
+| An `Mcp-Name` that is malformed, doesn't decode, or decodes to control characters | `400` |
 
 A `400` carries a JSON-RPC error with code `-32020` (`HeaderMismatch`) and
 `"id": null`, the shape the spec uses for transport-level rejections.
@@ -72,7 +78,8 @@ tool would let a cheap payment open an expensive tool.
 
 `Mcp-Name` values outside plain ASCII arrive base64-encoded
 (`=?base64?c3VtbWFyaXpl?=`). They are decoded before the price lookup, so an
-encoded tool name still gets its own price.
+encoded tool name still gets its own price. Only padded, standard-alphabet
+base64 is accepted, the form the spec's examples use.
 
 `OPTIONS` preflight requests can pass through with `l402_exempt_methods OPTIONS;`,
 which is checked first.
@@ -85,9 +92,10 @@ which is checked first.
 |---|---|
 | `l402_mcp on\|off;` | Price per tool. Needs `l402 on;` in the same location — nginx refuses to start otherwise. |
 | `l402_mcp_tool <name> <msat>;` | One tool's price. Repeat per tool; the name is compared exactly with the decoded `Mcp-Name`. |
-| `l402_mcp_charge <method>...;` | Methods that cost money. Default `tools/call`. Also accepts `resources/read` (priced by URI) and `prompts/get`. |
+| `l402_mcp_charge <method>...;` | Methods that cost money. Default `tools/call`. Also accepts `resources/read` (priced by URI) and `prompts/get`, the other methods that carry an `Mcp-Name`. |
+| `l402_mcp_upstream_validates on\|off;` | Declares that the upstream rejects a request whose `Mcp-Method` / `Mcp-Name` disagree with its body. Required by `l402_mcp on`. |
 
-All three inherit into nested locations like the other `l402_*` directives.
+All four inherit into nested locations like the other `l402_*` directives.
 Everything else — Cashu, auto-detect, rate limits, dry run, tenants, realms,
 `l402_indefinite_access` — works on an MCP location as on any other.
 
@@ -123,7 +131,7 @@ body is a JSON-RPC error an MCP client can read:
   "jsonrpc": "2.0",
   "id": null,
   "error": {
-    "code": -32002,
+    "code": 402,
     "message": "Payment required to call summarize",
     "data": {
       "tool": "summarize",
@@ -136,8 +144,9 @@ body is a JSON-RPC error an MCP client can read:
 }
 ```
 
-`-32002` is an implementation-defined code: MCP has no standard payment error
-yet. `l402_payment_html` does not apply to MCP calls; they always get JSON.
+MCP defines no payment error, and the 2026-07-28 spec asks for new codes
+outside the JSON-RPC server range (`-32768` to `-32000`), so the code is `402`.
+`-32002` would read as "resource not found" to MCP clients. `l402_payment_html` does not apply to MCP calls; they always get JSON.
 
 ---
 

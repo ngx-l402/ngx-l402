@@ -26,6 +26,7 @@ http {
         location /mcp {
             l402 on;
             l402_mcp on;
+            l402_mcp_upstream_validates on;
             l402_amount_msat_default 1000;
             l402_mcp_tool summarize 5000;
             proxy_pass http://127.0.0.1:8003;
@@ -33,6 +34,7 @@ http {
         location /mcp-resources {
             l402 on;
             l402_mcp on;
+            l402_mcp_upstream_validates on;
             l402_mcp_charge tools/call resources/read;
             l402_amount_msat_default 1000;
             proxy_pass http://127.0.0.1:8003;
@@ -82,7 +84,7 @@ check "$status" 402 "resources/read is charged when opted in"
 echo "Per-tool prices:"
 read -r status body < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: search')
 check "$status" 402 "tools/call is charged"
-check "$(jq -r '.error.code' <<<"$body")" -32002 "the 402 body is a JSON-RPC payment error"
+check "$(jq -r '.error.code' <<<"$body")" 402 "the 402 body is a JSON-RPC payment error"
 check "$(jq -r '.id' <<<"$body")" null "the 402 body has a null id"
 check "$(jq -r '.error.data.amount_msat' <<<"$body")" 1000 "a tool without its own line costs the default"
 check "$(jq -r '.error.data.tool' <<<"$body")" search "the 402 body names the tool"
@@ -124,6 +126,10 @@ read -r status _ < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: search' 
 check "$status" 400 "a duplicate Mcp-Name is refused"
 read -r status _ < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: =?base64?!!?=')
 check "$status" 400 "an undecodable Mcp-Name is refused"
+read -r status _ < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: =?base64?c2VhcmNoDQpYOiB5?=')
+check "$status" 400 "an Mcp-Name that decodes to CR/LF is refused"
+read -r status _ < <(post /mcp 'MCP-Protocol-Version: 9999-99-99' 'Mcp-Method: tools/call' 'Mcp-Name: search')
+check "$status" 400 "a protocol version that is not a date is refused"
 
 echo "Config checks:"
 # expect_bad_conf <directives> <case>
@@ -139,10 +145,14 @@ http { server { listen 8004; location /x { $1 } } }"
         echo "  ✓ $2"
     fi
 }
-expect_bad_conf 'l402_mcp on; l402_amount_msat_default 1000;' "l402_mcp on without l402 on is rejected"
-expect_bad_conf 'l402 on; l402_mcp on; l402_mcp_charge tools/list;' "an unpriceable l402_mcp_charge method is rejected"
-expect_bad_conf 'l402 on; l402_mcp on; l402_mcp_tool a 10; l402_mcp_tool a 20;' "a tool priced twice is rejected"
-expect_bad_conf 'l402 on; l402_mcp on; l402_mcp_tool a 0;' "a non-positive tool price is rejected"
+# Every case but the first declares the upstream, so it fails for its own reason.
+U='l402_mcp_upstream_validates on;'
+expect_bad_conf 'l402 on; l402_mcp on; l402_amount_msat_default 1000;' "l402_mcp on without l402_mcp_upstream_validates on is rejected"
+expect_bad_conf "l402_mcp on; $U l402_amount_msat_default 1000;" "l402_mcp on without l402 on is rejected"
+expect_bad_conf "l402 on; l402_mcp on; $U l402_mcp_charge tools/list;" "an unpriceable l402_mcp_charge method is rejected"
+expect_bad_conf "l402 on; l402_mcp on; $U l402_mcp_charge completion/complete;" "a method without Mcp-Name can't be charged"
+expect_bad_conf "l402 on; l402_mcp on; $U l402_mcp_tool a 10; l402_mcp_tool a 20;" "a tool priced twice is rejected"
+expect_bad_conf "l402 on; l402_mcp on; $U l402_mcp_tool a 0;" "a non-positive tool price is rejected"
 
 if [ "$failures" -ne 0 ]; then
     echo "$failures MCP check(s) failed"

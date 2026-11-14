@@ -1482,12 +1482,16 @@ pub struct ModuleConfig {
     mcp_tools: Vec<(String, i64)>,
     // `l402_mcp_charge` methods. Empty means unset: `tools/call` only.
     mcp_charge: Vec<String>,
+    // `l402_mcp_upstream_validates on;`: the operator's word that the upstream
+    // rejects a request whose MCP headers disagree with its body. The client's
+    // `MCP-Protocol-Version` cannot vouch for that, so `l402_mcp on` needs it.
+    mcp_upstream_validates: Option<bool>,
 }
 
 /// The caveat key that binds an MCP token to the tool it was bought for.
 const MCP_TOOL_CAVEAT: &str = "McpTool";
 
-pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 22] = [
+pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 23] = [
     ngx_command_t {
         name: ngx_string!("l402"),
         type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1) as ngx_uint_t,
@@ -1660,6 +1664,14 @@ pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 22] = [
         offset: 0,
         post: std::ptr::null_mut(),
     },
+    ngx_command_t {
+        name: ngx_string!("l402_mcp_upstream_validates"),
+        type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1) as ngx_uint_t,
+        set: Some(ngx_http_l402_mcp_upstream_validates_set),
+        conf: NGX_HTTP_LOC_CONF_OFFSET,
+        offset: 0,
+        post: std::ptr::null_mut(),
+    },
     ngx_command_t::empty(),
 ];
 
@@ -1802,6 +1814,9 @@ impl Merge for ModuleConfig {
         if self.mcp_charge.is_empty() && !prev.mcp_charge.is_empty() {
             self.mcp_charge = prev.mcp_charge.clone();
         }
+        if self.mcp_upstream_validates.is_none() {
+            self.mcp_upstream_validates = prev.mcp_upstream_validates;
+        }
         // `l402_mcp on` only changes how a paywalled location prices requests.
         // Without `l402 on` it would leave the endpoint free while reading as
         // charged, so refuse it.
@@ -1809,6 +1824,20 @@ impl Merge for ModuleConfig {
             eprintln!(
                 "ngx_l402: l402_mcp on needs l402 on in the same location; without it every \
                  MCP request passes free."
+            );
+            return Err(MergeConfigError::NoValue);
+        }
+        // The tool comes from headers only the upstream checks against the
+        // body. Without the operator's word that it does, every request would
+        // be refused at runtime, so refuse the config instead.
+        if self.mcp == Some(true)
+            && self.enable.unwrap_or(false)
+            && self.mcp_upstream_validates != Some(true)
+        {
+            eprintln!(
+                "ngx_l402: l402_mcp on needs l402_mcp_upstream_validates on: tools are read \
+                 from the Mcp-Method and Mcp-Name headers, which only the upstream checks \
+                 against the request body. Declare it once the upstream enforces that check."
             );
             return Err(MergeConfigError::NoValue);
         }
@@ -2054,7 +2083,11 @@ thread_local! {
 ///
 /// # Safety
 /// `request` must be the valid pointer nginx passed to the access handler.
-unsafe fn classify_mcp(request: *mut ngx_http_request_t, charge: &[String]) -> McpDecision {
+unsafe fn classify_mcp(
+    request: *mut ngx_http_request_t,
+    charge: &[String],
+    upstream_validates: bool,
+) -> McpDecision {
     let req = unsafe { Request::from_ngx_http_request(request) };
     let (mut method, mut name, mut version) = (Vec::new(), Vec::new(), Vec::new());
     for (k, v) in req.headers_in_iterator() {
@@ -2078,7 +2111,7 @@ unsafe fn classify_mcp(request: *mut ngx_http_request_t, charge: &[String]) -> M
         name: name.iter().map(String::as_str).collect(),
         protocol_version: version.iter().map(String::as_str).collect(),
     };
-    ngx_l402_core::classify_mcp_request(&headers, charge)
+    ngx_l402_core::classify_mcp_request(&headers, charge, upstream_validates)
 }
 
 /// The 402 body for an MCP tool call: a JSON-RPC error whose `data` carries
@@ -2168,6 +2201,7 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         log_format_json,
         mcp_charge,
         mcp_tools,
+        mcp_upstream_validates,
     ) = unsafe {
         // NOTE: `authorization` can be null — not every request carries the header.
         let auth_header = if !r.headers_in.authorization.is_null() {
@@ -2245,6 +2279,7 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
             }
         });
         let mcp_tools = conf.mcp_tools.clone();
+        let mcp_upstream_validates = conf.mcp_upstream_validates.unwrap_or(false);
 
         (
             auth_header,
@@ -2262,6 +2297,7 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
             log_format_json,
             mcp_charge,
             mcp_tools,
+            mcp_upstream_validates,
         )
     };
 
@@ -2271,7 +2307,7 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
     let mcp_tool: Option<String> = match &mcp_charge {
         None => None,
         // SAFETY: `request` is the valid pointer nginx passed to this handler.
-        Some(charge) => match unsafe { classify_mcp(request, charge) } {
+        Some(charge) => match unsafe { classify_mcp(request, charge, mcp_upstream_validates) } {
             McpDecision::Free => return NGX_DECLINED as isize,
             McpDecision::Charged { name, .. } => Some(name),
             McpDecision::Reject(reason) => {
@@ -4612,6 +4648,38 @@ pub unsafe extern "C" fn ngx_http_l402_mcp_set(
     std::ptr::null_mut()
 }
 
+/// `l402_mcp_upstream_validates on|off;` — the operator's declaration that the
+/// upstream rejects a request whose `Mcp-Method` / `Mcp-Name` headers disagree
+/// with its body. `l402_mcp on` needs it (checked at merge).
+///
+/// # Safety
+/// `cf` and `conf` are the valid, non-null pointers Nginx passes to
+/// directive-parsing callbacks; `conf` points to this location's `ModuleConfig`.
+pub unsafe extern "C" fn ngx_http_l402_mcp_upstream_validates_set(
+    cf: *mut ngx_conf_t,
+    _cmd: *mut ngx_command_t,
+    conf: *mut c_void,
+) -> *mut c_char {
+    // SAFETY: as in `ngx_http_l402_mcp_set`; NGX_CONF_TAKE1 ensures exactly one
+    // argument is present.
+    unsafe {
+        let conf = &mut *(conf as *mut ModuleConfig);
+        let args = (*(*cf).args).elts as *mut ngx_str_t;
+        let val = (*args.add(1)).to_str().unwrap_or_default();
+        if val.eq_ignore_ascii_case("on") {
+            conf.mcp_upstream_validates = Some(true);
+        } else if val.eq_ignore_ascii_case("off") {
+            conf.mcp_upstream_validates = Some(false);
+        } else {
+            return conf_error(
+                cf,
+                &format!("l402_mcp_upstream_validates: expected 'on' or 'off', got '{val}'"),
+            );
+        }
+    }
+    std::ptr::null_mut()
+}
+
 /// `l402_mcp_tool <name> <msat>;` — the price of one MCP tool. The name is
 /// compared exactly with the decoded `Mcp-Name` header.
 ///
@@ -4672,11 +4740,12 @@ pub unsafe extern "C" fn ngx_http_l402_mcp_charge_set(
             let m = (*args.add(i)).to_str().unwrap_or_default();
             // Only methods whose name the transport mirrors into `Mcp-Name`;
             // anything else could be charged but not priced or bound per name.
-            if !matches!(m, "tools/call" | "resources/read" | "prompts/get") {
+            if !ngx_l402_core::MCP_CHARGEABLE_METHODS.contains(&m) {
                 return conf_error(
                     cf,
                     &format!(
-                        "l402_mcp_charge: '{m}' is not one of tools/call, resources/read, prompts/get"
+                        "l402_mcp_charge: '{m}' is not one of {}",
+                        ngx_l402_core::MCP_CHARGEABLE_METHODS.join(", ")
                     ),
                 );
             }

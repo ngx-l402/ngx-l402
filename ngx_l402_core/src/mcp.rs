@@ -4,12 +4,17 @@
 //! The 2026-07-28 transport mirrors the JSON-RPC `method` into `Mcp-Method` and
 //! `params.name` / `params.uri` into `Mcp-Name`, and requires the server to
 //! reject a request whose headers disagree with its body. The module never reads
-//! the body, so the headers are trusted only when `MCP-Protocol-Version` names a
-//! revision that requires that check. Anything else fails closed: a request we
-//! cannot tie to a tool must not reach the upstream for free, and must not be
-//! sold at a price that may belong to a cheaper tool.
+//! the body, so the headers are only as good as the upstream's check, and only
+//! the operator can vouch for that: the client picks `MCP-Protocol-Version`,
+//! and an older or lax upstream skips the check whatever the client claims. So
+//! the headers are trusted only when the operator declares that the upstream
+//! validates them, and the client's version must also name a revision that
+//! requires the check. Anything else fails closed: a request we cannot tie to a
+//! tool must not reach the upstream for free, and must not be sold at a price
+//! that may belong to a cheaper tool.
 
 use base64::Engine;
+use std::fmt::Write;
 
 /// The first protocol revision whose servers must validate the mirrored
 /// headers against the body.
@@ -18,13 +23,16 @@ pub const MCP_MIN_HEADER_VERSION: &str = "2026-07-28";
 /// JSON-RPC code the spec assigns to header validation failures.
 pub const MCP_HEADER_MISMATCH: i64 = -32020;
 
-/// Implementation-defined JSON-RPC code (`-32000`..`-32019`) carried by the 402
-/// body. MCP has no standard payment error yet, and the community proposal's
-/// `-32042` sits in the range the spec reserves for itself.
-pub const MCP_PAYMENT_REQUIRED: i64 = -32002;
+/// JSON-RPC code carried by the 402 body. MCP defines no payment error, and
+/// 2026-07-28 keeps `-32000`..`-32099` off limits: `-32020` up is the spec's
+/// own, no new codes go below it (`-32002` still means "resource not found" to
+/// older clients), and new codes belong outside `-32768`..`-32000`. 402 is
+/// outside that range and matches the HTTP status.
+pub const MCP_PAYMENT_REQUIRED: i64 = 402;
 
-/// Methods whose `Mcp-Name` header is required by the transport.
-const NAMED_METHODS: [&str; 3] = ["tools/call", "resources/read", "prompts/get"];
+/// Methods whose `Mcp-Name` header is required by the transport, and so the
+/// only ones that can be charged: the price and the token are bound to a name.
+pub const MCP_CHARGEABLE_METHODS: [&str; 3] = ["tools/call", "resources/read", "prompts/get"];
 
 const B64_PREFIX: &str = "=?base64?";
 const B64_SUFFIX: &str = "?=";
@@ -52,8 +60,14 @@ pub struct McpHeaders<'a> {
 }
 
 /// Decide whether a request is charged. `charged` is the location's list of
-/// charged methods (`tools/call` unless the operator opts others in).
-pub fn classify(headers: &McpHeaders, charged: &[String]) -> McpDecision {
+/// charged methods (`tools/call` unless the operator opts others in), each one
+/// of [`MCP_CHARGEABLE_METHODS`]. `upstream_validates` is the operator's
+/// declaration that the upstream rejects a request whose headers disagree with
+/// its body; without it no header can be trusted, discovery included.
+pub fn classify(headers: &McpHeaders, charged: &[String], upstream_validates: bool) -> McpDecision {
+    if !upstream_validates {
+        return reject("the upstream is not declared to validate MCP headers against the body");
+    }
     let version = match single("MCP-Protocol-Version", &headers.protocol_version) {
         Ok(Some(v)) => v,
         Ok(None) => return reject("missing MCP-Protocol-Version header"),
@@ -86,7 +100,7 @@ pub fn classify(headers: &McpHeaders, charged: &[String]) -> McpDecision {
         },
         None => None,
     };
-    if NAMED_METHODS.contains(&method) && name.is_none() {
+    if MCP_CHARGEABLE_METHODS.contains(&method) && name.is_none() {
         return reject(&format!("{} request without Mcp-Name header", method));
     }
 
@@ -99,12 +113,17 @@ pub fn classify(headers: &McpHeaders, charged: &[String]) -> McpDecision {
             name,
         },
         // A charged method must carry a name to price and bind the token to.
+        // Only reached when `charged` holds a method outside
+        // `MCP_CHARGEABLE_METHODS`, which the config should refuse.
         None => reject(&format!("{} request without Mcp-Name header", method)),
     }
 }
 
-/// Decode an `Mcp-Name` value: the `=?base64?…?=` sentinel form is standard
-/// base64 of UTF-8; anything else must already be plain header text.
+/// Decode an `Mcp-Name` value: the `=?base64?…?=` sentinel form is padded,
+/// standard-alphabet base64 of UTF-8, the form the spec's examples use;
+/// anything else must already be plain header text. Other base64 spellings are
+/// refused rather than guessed at, so this reading of a name cannot differ
+/// from the upstream's.
 pub fn decode_mcp_name(raw: &str) -> Result<String, String> {
     if let Some(inner) = raw
         .strip_prefix(B64_PREFIX)
@@ -117,6 +136,11 @@ pub fn decode_mcp_name(raw: &str) -> Result<String, String> {
             .map_err(|_| "Mcp-Name header does not decode to UTF-8".to_string())?;
         if name.is_empty() {
             return Err("Mcp-Name header is empty".to_string());
+        }
+        // The name reaches log lines and the token's caveat, and no tool,
+        // prompt or resource URI needs a control character.
+        if name.chars().any(char::is_control) {
+            return Err("Mcp-Name header decodes to control characters".to_string());
         }
         return Ok(name);
     }
@@ -141,7 +165,7 @@ pub fn mcp_tool_price_key(path: &str, name: &str) -> String {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b'/') {
             out.push(b as char);
         } else {
-            out.push_str(&format!("%{:02X}", b));
+            let _ = write!(out, "%{b:02X}");
         }
     }
     out
@@ -174,16 +198,35 @@ fn single<'a>(header: &str, values: &[&'a str]) -> Result<Option<&'a str>, Strin
     }
 }
 
-/// Revisions are `YYYY-MM-DD`, so a well-formed one orders as a string.
+/// Revisions are `YYYY-MM-DD` dates, so a real one orders as a string.
 fn version_requires_validation(version: &str) -> bool {
-    let b = version.as_bytes();
-    let well_formed = b.len() == 10
-        && b[4] == b'-'
-        && b[7] == b'-'
-        && b.iter()
-            .enumerate()
-            .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit());
-    well_formed && version >= MCP_MIN_HEADER_VERSION
+    is_revision_date(version) && version >= MCP_MIN_HEADER_VERSION
+}
+
+/// A `YYYY-MM-DD` that names a day on the calendar, so `9999-99-99` is not
+/// taken for a revision after every real one.
+fn is_revision_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return false;
+    }
+    let num = |digits: &[u8]| {
+        digits.iter().try_fold(0u32, |n, c| {
+            c.is_ascii_digit().then(|| n * 10 + u32::from(c - b'0'))
+        })
+    };
+    let (Some(year), Some(month), Some(day)) = (num(&b[..4]), num(&b[5..7]), num(&b[8..])) else {
+        return false;
+    };
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=days).contains(&day)
 }
 
 /// Visible ASCII and space, with no leading or trailing space: values outside
@@ -212,7 +255,7 @@ mod tests {
     fn tools_call_is_charged_for_its_tool() {
         let h = headers(&["2026-07-28"], &["tools/call"], &["search"]);
         assert_eq!(
-            classify(&h, &tools_only()),
+            classify(&h, &tools_only(), true),
             McpDecision::Charged {
                 method: "tools/call".into(),
                 name: "search".into()
@@ -224,7 +267,7 @@ mod tests {
     fn later_revision_is_trusted() {
         let h = headers(&["2027-01-01"], &["tools/call"], &["search"]);
         assert!(matches!(
-            classify(&h, &tools_only()),
+            classify(&h, &tools_only(), true),
             McpDecision::Charged { .. }
         ));
     }
@@ -232,16 +275,16 @@ mod tests {
     #[test]
     fn discovery_passes_free() {
         let h = headers(&["2026-07-28"], &["tools/list"], &[]);
-        assert_eq!(classify(&h, &tools_only()), McpDecision::Free);
+        assert_eq!(classify(&h, &tools_only(), true), McpDecision::Free);
     }
 
     #[test]
     fn resources_read_free_unless_opted_in() {
         let h = headers(&["2026-07-28"], &["resources/read"], &["file:///a"]);
-        assert_eq!(classify(&h, &tools_only()), McpDecision::Free);
+        assert_eq!(classify(&h, &tools_only(), true), McpDecision::Free);
         let charged = vec!["tools/call".to_string(), "resources/read".to_string()];
         assert_eq!(
-            classify(&h, &charged),
+            classify(&h, &charged, true),
             McpDecision::Charged {
                 method: "resources/read".into(),
                 name: "file:///a".into()
@@ -260,7 +303,7 @@ mod tests {
             headers(&["2026-7-28"], &["tools/call"], &["search"]),
         ] {
             assert!(
-                matches!(classify(&h, &tools_only()), McpDecision::Reject(_)),
+                matches!(classify(&h, &tools_only(), true), McpDecision::Reject(_)),
                 "{h:?}"
             );
         }
@@ -271,7 +314,7 @@ mod tests {
         // Without validated headers we cannot tell discovery from a tool call.
         let h = headers(&["2025-11-25"], &["tools/list"], &[]);
         assert!(matches!(
-            classify(&h, &tools_only()),
+            classify(&h, &tools_only(), true),
             McpDecision::Reject(_)
         ));
     }
@@ -284,7 +327,7 @@ mod tests {
             headers(&["2026-07-28", "2026-07-28"], &["tools/call"], &["search"]),
         ] {
             assert!(
-                matches!(classify(&h, &tools_only()), McpDecision::Reject(_)),
+                matches!(classify(&h, &tools_only(), true), McpDecision::Reject(_)),
                 "{h:?}"
             );
         }
@@ -294,7 +337,7 @@ mod tests {
     fn named_method_without_name_rejected_even_when_free() {
         let h = headers(&["2026-07-28"], &["prompts/get"], &[]);
         assert!(matches!(
-            classify(&h, &tools_only()),
+            classify(&h, &tools_only(), true),
             McpDecision::Reject(_)
         ));
     }
@@ -308,7 +351,7 @@ mod tests {
             &["=?base64?c3VtbWFyaXpl?="],
         );
         assert_eq!(
-            classify(&h, &tools_only()),
+            classify(&h, &tools_only(), true),
             McpDecision::Charged {
                 method: "tools/call".into(),
                 name: "summarize".into()
@@ -372,5 +415,90 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["error"]["data"]["a"], 1);
         assert!(v["id"].is_null());
+    }
+
+    #[test]
+    fn undeclared_upstream_trusts_no_header() {
+        // A client can claim any version; only the operator can say the
+        // upstream checks headers against the body.
+        for h in [
+            headers(&["2026-07-28"], &["tools/call"], &["search"]),
+            headers(&["2026-07-28"], &["tools/list"], &[]),
+        ] {
+            assert!(
+                matches!(classify(&h, &tools_only(), false), McpDecision::Reject(_)),
+                "{h:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn version_must_be_a_real_date() {
+        for v in [
+            "9999-99-99",
+            "2026-13-01",
+            "2026-00-10",
+            "2026-09-31",
+            "2027-02-29",
+            "2026-08-00",
+        ] {
+            let h = headers(&[v], &["tools/call"], &["search"]);
+            assert!(
+                matches!(classify(&h, &tools_only(), true), McpDecision::Reject(_)),
+                "{v}"
+            );
+        }
+        for v in ["2026-07-28", "2028-02-29", "2026-12-31"] {
+            let h = headers(&[v], &["tools/call"], &["search"]);
+            assert!(
+                matches!(
+                    classify(&h, &tools_only(), true),
+                    McpDecision::Charged { .. }
+                ),
+                "{v}"
+            );
+        }
+    }
+
+    #[test]
+    fn charged_method_without_name_never_reaches_payment() {
+        // Why the config refuses to charge anything outside
+        // MCP_CHARGEABLE_METHODS: such a request could only ever be a 400.
+        assert!(!MCP_CHARGEABLE_METHODS.contains(&"completion/complete"));
+        let h = headers(&["2026-07-28"], &["completion/complete"], &[]);
+        let charged = vec!["completion/complete".to_string()];
+        assert!(matches!(
+            classify(&h, &charged, true),
+            McpDecision::Reject(_)
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_control_characters() {
+        for encoded in [
+            "=?base64?YQ0KYgA=?=",         // "a\r\nb\0"
+            "=?base64?bGluZTEKbGluZTI=?=", // "line1\nline2", the spec's own example
+            "=?base64?YQli?=",             // "a\tb"
+            "=?base64?fw==?=",             // DEL
+            "=?base64?woU=?=",             // U+0085, a C1 control
+        ] {
+            assert!(decode_mcp_name(encoded).is_err(), "{encoded}");
+        }
+        assert_eq!(decode_mcp_name("=?base64?Y2Fmw6k=?=").unwrap(), "caf\u{e9}");
+    }
+
+    #[test]
+    fn decode_accepts_only_padded_standard_base64() {
+        assert_eq!(decode_mcp_name("=?base64?eA==?=").unwrap(), "x");
+        // Unpadded and URL-safe spellings are refused, not guessed at.
+        assert!(decode_mcp_name("=?base64?eA?=").is_err());
+        assert!(decode_mcp_name("=?base64?Pz8-?=").is_err());
+        assert!(decode_mcp_name("=?base64?Pz8_?=").is_err());
+        assert_eq!(decode_mcp_name("=?base64?Pz8+?=").unwrap(), "??>");
+    }
+
+    #[test]
+    fn payment_code_is_outside_the_reserved_range() {
+        assert!(!(-32768..=-32000).contains(&MCP_PAYMENT_REQUIRED));
     }
 }

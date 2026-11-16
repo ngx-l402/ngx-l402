@@ -69,8 +69,8 @@ So header-based pricing is only as strong as the upstream's validation:
 | A duplicated `Mcp-Method`, `Mcp-Name` or `MCP-Protocol-Version` | `400` |
 | An `Mcp-Name` that is malformed, doesn't decode, or decodes to control characters | `400` |
 
-A `400` carries a JSON-RPC error with code `-32020` (`HeaderMismatch`) and
-`"id": null`, the shape the spec uses for transport-level rejections.
+A `400` carries a JSON-RPC error with code `-32020` (`HeaderMismatch`) and no
+`id`, the shape the spec uses for transport-level rejections.
 
 A request the headers can't vouch for is **refused rather than charged at the
 default price**: a default-priced token for a request that can't be tied to a
@@ -129,7 +129,6 @@ body is a JSON-RPC error an MCP client can read:
 ```json
 {
   "jsonrpc": "2.0",
-  "id": null,
   "error": {
     "code": 402,
     "message": "Payment required to call summarize",

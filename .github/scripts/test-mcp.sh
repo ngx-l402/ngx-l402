@@ -85,7 +85,7 @@ echo "Per-tool prices:"
 read -r status body < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: search')
 check "$status" 402 "tools/call is charged"
 check "$(jq -r '.error.code' <<<"$body")" 402 "the 402 body is a JSON-RPC payment error"
-check "$(jq -r '.id' <<<"$body")" null "the 402 body has a null id"
+check "$(jq 'has("id")' <<<"$body")" false "the 402 body has no id"
 check "$(jq -r '.error.data.amount_msat' <<<"$body")" 1000 "a tool without its own line costs the default"
 check "$(jq -r '.error.data.tool' <<<"$body")" search "the 402 body names the tool"
 check "$(jq -r '.error.data.invoice | startswith("lnbc") or startswith("lntb") or startswith("lnbcrt")' <<<"$body")" \

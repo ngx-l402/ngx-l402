@@ -64,6 +64,10 @@ pub struct McpHeaders<'a> {
 /// of [`MCP_CHARGEABLE_METHODS`]. `upstream_validates` is the operator's
 /// declaration that the upstream rejects a request whose headers disagree with
 /// its body; without it no header can be trusted, discovery included.
+///
+/// Refusing an undeclared upstream here is a backstop: it answers every
+/// client with a `400` for something only the operator can fix, so the config
+/// must refuse `l402_mcp` without the declaration at `nginx -t`.
 pub fn classify(headers: &McpHeaders, charged: &[String], upstream_validates: bool) -> McpDecision {
     if !upstream_validates {
         return reject("the upstream is not declared to validate MCP headers against the body");
@@ -73,7 +77,12 @@ pub fn classify(headers: &McpHeaders, charged: &[String], upstream_validates: bo
         Ok(None) => return reject("missing MCP-Protocol-Version header"),
         Err(e) => return McpDecision::Reject(e),
     };
-    if !version_requires_validation(version) {
+    // Checked before the value appears in any message: only a real date is
+    // echoed back. Revisions are `YYYY-MM-DD`, so a real one orders as a string.
+    if !is_revision_date(version) {
+        return reject("MCP-Protocol-Version header is not a protocol revision date");
+    }
+    if version < MCP_MIN_HEADER_VERSION {
         return reject(&format!(
             "MCP-Protocol-Version {} predates {}; mirrored headers are not validated",
             version, MCP_MIN_HEADER_VERSION
@@ -138,7 +147,10 @@ pub fn decode_mcp_name(raw: &str) -> Result<String, String> {
             return Err("Mcp-Name header is empty".to_string());
         }
         // The name reaches log lines and the token's caveat, and no tool,
-        // prompt or resource URI needs a control character.
+        // prompt or resource URI needs a control character. `is_control` is
+        // `Cc` only: U+2028/2029, bidi overrides and zero-width characters
+        // still pass, so every sink must escape the name (`{:?}` and
+        // `escape_json` do).
         if name.chars().any(char::is_control) {
             return Err("Mcp-Name header decodes to control characters".to_string());
         }
@@ -171,17 +183,18 @@ pub fn mcp_tool_price_key(path: &str, name: &str) -> String {
     out
 }
 
-/// JSON-RPC error body without `id`, the shape the spec uses for its own
-/// transport-level rejections. `data` is inserted verbatim and must already be
-/// a JSON value.
+/// JSON-RPC error body with no `id` member: the schema makes an error
+/// response's `id` optional and `string | number`, never `null`, and the
+/// transport answers these rejections with "a JSON-RPC error response that has
+/// no `id`". `data` is inserted verbatim and must already be a JSON value.
 pub fn jsonrpc_error_body(code: i64, message: &str, data: Option<&str>) -> String {
     let message = crate::escape_json(message);
     match data {
         Some(d) => format!(
-            "{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":{code},\"message\":\"{message}\",\"data\":{d}}}}}"
+            "{{\"jsonrpc\":\"2.0\",\"error\":{{\"code\":{code},\"message\":\"{message}\",\"data\":{d}}}}}"
         ),
         None => format!(
-            "{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":{code},\"message\":\"{message}\"}}}}"
+            "{{\"jsonrpc\":\"2.0\",\"error\":{{\"code\":{code},\"message\":\"{message}\"}}}}"
         ),
     }
 }
@@ -196,11 +209,6 @@ fn single<'a>(header: &str, values: &[&'a str]) -> Result<Option<&'a str>, Strin
         [v] => Ok(Some(v.trim_matches(|c| c == ' ' || c == '\t'))),
         _ => Err(format!("duplicate {} header", header)),
     }
-}
-
-/// Revisions are `YYYY-MM-DD` dates, so a real one orders as a string.
-fn version_requires_validation(version: &str) -> bool {
-    is_revision_date(version) && version >= MCP_MIN_HEADER_VERSION
 }
 
 /// A `YYYY-MM-DD` that names a day on the calendar, so `9999-99-99` is not
@@ -406,15 +414,26 @@ mod tests {
     }
 
     #[test]
-    fn error_body_has_null_id_and_escapes() {
+    fn error_body_has_no_id_and_escapes() {
         assert_eq!(
             jsonrpc_error_body(MCP_HEADER_MISMATCH, "bad \"x\"", None),
-            r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32020,"message":"bad \"x\""}}"#
+            r#"{"jsonrpc":"2.0","error":{"code":-32020,"message":"bad \"x\""}}"#
         );
-        let body = jsonrpc_error_body(MCP_PAYMENT_REQUIRED, "pay", Some(r#"{"a":1}"#));
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        for body in [
+            jsonrpc_error_body(MCP_PAYMENT_REQUIRED, "pay", Some(r#"{"a":1}"#)),
+            jsonrpc_error_body(MCP_HEADER_MISMATCH, "bad", None),
+        ] {
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+            // `v["id"].is_null()` would also pass for `"id": null`.
+            assert!(v.get("id").is_none(), "{body}");
+        }
+        let v: serde_json::Value = serde_json::from_str(&jsonrpc_error_body(
+            MCP_PAYMENT_REQUIRED,
+            "pay",
+            Some(r#"{"a":1}"#),
+        ))
+        .unwrap();
         assert_eq!(v["error"]["data"]["a"], 1);
-        assert!(v["id"].is_null());
     }
 
     #[test]
@@ -495,6 +514,61 @@ mod tests {
         assert!(decode_mcp_name("=?base64?Pz8-?=").is_err());
         assert!(decode_mcp_name("=?base64?Pz8_?=").is_err());
         assert_eq!(decode_mcp_name("=?base64?Pz8+?=").unwrap(), "??>");
+    }
+
+    #[test]
+    fn invalid_version_is_not_echoed() {
+        for v in ["latest", "9999-99-99", "2026-07-28\u{7f}x", "<script>"] {
+            let h = headers(&[v], &["tools/call"], &["search"]);
+            match classify(&h, &tools_only(), true) {
+                McpDecision::Reject(reason) => {
+                    assert!(!reason.contains(v), "{reason}");
+                    assert!(!reason.contains("predates"), "{reason}");
+                }
+                d => panic!("{v}: {d:?}"),
+            }
+        }
+        // A real but older date is safe to name, and is reported as older.
+        match classify(
+            &headers(&["2025-11-25"], &["tools/call"], &["search"]),
+            &tools_only(),
+            true,
+        ) {
+            McpDecision::Reject(reason) => assert!(reason.contains("2025-11-25 predates")),
+            d => panic!("{d:?}"),
+        }
+    }
+
+    #[test]
+    fn header_values_are_trimmed_of_sp_and_ht() {
+        let h = headers(&[" \t2026-07-28\t"], &["\ttools/call "], &[" search\t"]);
+        assert_eq!(
+            classify(&h, &tools_only(), true),
+            McpDecision::Charged {
+                method: "tools/call".into(),
+                name: "search".into()
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_name_rejected_on_free_method() {
+        // Decoded before the charged check, so a bad name cannot ride a free
+        // method through to the upstream.
+        for name in ["=?base64?not base64!?=", "=?base64?YQ0KYg==?=", "caf\u{e9}"] {
+            let h = headers(&["2026-07-28"], &["tools/list"], &[name]);
+            assert!(
+                matches!(classify(&h, &tools_only(), true), McpDecision::Reject(_)),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn method_is_case_sensitive() {
+        // Header values are case-sensitive, so `Tools/Call` is not `tools/call`.
+        let h = headers(&["2026-07-28"], &["Tools/Call"], &["search"]);
+        assert_eq!(classify(&h, &tools_only(), true), McpDecision::Free);
     }
 
     #[test]

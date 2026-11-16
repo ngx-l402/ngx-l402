@@ -131,6 +131,15 @@ check "$status" 400 "an Mcp-Name that decodes to CR/LF is refused"
 read -r status _ < <(post /mcp 'MCP-Protocol-Version: 9999-99-99' 'Mcp-Method: tools/call' 'Mcp-Name: search')
 check "$status" 400 "a protocol version that is not a date is refused"
 
+echo "Only POST:"
+for m in GET DELETE; do
+    status=$(curl_in -X "$m" -H "$V" -o /dev/null -w '%{http_code}' http://127.0.0.1:8002/mcp)
+    check "$status" 405 "$m is refused with 405"
+done
+allow=$(curl_in -X GET -H "$V" -o /dev/null -D - http://127.0.0.1:8002/mcp |
+    tr -d '\r' | awk -F': ' 'tolower($1) == "allow" { print $2 }')
+check "$allow" POST "the 405 names POST in Allow"
+
 echo "Config checks:"
 # expect_bad_conf <directives> <case>
 expect_bad_conf() {

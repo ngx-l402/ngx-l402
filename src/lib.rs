@@ -2301,6 +2301,35 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         )
     };
 
+    // 2026-07-28 removed the GET stream and the DELETE that ended a session,
+    // and tells a server to answer both with `405`. Only `POST` carries the
+    // mirrored headers, so nothing else is classified or let through. Methods
+    // in `l402_exempt_methods` (a CORS `OPTIONS`, say) have already returned.
+    if mcp_charge.is_some() && method != NGX_HTTP_POST {
+        ngx_log_error!(
+            NGX_LOG_INFO,
+            log_ref,
+            "L402 MCP endpoint takes POST only; got {}",
+            method_caveat_value(method)
+        );
+        // Shadow mode never blocks.
+        if dry_run {
+            return NGX_DECLINED as isize;
+        }
+        // SAFETY: `request` is the valid pointer nginx passed to this handler.
+        let req = unsafe { Request::from_ngx_http_request(request) };
+        let _ = req.add_header_out("Allow", "POST");
+        // SAFETY: as above.
+        return unsafe {
+            send_response(
+                request,
+                405,
+                "MCP endpoints take POST only\n".to_string(),
+                "text/plain; charset=utf-8",
+            )
+        };
+    }
+
     // An MCP endpoint takes every call as `POST` to one URL, so the tool comes
     // from the mirrored `Mcp-Name` header. Discovery passes free; a request the
     // headers can't vouch for is refused rather than priced.

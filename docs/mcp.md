@@ -61,6 +61,7 @@ So header-based pricing is only as strong as the upstream's validation:
 
 | Request | Result |
 |---|---|
+| Anything but `POST` (e.g. an older client's `GET` stream or session `DELETE`) | `405`, `Allow: POST` |
 | A method not in `l402_mcp_charge` (e.g. `tools/list`) | Passes through free |
 | `tools/call` with `Mcp-Name` | Charged at that tool's price; `402` until paid |
 | No `MCP-Protocol-Version`, or older than `2026-07-28` | `400` |
@@ -82,7 +83,7 @@ encoded tool name still gets its own price. Only padded, standard-alphabet
 base64 is accepted, the form the spec's examples use.
 
 `OPTIONS` preflight requests can pass through with `l402_exempt_methods OPTIONS;`,
-which is checked first.
+which is checked before the `405`.
 
 ---
 
@@ -157,6 +158,17 @@ outside the JSON-RPC server range (`-32768` to `-32000`), so the code is `402`.
   planned.
 - **Retries are new calls.** A client that re-sends a `tools/call` — after an
   input-required result, or a dropped response stream — needs a new payment
-  under the default replay check. MRTR retries carry a new JSON-RPC `id`, so the
-  module can't tell them from a fresh call.
+  under the default replay check. MRTR retries carry a new JSON-RPC `id`, and
+  the state tying them to the first call (`requestState`) is in the body, so
+  the module can't tell them from a fresh call. For tools that ask for input,
+  let one payment cover a short window instead; the token still opens only
+  its own tool:
+
+  ```nginx
+  location /mcp {
+      # ...
+      l402_indefinite_access on;   # a token works until it expires
+      l402_macaroon_timeout  300;  # 5 minutes: room for the retries
+  }
+  ```
 - **stdio MCP servers** have no HTTP to sit in front of.

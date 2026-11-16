@@ -1965,7 +1965,7 @@ dependencies = [
 [[package]]
 name = "l402_middleware"
 version = "2.3.5"
-source = "git+https://github.com/DhananjayPurohit/l402_middleware?rev=4210a65af82cc152520566aabfb8de281ca4e3bb#4210a65af82cc152520566aabfb8de281ca4e3bb"
+source = "git+https://github.com/DhananjayPurohit/l402_middleware?rev=297548ef24be356917ec7f7a7ea6b6f50e228895#297548ef24be356917ec7f7a7ea6b6f50e228895"
 dependencies = [
  "base64 0.21.7",
  "bitcoin 0.32.100",

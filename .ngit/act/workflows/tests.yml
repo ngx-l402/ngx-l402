@@ -2162,8 +2162,12 @@ jobs:
 
           # 4. A P2PK-locked token must be accepted
           echo "Sending P2PK-locked token..."
-          P2PK_TOKEN=$(docker exec cashu-mint poetry run cashu send 10 \
-            --lock "P2PK:$EXPECTED_PUBKEY" 2>/dev/null || echo "")
+          # nutshell's CLI send always stamps locktime=now+locktime_delta_seconds
+          # and adds no refund tag, so the lock lapses to anyone-can-spend and
+          # P2PK mode refuses it. 0 leaves the tag off, giving the permanent lock
+          # cashu-ts and cdk emit by default — the only kind accepted here.
+          P2PK_TOKEN=$(docker exec -e LOCKTIME_DELTA_SECONDS=0 cashu-mint \
+            poetry run cashu send 10 --lock "P2PK:$EXPECTED_PUBKEY" 2>/dev/null || echo "")
           if [ -z "$P2PK_TOKEN" ]; then
             echo "⚠️  cashu send --lock not supported in this nutshell version — skipping send test"
           else

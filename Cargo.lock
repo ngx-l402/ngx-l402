@@ -2060,9 +2060,9 @@ dependencies = [
 
 [[package]]
 name = "lightning"
-version = "0.2.2"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4c90397b635e3ece6b9a723fb470a46cb9b3592f217d72e40540a5fada00289d"
+checksum = "63a1ab99a13ab3343a9b4d1d25c455bf72322819fc5a5f05c5182e704528a583"
 dependencies = [
  "bech32 0.11.1",
  "bitcoin 0.32.100",

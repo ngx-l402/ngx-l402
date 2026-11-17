@@ -2414,14 +2414,15 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
 
     // Fetch dynamic config (price + lnurl) from Redis only when it can affect the
     // outcome: the Cashu auth path needs the per-path amount + lnurl for verification,
-    // and every path that ends in a 402 challenge needs them to quote the price. The
-    // L402 macaroon path uses neither, so we skip the Redis round-trip entirely for it.
+    // and every path that ends in a 402 challenge needs them to quote the price. An
+    // L402 macaroon is checked without either, so its Redis round-trip waits until
+    // the check ends in a 402 (an auto-detect retry whose invoice is unpaid).
     let needs_dynamic_config = match auth_header.as_deref() {
         Some(s) => !ngx_l402_core::is_l402_scheme(s),
         None => true,
     };
 
-    let (final_amount, final_lnurl_addr, price_source) = if needs_dynamic_config {
+    let resolve_price = || -> (i64, Option<String>, &'static str) {
         let redis_start = Instant::now();
         let tool_key = mcp_tool
             .as_deref()
@@ -2446,13 +2447,17 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         } else {
             (amount_msat, "static")
         };
-        (amount, dynamic_lnurl.or(lnurl_addr), src)
+        (amount, dynamic_lnurl.or_else(|| lnurl_addr.clone()), src)
+    };
+
+    let (mut final_amount, mut final_lnurl_addr, mut price_source) = if needs_dynamic_config {
+        resolve_price()
     } else {
-        // L402 macaroon path skips the Redis lookup entirely — there is no
-        // dynamic price to compare against, so the source is "static".
+        // Not read by the L402 macaroon check; replaced below if it ends in a
+        // challenge.
         (
             mcp_static_price.unwrap_or(amount_msat),
-            lnurl_addr,
+            lnurl_addr.clone(),
             "static",
         )
     };
@@ -2471,6 +2476,11 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         indefinite_access,
         macaroon_timeout,
     );
+    // The replacement challenge must quote what a fresh one would: the Redis
+    // tool or path price and the Redis LNURL, not the static fallback.
+    if !needs_dynamic_config && result == 402 {
+        (final_amount, final_lnurl_addr, price_source) = resolve_price();
+    }
     let auth_duration = auth_start.elapsed();
 
     if perf_log_enabled() {

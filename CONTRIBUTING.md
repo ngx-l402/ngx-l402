@@ -43,7 +43,7 @@ We welcome various types of contributions:
 | Type | Examples |
 |------|----------|
 | 🐛 **Bug Fixes** | Memory leaks, crashes, incorrect behavior |
-| ✨ **Features** | New payment methods, protocol extensions |
+| ✨ **Features** | New Bitcoin payment methods, protocol extensions |
 | 📚 **Documentation** | Code comments, usage examples, guides |
 | 🧪 **Testing** | Unit tests, integration tests, benchmarks |
 | ⚡ **Performance** | Profiling, optimization, bottleneck fixes |
@@ -87,7 +87,7 @@ When proposing new features:
 
 ```bash
 # Create a feature branch
-git checkout -b feature/add-new-payment-method
+git checkout -b feature/add-bitcoin-payment-method
 
 # Create a bugfix branch
 git checkout -b fix/memory-leak-in-cashu

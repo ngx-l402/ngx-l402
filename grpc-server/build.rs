@@ -3,11 +3,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let include_dirs = &["proto"];
     let out_dir = std::env::var("OUT_DIR").unwrap();
 
-    tonic_build::configure()
+    tonic_prost_build::configure()
         .build_server(true)
         .build_client(false)
         .file_descriptor_set_path(format!("{}/content_descriptor.bin", out_dir))
-        .compile(proto_files, include_dirs)?;
+        .compile_protos(proto_files, include_dirs)?;
 
     Ok(())
 }

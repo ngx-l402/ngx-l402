@@ -87,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .register_encoded_file_descriptor_set(tonic::include_file_descriptor_set!(
             "content_descriptor"
         ))
-        .build()?;
+        .build_v1alpha()?;
 
     info!("✅ gRPC server configured, starting to serve...");
 

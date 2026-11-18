@@ -1,0 +1,5 @@
+[advisories]
+# libsqlite3-sys 0.28 (bundled SQLite) comes from cdk-sqlite, which caps rusqlite
+# below the 0.41 that ships the patched SQLite. Exploiting it needs a crafted -wal
+# file in the wallet database's directory. Remove once cdk-sqlite allows 0.41.
+ignore = ["RUSTSEC-2026-0459"]

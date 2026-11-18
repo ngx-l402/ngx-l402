@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Install mdBook
         uses: peaceiris/actions-mdbook@v2
@@ -37,7 +37,7 @@ jobs:
       # Keep ngx-l402.org/docs/ in sync: the website repo serves the built
       # book from its docs/ folder (works on GitHub Pages, Cloudflare, nsite).
       - name: Checkout website repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           repository: ngx-l402/ngx-l402.org
           token: ${{ secrets.SITE_DEPLOY_KEY }}   # fine-grained PAT, Contents: read+write on the website repo

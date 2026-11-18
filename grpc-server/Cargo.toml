@@ -4,17 +4,18 @@ version = "0.1.0"
 edition = "2021"
 
 [package.metadata.cargo-machete]
-# prost is referenced by tonic's generated code (built into OUT_DIR, which
-# machete cannot scan); tonic-build is used from build.rs.
-ignored = ["prost", "tonic-build"]
+# prost and tonic-prost are referenced by tonic's generated code (built into
+# OUT_DIR, which machete cannot scan); tonic-prost-build is used from build.rs.
+ignored = ["prost", "tonic-prost", "tonic-prost-build"]
 
 [dependencies]
-tonic = "0.10"
-tonic-reflection = "0.10"
-prost = "0.12"
+tonic = "0.14"
+tonic-prost = "0.14"
+tonic-reflection = "0.14"
+prost = "0.14"
 tokio = { version = "1.0", features = ["full"] }
 log = "0.4"
 env_logger = "0.11"
 
 [build-dependencies]
-tonic-build = "0.10"
+tonic-prost-build = "0.14"

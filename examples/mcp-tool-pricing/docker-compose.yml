@@ -1,0 +1,121 @@
+# ngx-l402 pricing each tool of an MCP server, on a throwaway regtest
+# Lightning network:
+#
+#   client ──► gateway (nginx + ngx-l402) ──► mcp-server (MCP Python SDK)
+#     │             │
+#   lnd-wallet ══ lnd-gateway        (a channel; the client pays through it)
+#
+# `./setup.sh` funds the nodes and opens the channel; `./test.sh` runs the
+# checks. See README.md.
+name: ngx-l402-mcp-example
+
+x-lnd: &lnd
+  image: lightninglabs/lnd:v0.20.0-beta
+  depends_on: [bitcoind]
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "test", "-f", "/root/.lnd/data/chain/bitcoin/regtest/admin.macaroon"]
+    interval: 2s
+    retries: 60
+
+services:
+  bitcoind:
+    image: lncm/bitcoind:v25.0
+    user: root
+    command: >-
+      -regtest -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0
+      -rpcuser=user -rpcpassword=pass -fallbackfee=0.0001 -txindex=1
+      -zmqpubrawblock=tcp://0.0.0.0:28332 -zmqpubrawtx=tcp://0.0.0.0:28333
+
+  # The gateway's node: invoices are issued here and paid to it.
+  lnd-gateway:
+    <<: *lnd
+    command:
+      - --noseedbackup
+      - --nobootstrap
+      - --bitcoin.active
+      - --bitcoin.regtest
+      - --bitcoin.node=bitcoind
+      - --bitcoind.rpchost=bitcoind
+      - --bitcoind.rpcuser=user
+      - --bitcoind.rpcpass=pass
+      - --bitcoind.zmqpubrawblock=tcp://bitcoind:28332
+      - --bitcoind.zmqpubrawtx=tcp://bitcoind:28333
+      - --listen=0.0.0.0:9735
+      - --rpclisten=0.0.0.0:10009
+      - --restlisten=0.0.0.0:8080
+      - --alias=gateway
+      - --tlsextradomain=lnd-gateway
+      # LND keeps its data directory private (0700); write the invoice
+      # macaroon beside tls.cert so the gateway's nginx workers can read it.
+      - --invoicemacaroonpath=/root/.lnd/invoice.macaroon
+    volumes: [lnd-gateway:/root/.lnd]
+
+  # The client's wallet: it pays the gateway's invoices.
+  lnd-wallet:
+    <<: *lnd
+    command:
+      - --noseedbackup
+      - --nobootstrap
+      - --bitcoin.active
+      - --bitcoin.regtest
+      - --bitcoin.node=bitcoind
+      - --bitcoind.rpchost=bitcoind
+      - --bitcoind.rpcuser=user
+      - --bitcoind.rpcpass=pass
+      - --bitcoind.zmqpubrawblock=tcp://bitcoind:28332
+      - --bitcoind.zmqpubrawtx=tcp://bitcoind:28333
+      - --listen=0.0.0.0:9735
+      - --rpclisten=0.0.0.0:10009
+      - --restlisten=0.0.0.0:8080
+      - --alias=wallet
+      - --tlsextradomain=lnd-wallet
+    volumes: [lnd-wallet:/root/.lnd]
+
+  redis:
+    image: redis:7.2
+
+  mcp-server:
+    build: .
+    command: ["python", "server.py"]
+
+  gateway:
+    # Builds the module from this checkout. Once a release with `l402_mcp`
+    # is out, `image: ghcr.io/ngx-l402/ngx-l402:latest` works the same.
+    build:
+      context: ../..
+    image: ngx-l402:mcp-example
+    depends_on:
+      lnd-gateway: { condition: service_healthy }
+      mcp-server: { condition: service_started }
+      redis: { condition: service_started }
+    environment:
+      - LN_CLIENT_TYPE=LND
+      - LND_ADDRESS=lnd-gateway:10009
+      # Invoice-only: the gateway issues and looks up invoices, it never spends.
+      - MACAROON_FILE_PATH=/lnd/invoice.macaroon
+      - CERT_FILE_PATH=/lnd/tls.cert
+      # Demo value. Generate your own (`openssl rand -hex 16`) for anything real.
+      - ROOT_KEY=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - lnd-gateway:/lnd:ro
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "8402:8000"
+
+  # `docker compose run --rm client`: an MCP SDK client that pays per call.
+  client:
+    build: .
+    command: ["python", "client.py"]
+    profiles: [client]
+    environment:
+      - MCP_URL=http://gateway:8000/mcp
+      - LND_REST_URL=https://lnd-wallet:8080
+      - LND_DIR=/lnd
+    volumes:
+      - lnd-wallet:/lnd:ro
+
+volumes:
+  lnd-gateway:
+  lnd-wallet:

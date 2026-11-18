@@ -24,6 +24,10 @@ location /mcp {
   path and method, so a token bought for a cheap tool is rejected on an
   expensive one.
 
+A runnable version, with a real MCP server, a paying MCP client and a regtest
+Lightning network, is in
+[`examples/mcp-tool-pricing`](https://github.com/ngx-l402/ngx-l402/tree/main/examples/mcp-tool-pricing).
+
 ---
 
 ## Trust model — read this first

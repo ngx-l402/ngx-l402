@@ -16,6 +16,7 @@ mod fee;
 mod info;
 mod l402_header;
 mod mcp;
+mod nginx_version;
 mod p2pk;
 mod payment_page;
 mod proof_mapping;
@@ -37,6 +38,7 @@ pub use mcp::{
     McpDecision, McpHeaders, MCP_CHARGEABLE_METHODS, MCP_HEADER_MISMATCH, MCP_MIN_HEADER_VERSION,
     MCP_PAYMENT_REQUIRED,
 };
+pub use nginx_version::nginx_security_warning;
 pub use p2pk::{parse_p2pk_secret_key, verify_permanent_p2pk_lock, InvalidP2pkKey};
 pub use payment_page::render_payment_page;
 pub use proof_mapping::proof_mapping_key;

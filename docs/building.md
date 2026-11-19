@@ -39,13 +39,13 @@ cd ngx-l402
 > ⚠️ **Important**: You must download the exact Nginx source code matching your target version and set the `NGINX_SOURCE_DIR` environment variable before building.
 
 ```bash
-# Example for Nginx 1.28.0
-curl -fsSL http://nginx.org/download/nginx-1.28.0.tar.gz -o nginx.tar.gz
+# Example for Nginx 1.30.7
+curl -fsSL http://nginx.org/download/nginx-1.30.7.tar.gz -o nginx.tar.gz
 tar -xzf nginx.tar.gz
-cd nginx-1.28.0
+cd nginx-1.30.7
 ./configure --with-compat
 cd ..
-export NGINX_SOURCE_DIR=$(pwd)/nginx-1.28.0
+export NGINX_SOURCE_DIR=$(pwd)/nginx-1.30.7
 
 cargo build --release --features export-modules
 ```

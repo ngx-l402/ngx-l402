@@ -6,16 +6,16 @@ use ngx::core::Buffer;
 use ngx::ffi::{
     nginx_version, ngx_array_push, ngx_chain_t, ngx_command_t, ngx_conf_t, ngx_cycle_s,
     ngx_http_discard_request_body, ngx_http_finalize_request, ngx_http_handler_pt,
-    ngx_http_module_t, ngx_http_phases_NGX_HTTP_ACCESS_PHASE, ngx_http_request_t, ngx_int_t,
-    ngx_log_s, ngx_module_t, ngx_shared_memory_add, ngx_shm_zone_t, ngx_slab_alloc,
-    ngx_slab_pool_t, ngx_str_t, ngx_test_config, ngx_uint_t, NGX_CONF_1MORE, NGX_CONF_NOARGS,
-    NGX_CONF_TAKE1, NGX_DECLINED, NGX_DONE, NGX_ERROR, NGX_HTTP_COPY, NGX_HTTP_DELETE,
-    NGX_HTTP_GET, NGX_HTTP_HEAD, NGX_HTTP_INTERNAL_SERVER_ERROR, NGX_HTTP_LOCK, NGX_HTTP_LOC_CONF,
-    NGX_HTTP_LOC_CONF_OFFSET, NGX_HTTP_MAIN_CONF, NGX_HTTP_MKCOL, NGX_HTTP_MODULE, NGX_HTTP_MOVE,
-    NGX_HTTP_NOT_ALLOWED, NGX_HTTP_OPTIONS, NGX_HTTP_PATCH, NGX_HTTP_POST, NGX_HTTP_PROPFIND,
-    NGX_HTTP_PROPPATCH, NGX_HTTP_PUT, NGX_HTTP_SRV_CONF, NGX_HTTP_TRACE, NGX_HTTP_UNLOCK,
-    NGX_LOG_EMERG, NGX_LOG_ERR, NGX_LOG_INFO, NGX_LOG_NOTICE, NGX_LOG_WARN, NGX_OK,
-    NGX_RS_MODULE_SIGNATURE,
+    ngx_http_module_t, ngx_http_phases_NGX_HTTP_ACCESS_PHASE, ngx_http_request_t,
+    ngx_http_send_special, ngx_int_t, ngx_log_s, ngx_module_t, ngx_shared_memory_add,
+    ngx_shm_zone_t, ngx_slab_alloc, ngx_slab_pool_t, ngx_str_t, ngx_test_config, ngx_uint_t,
+    NGX_CONF_1MORE, NGX_CONF_NOARGS, NGX_CONF_TAKE1, NGX_DECLINED, NGX_DONE, NGX_ERROR,
+    NGX_HTTP_COPY, NGX_HTTP_DELETE, NGX_HTTP_GET, NGX_HTTP_HEAD, NGX_HTTP_INTERNAL_SERVER_ERROR,
+    NGX_HTTP_LAST, NGX_HTTP_LOCK, NGX_HTTP_LOC_CONF, NGX_HTTP_LOC_CONF_OFFSET, NGX_HTTP_MAIN_CONF,
+    NGX_HTTP_MKCOL, NGX_HTTP_MODULE, NGX_HTTP_MOVE, NGX_HTTP_NOT_ALLOWED, NGX_HTTP_OPTIONS,
+    NGX_HTTP_PATCH, NGX_HTTP_POST, NGX_HTTP_PROPFIND, NGX_HTTP_PROPPATCH, NGX_HTTP_PUT,
+    NGX_HTTP_SRV_CONF, NGX_HTTP_TRACE, NGX_HTTP_UNLOCK, NGX_LOG_EMERG, NGX_LOG_ERR, NGX_LOG_INFO,
+    NGX_LOG_NOTICE, NGX_LOG_WARN, NGX_OK, NGX_RS_MODULE_SIGNATURE,
 };
 use ngx::http::{
     HTTPStatus, HttpModule, HttpModuleLocationConf, HttpModuleMainConf, HttpModuleServerConf,
@@ -1851,6 +1851,18 @@ fn request_binding(
     }
 }
 
+/// Whether `r` is a HEAD request.
+///
+/// Not `header_only()`: nginx 1.30 puts an `in_port_t port` right before the
+/// request bitfields, and nginx-sys 0.5 places most of them two bits early, so
+/// `header_only()` reads `pipeline` and `set_header_only` writes it.
+///
+/// # Safety
+/// `r` must be valid. Call it before borrowing `r` as a `Request`.
+unsafe fn is_head(r: *const ngx_http_request_t) -> bool {
+    unsafe { (*r).method == NGX_HTTP_HEAD as ngx_uint_t }
+}
+
 /// Send a full HTTP response (status + body) from within an access-phase
 /// handler. Mirrors the pattern used by `l402_metrics_content_handler`.
 ///
@@ -1865,6 +1877,7 @@ unsafe fn send_html_response(r: *mut ngx_http_request_t, status: u16, body: Stri
     }
 
     let body_len = body.len();
+    let head = unsafe { is_head(r) };
     let req = unsafe { Request::from_ngx_http_request(r) };
     let pool = req.pool();
 
@@ -1895,7 +1908,7 @@ unsafe fn send_html_response(r: *mut ngx_http_request_t, status: u16, body: Stri
     // HEAD has no body: finalize and return NGX_DONE like the body path.
     // Returning send_header's NGX_OK instead reads as "access granted" in the
     // access phase, leaking the request past the sent header (fail-open).
-    if req.header_only() {
+    if head {
         unsafe { ngx_http_finalize_request(r, send_status.0) };
         return NGX_DONE as isize;
     }
@@ -1915,8 +1928,8 @@ unsafe fn send_html_response(r: *mut ngx_http_request_t, status: u16, body: Stri
 /// Send `status` with its already-attached headers and no body.
 ///
 /// A bare `return 402` would get nginx's built-in error page. Sending the
-/// header ourselves avoids it; `Content-Length: 0` with nothing written keeps
-/// the body empty, and `header_only` ends the response after the header.
+/// header ourselves avoids it; `Content-Length: 0` keeps the body empty, and an
+/// empty last buffer ends the response (HEAD's header already does).
 /// Returns `NGX_DONE` for the reason `send_html_response` does.
 ///
 /// # Safety
@@ -1927,17 +1940,19 @@ unsafe fn send_empty_response(r: *mut ngx_http_request_t, status: u16) -> isize 
         return rc as isize;
     }
 
-    // Before borrowing `r` as a Request, so the raw write does not alias it.
-    unsafe { (*r).set_header_only(1) };
+    let head = unsafe { is_head(r) };
     let req = unsafe { Request::from_ngx_http_request(r) };
     req.set_status(HTTPStatus(status as usize));
     req.set_content_length_n(0);
 
-    let send_status = req.send_header();
-    if send_status.0 == NGX_ERROR as ngx_int_t || send_status.0 > NGX_OK as ngx_int_t {
-        return send_status.0;
+    let mut rc = req.send_header().0;
+    if rc == NGX_ERROR as ngx_int_t || rc > NGX_OK as ngx_int_t {
+        return rc;
     }
-    unsafe { ngx_http_finalize_request(r, send_status.0) };
+    if !head {
+        rc = unsafe { ngx_http_send_special(r, NGX_HTTP_LAST as ngx_uint_t) };
+    }
+    unsafe { ngx_http_finalize_request(r, rc) };
     NGX_DONE as isize
 }
 
@@ -2765,6 +2780,13 @@ pub unsafe extern "C" fn init_module(cycle: *mut ngx_cycle_s) -> isize {
     // SAFETY: `cycle->log` is guaranteed valid by Nginx before invoking
     // module init callbacks; it points to the global error log.
     let log = (*cycle).log;
+
+    // nginx loads a module only into the exact version it was built against,
+    // so this is the running nginx. Placed before the `-t` return so a config
+    // test shows it too.
+    if let Some(w) = ngx_l402_core::nginx_security_warning(nginx_version) {
+        ngx_log_error!(NGX_LOG_WARN, log, "ngx_l402: {}", w);
+    }
 
     // `nginx -t` only validates the configuration files. Nothing below reads
     // them: it builds the Tokio runtime, the Lightning backend client and the
@@ -3740,6 +3762,7 @@ unsafe fn send_body(
         return rc;
     }
 
+    let head = unsafe { is_head(r) };
     // SAFETY: `r` is valid; `Request::from_ngx_http_request` just wraps the
     // pointer, `pool()` returns a Pool tied to the request lifetime.
     let req = unsafe { Request::from_ngx_http_request(r) };
@@ -3769,7 +3792,7 @@ unsafe fn send_body(
     }
 
     let status = req.send_header();
-    if status.0 == NGX_ERROR as ngx_int_t || status.0 > NGX_OK as ngx_int_t || req.header_only() {
+    if status.0 == NGX_ERROR as ngx_int_t || status.0 > NGX_OK as ngx_int_t || head {
         return status.0;
     }
 

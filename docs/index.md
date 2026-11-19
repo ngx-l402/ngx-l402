@@ -79,7 +79,7 @@ missing price, an uninitialised module — are unrelated to payment.
 
 ## Quick Start
 
-> **Note**: This module requires **NGINX version 1.28.0** or later.
+> **Note**: This module requires **NGINX 1.30.7+** (stable) or **1.31.9+** (mainline).
 
 The fastest way to get started is with Docker:
 

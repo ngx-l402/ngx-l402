@@ -17,6 +17,7 @@
 - [Redis & Dynamic Config](./config-redis.md)
 - [Multi-Tenant](./config-multi-tenant.md)
 - [Realms (One Payment, Many Paths)](./realm.md)
+- [MCP Tool Pricing](./mcp.md)
 
 # Payment Methods
 

@@ -23,6 +23,11 @@ pub const MCP_MIN_HEADER_VERSION: &str = "2026-07-28";
 /// JSON-RPC code the spec assigns to header validation failures.
 pub const MCP_HEADER_MISMATCH: i64 = -32020;
 
+/// JSON-RPC code the spec assigns to a protocol version the server doesn't
+/// know or support. Its `data` names the supported versions so a client that
+/// also speaks one of them can retry.
+pub const MCP_UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
+
 /// JSON-RPC code carried by the 402 body. MCP defines no payment error, and
 /// 2026-07-28 keeps `-32000`..`-32099` off limits: `-32020` up is the spec's
 /// own, no new codes go below it (`-32002` still means "resource not found" to
@@ -47,6 +52,53 @@ pub enum McpDecision {
     /// Reject with `400` and a `HeaderMismatch` body; the reason is for the
     /// message and the log.
     Reject(String),
+    /// Reject with `400` and an `UnsupportedProtocolVersion` body: the client's
+    /// `MCP-Protocol-Version` is older than [`MCP_MIN_HEADER_VERSION`]
+    /// (`requested` holds it) or isn't a revision date at all (`None`, so the
+    /// raw value is never echoed).
+    UnsupportedVersion { requested: Option<String> },
+}
+
+impl McpDecision {
+    /// Why the request is refused, for the log; `None` unless it is.
+    pub fn reject_reason(&self) -> Option<String> {
+        match self {
+            McpDecision::Reject(reason) => Some(reason.clone()),
+            McpDecision::UnsupportedVersion { requested: Some(v) } => Some(format!(
+                "MCP-Protocol-Version {} predates {}; mirrored headers are not validated",
+                v, MCP_MIN_HEADER_VERSION
+            )),
+            McpDecision::UnsupportedVersion { requested: None } => {
+                Some("MCP-Protocol-Version header is not a protocol revision date".to_string())
+            }
+            McpDecision::Free | McpDecision::Charged { .. } => None,
+        }
+    }
+
+    /// The JSON-RPC body sent with the `400`; `None` unless it is refused.
+    pub fn reject_body(&self) -> Option<String> {
+        match self {
+            McpDecision::UnsupportedVersion { requested } => Some(jsonrpc_error_body(
+                MCP_UNSUPPORTED_PROTOCOL_VERSION,
+                "Unsupported protocol version",
+                Some(&format!(
+                    "{{\"supported\":[\"{}\"],\"requested\":\"{}\"}}",
+                    MCP_MIN_HEADER_VERSION,
+                    // `requested` is required by the schema; a value that
+                    // isn't a real date is sent as "" rather than echoed.
+                    requested.as_deref().unwrap_or("")
+                )),
+            )),
+            McpDecision::Reject(_) => self.reject_reason().map(|reason| {
+                jsonrpc_error_body(
+                    MCP_HEADER_MISMATCH,
+                    &format!("Header mismatch: {}", reason),
+                    None,
+                )
+            }),
+            McpDecision::Free | McpDecision::Charged { .. } => None,
+        }
+    }
 }
 
 /// The values of every occurrence of the three headers the decision reads.
@@ -80,13 +132,12 @@ pub fn classify(headers: &McpHeaders, charged: &[String], upstream_validates: bo
     // Checked before the value appears in any message: only a real date is
     // echoed back. Revisions are `YYYY-MM-DD`, so a real one orders as a string.
     if !is_revision_date(version) {
-        return reject("MCP-Protocol-Version header is not a protocol revision date");
+        return McpDecision::UnsupportedVersion { requested: None };
     }
     if version < MCP_MIN_HEADER_VERSION {
-        return reject(&format!(
-            "MCP-Protocol-Version {} predates {}; mirrored headers are not validated",
-            version, MCP_MIN_HEADER_VERSION
-        ));
+        return McpDecision::UnsupportedVersion {
+            requested: Some(version.to_string()),
+        };
     }
 
     let method = match single("Mcp-Method", &headers.method) {
@@ -310,10 +361,8 @@ mod tests {
             headers(&["latest"], &["tools/call"], &["search"]),
             headers(&["2026-7-28"], &["tools/call"], &["search"]),
         ] {
-            assert!(
-                matches!(classify(&h, &tools_only(), true), McpDecision::Reject(_)),
-                "{h:?}"
-            );
+            let d = classify(&h, &tools_only(), true);
+            assert!(d.reject_body().is_some(), "{h:?}: {d:?}");
         }
     }
 
@@ -321,10 +370,47 @@ mod tests {
     fn older_client_discovery_is_rejected_too() {
         // Without validated headers we cannot tell discovery from a tool call.
         let h = headers(&["2025-11-25"], &["tools/list"], &[]);
-        assert!(matches!(
+        assert_eq!(
             classify(&h, &tools_only(), true),
-            McpDecision::Reject(_)
-        ));
+            McpDecision::UnsupportedVersion {
+                requested: Some("2025-11-25".into())
+            }
+        );
+    }
+
+    #[test]
+    fn unsupported_version_body_lets_the_client_retry() {
+        let older = classify(
+            &headers(&["2025-11-25"], &["tools/call"], &["search"]),
+            &tools_only(),
+            true,
+        );
+        let v: serde_json::Value = serde_json::from_str(&older.reject_body().unwrap()).unwrap();
+        assert_eq!(v["error"]["code"], MCP_UNSUPPORTED_PROTOCOL_VERSION);
+        assert_eq!(v["error"]["data"]["supported"][0], MCP_MIN_HEADER_VERSION);
+        assert_eq!(v["error"]["data"]["requested"], "2025-11-25");
+        assert!(v.get("id").is_none());
+
+        // Not a date: still -32022, but the raw value is not echoed.
+        let junk = classify(
+            &headers(&["<script>"], &["tools/call"], &["search"]),
+            &tools_only(),
+            true,
+        );
+        let body = junk.reject_body().unwrap();
+        assert!(!body.contains("<script>"), "{body}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["error"]["code"], MCP_UNSUPPORTED_PROTOCOL_VERSION);
+        assert_eq!(v["error"]["data"]["requested"], "");
+
+        // A missing header is a header problem, not a version one.
+        let missing = classify(
+            &headers(&[], &["tools/call"], &["search"]),
+            &tools_only(),
+            true,
+        );
+        let v: serde_json::Value = serde_json::from_str(&missing.reject_body().unwrap()).unwrap();
+        assert_eq!(v["error"]["code"], MCP_HEADER_MISMATCH);
     }
 
     #[test]
@@ -462,8 +548,9 @@ mod tests {
             "2026-08-00",
         ] {
             let h = headers(&[v], &["tools/call"], &["search"]);
-            assert!(
-                matches!(classify(&h, &tools_only(), true), McpDecision::Reject(_)),
+            assert_eq!(
+                classify(&h, &tools_only(), true),
+                McpDecision::UnsupportedVersion { requested: None },
                 "{v}"
             );
         }
@@ -520,23 +607,19 @@ mod tests {
     fn invalid_version_is_not_echoed() {
         for v in ["latest", "9999-99-99", "2026-07-28\u{7f}x", "<script>"] {
             let h = headers(&[v], &["tools/call"], &["search"]);
-            match classify(&h, &tools_only(), true) {
-                McpDecision::Reject(reason) => {
-                    assert!(!reason.contains(v), "{reason}");
-                    assert!(!reason.contains("predates"), "{reason}");
-                }
-                d => panic!("{v}: {d:?}"),
-            }
+            let d = classify(&h, &tools_only(), true);
+            let reason = d.reject_reason().unwrap();
+            assert!(!reason.contains(v), "{reason}");
+            assert!(!reason.contains("predates"), "{reason}");
+            assert!(!d.reject_body().unwrap().contains(v), "{v}");
         }
         // A real but older date is safe to name, and is reported as older.
-        match classify(
+        let d = classify(
             &headers(&["2025-11-25"], &["tools/call"], &["search"]),
             &tools_only(),
             true,
-        ) {
-            McpDecision::Reject(reason) => assert!(reason.contains("2025-11-25 predates")),
-            d => panic!("{d:?}"),
-        }
+        );
+        assert!(d.reject_reason().unwrap().contains("2025-11-25 predates"));
     }
 
     #[test]

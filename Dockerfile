@@ -1,4 +1,4 @@
-ARG NGX_VERSION=1.28.0
+ARG NGX_VERSION=1.30.7
 
 # Build stage
 FROM rust:1.99 AS builder

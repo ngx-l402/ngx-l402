@@ -1,6 +1,6 @@
 # Manual Installation
 
-> **Note**: This module requires **NGINX version 1.28.0** or later. Earlier versions will cause module version mismatch errors.
+> **Note**: This module requires **NGINX 1.30.7+** (stable) or **1.31.9+** (mainline). Older releases lack the fixes for the HTTP/2 bugs CVE-2026-123007 and CVE-2026-123633.
 
 ## Steps
 

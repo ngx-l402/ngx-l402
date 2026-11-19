@@ -20,9 +20,13 @@ location /mcp {
   client can see what is for sale before paying.
 - **Each tool has its own price.** A tool without an `l402_mcp_tool` line costs
   the default, so a new tool is never free by accident.
-- **A token buys one tool.** The macaroon carries `McpTool = <name>` next to the
-  path and method, so a token bought for a cheap tool is rejected on an
-  expensive one.
+- **A token buys one tool.** The macaroon carries `McpTool = <name>` and
+  `McpMethod = <method>` next to the path and HTTP method, so a token bought
+  for a cheap tool is rejected on an expensive one, and one bought for
+  `tools/call` doesn't open `prompts/get` of the same name. With
+  [`l402_realm`](./realm.md) the token is bound to the realm instead of the
+  path, so it also works for the same tool and method on any other path in
+  that realm.
 
 A runnable version, with a real MCP server, a paying MCP client and a regtest
 Lightning network, is in
@@ -68,14 +72,20 @@ So header-based pricing is only as strong as the upstream's validation:
 | Anything but `POST` (e.g. an older client's `GET` stream or session `DELETE`) | `405`, `Allow: POST` |
 | A method not in `l402_mcp_charge` (e.g. `tools/list`) | Passes through free |
 | `tools/call` with `Mcp-Name` | Charged at that tool's price; `402` until paid |
-| No `MCP-Protocol-Version`, or older than `2026-07-28` | `400` |
+| No `MCP-Protocol-Version` | `400`, `-32020` |
+| `MCP-Protocol-Version` older than `2026-07-28`, or not a revision date | `400`, `-32022` |
 | No `Mcp-Method` | `400` |
 | `tools/call`, `resources/read` or `prompts/get` without `Mcp-Name` | `400` |
 | A duplicated `Mcp-Method`, `Mcp-Name` or `MCP-Protocol-Version` | `400` |
 | An `Mcp-Name` that is malformed, doesn't decode, or decodes to control characters | `400` |
 
-A `400` carries a JSON-RPC error with code `-32020` (`HeaderMismatch`) and no
-`id`, the shape the spec uses for transport-level rejections.
+Every other `400` carries a JSON-RPC error with code `-32020`
+(`HeaderMismatch`). An unsupported version gets `-32022`
+(`UnsupportedProtocolVersion`) with `data: {"supported": ["2026-07-28"],
+"requested": "…"}`, so a client that also speaks 2026-07-28 can retry with it.
+`requested` echoes the client's value only when it is a real date, and is `""`
+otherwise. Neither carries an `id`, the shape the spec uses for
+transport-level rejections.
 
 A request the headers can't vouch for is **refused rather than charged at the
 default price**: a default-priced token for a request that can't be tied to a
@@ -95,7 +105,7 @@ which is checked before the `405`.
 
 | Directive | Meaning |
 |---|---|
-| `l402_mcp on\|off;` | Price per tool. Needs `l402 on;` in the same location — nginx refuses to start otherwise. |
+| `l402_mcp on\|off;` | Price per tool. Needs `l402 on;` for the location, set there or inherited — nginx refuses to start otherwise. |
 | `l402_mcp_tool <name> <msat>;` | One tool's price. Repeat per tool; the name is compared exactly with the decoded `Mcp-Name`. |
 | `l402_mcp_charge <method>...;` | Methods that cost money. Default `tools/call`. Also accepts `resources/read` (priced by URI) and `prompts/get`, the other methods that carry an `Mcp-Name`. |
 | `l402_mcp_upstream_validates on\|off;` | Declares that the upstream rejects a request whose `Mcp-Method` / `Mcp-Name` disagree with its body. Required by `l402_mcp on`. |
@@ -166,7 +176,7 @@ outside the JSON-RPC server range (`-32768` to `-32000`), so the code is `402`.
   the state tying them to the first call (`requestState`) is in the body, so
   the module can't tell them from a fresh call. For tools that ask for input,
   let one payment cover a short window instead; the token still opens only
-  its own tool:
+  its own tool and MCP method:
 
   ```nginx
   location /mcp {

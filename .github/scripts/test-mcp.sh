@@ -99,10 +99,10 @@ echo "Token binding:"
 read -r _ body < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: search')
 caveats=$(jq -r '.error.data.macaroon' <<<"$body" | tr '_-' '/+' |
     awk '{ while (length($0) % 4) $0 = $0 "="; print }' | base64 -d 2>/dev/null | LC_ALL=C tr -c '[:print:]' '\n')
-if grep -qE 'McpTool = search$' <<<"$caveats"; then
-    echo "  ✓ the macaroon carries McpTool = search"
+if grep -qE 'McpTool = search$' <<<"$caveats" && grep -qE 'McpMethod = tools/call$' <<<"$caveats"; then
+    echo "  ✓ the macaroon carries McpTool = search and McpMethod = tools/call"
 else
-    echo "  ✗ the macaroon does not carry McpTool = search"
+    echo "  ✗ the macaroon does not carry McpTool = search and McpMethod = tools/call"
     failures=$((failures + 1))
 fi
 
@@ -116,8 +116,10 @@ echo "Requests the headers can't vouch for:"
 read -r status body < <(post /mcp 'Mcp-Method: tools/call' 'Mcp-Name: search')
 check "$status" 400 "no MCP-Protocol-Version is refused"
 check "$(jq -r '.error.code' <<<"$body")" -32020 "the 400 body is a HeaderMismatch error"
-read -r status _ < <(post /mcp 'MCP-Protocol-Version: 2025-11-25' 'Mcp-Method: tools/list')
+read -r status body < <(post /mcp 'MCP-Protocol-Version: 2025-11-25' 'Mcp-Method: tools/list')
 check "$status" 400 "an older protocol version is refused, discovery included"
+check "$(jq -r '.error.code' <<<"$body")" -32022 "with UnsupportedProtocolVersion"
+check "$(jq -c '.error.data' <<<"$body")" '{"supported":["2026-07-28"],"requested":"2025-11-25"}' "naming the supported and requested versions"
 read -r status _ < <(post /mcp "$V" 'Mcp-Name: search')
 check "$status" 400 "no Mcp-Method is refused"
 read -r status _ < <(post /mcp "$V" 'Mcp-Method: tools/call')
@@ -128,8 +130,10 @@ read -r status _ < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: =?base64
 check "$status" 400 "an undecodable Mcp-Name is refused"
 read -r status _ < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: =?base64?c2VhcmNoDQpYOiB5?=')
 check "$status" 400 "an Mcp-Name that decodes to CR/LF is refused"
-read -r status _ < <(post /mcp 'MCP-Protocol-Version: 9999-99-99' 'Mcp-Method: tools/call' 'Mcp-Name: search')
+read -r status body < <(post /mcp 'MCP-Protocol-Version: 9999-99-99' 'Mcp-Method: tools/call' 'Mcp-Name: search')
 check "$status" 400 "a protocol version that is not a date is refused"
+check "$(jq -r '.error.code' <<<"$body")" -32022 "as an unsupported version"
+check "$(jq -r '.error.data.requested' <<<"$body")" "" "without echoing the value"
 
 echo "Only POST:"
 for m in GET DELETE; do

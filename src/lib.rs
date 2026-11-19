@@ -1491,6 +1491,9 @@ pub struct ModuleConfig {
 
 /// The caveat key that binds an MCP token to the tool it was bought for.
 const MCP_TOOL_CAVEAT: &str = "McpTool";
+/// The caveat key that binds an MCP token to its MCP method, so a token for
+/// `tools/call summarize` can't open `prompts/get summarize`.
+const MCP_METHOD_CAVEAT: &str = "McpMethod";
 
 pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 23] = [
     ngx_command_t {
@@ -1823,8 +1826,8 @@ impl Merge for ModuleConfig {
         // charged, so refuse it.
         if mcp_set_here && !self.enable.unwrap_or(false) {
             eprintln!(
-                "ngx_l402: l402_mcp on needs l402 on in the same location; without it every \
-                 MCP request passes free."
+                "ngx_l402: l402_mcp on needs l402 on for this location, set here or inherited; \
+                 without it every MCP request passes free."
             );
             return Err(MergeConfigError::NoValue);
         }
@@ -2349,13 +2352,20 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
     // An MCP endpoint takes every call as `POST` to one URL, so the tool comes
     // from the mirrored `Mcp-Name` header. Discovery passes free; a request the
     // headers can't vouch for is refused rather than priced.
+    let mut mcp_method: Option<String> = None;
     let mcp_tool: Option<String> = match &mcp_charge {
         None => None,
         // SAFETY: `request` is the valid pointer nginx passed to this handler.
         Some(charge) => match unsafe { classify_mcp(request, charge, mcp_upstream_validates) } {
             McpDecision::Free => return NGX_DECLINED as isize,
-            McpDecision::Charged { name, .. } => Some(name),
-            McpDecision::Reject(reason) => {
+            McpDecision::Charged { method, name } => {
+                mcp_method = Some(method);
+                Some(name)
+            }
+            // A header problem (`-32020`) or an unsupported protocol version
+            // (`-32022`); both are a `400` with a JSON-RPC body.
+            refused @ (McpDecision::Reject(_) | McpDecision::UnsupportedVersion { .. }) => {
+                let reason = refused.reject_reason().unwrap_or_default();
                 ngx_log_error!(
                     NGX_LOG_INFO,
                     log_ref,
@@ -2379,11 +2389,7 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
                 if dry_run {
                     return NGX_DECLINED as isize;
                 }
-                let body = ngx_l402_core::jsonrpc_error_body(
-                    ngx_l402_core::MCP_HEADER_MISMATCH,
-                    &format!("Header mismatch: {}", reason),
-                    None,
-                );
+                let body = refused.reject_body().unwrap_or_default();
                 // SAFETY: `request` is the valid pointer nginx passed to this handler.
                 return unsafe { send_json_response(request, 400, body) };
             }
@@ -2406,17 +2412,21 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
     let request_method = method_caveat_value(method);
     // One binding drives mint, verify, and the dry-run log — so they can't drift.
     let binding = request_binding(realm.as_deref(), &request_path, request_method);
-    // An MCP token also names its tool, so one bought for a cheap tool can't
-    // call an expensive one on the same endpoint.
-    let binding = match &mcp_tool {
-        None => binding,
-        Some(name) => match binding.with_bound(MCP_TOOL_CAVEAT, name.as_str()) {
+    // An MCP token also names its tool and MCP method, so one bought for a
+    // cheap tool can't call an expensive one on the same endpoint, and one
+    // bought for `tools/call` can't open `prompts/get` of the same name.
+    let binding = match (&mcp_tool, &mcp_method) {
+        (Some(name), Some(m)) => match binding
+            .with_bound(MCP_TOOL_CAVEAT, name.as_str())
+            .and_then(|b| b.with_bound(MCP_METHOD_CAVEAT, m.as_str()))
+        {
             Some(b) => b,
             None => {
                 error!("Failed to bind the token to MCP tool; returning 500");
                 return 500;
             }
         },
+        _ => binding,
     };
     let caveats = binding.to_caveats();
 
@@ -4679,7 +4689,8 @@ pub unsafe extern "C" fn ngx_http_l402_exempt_methods_set(
 }
 
 /// `l402_mcp on|off;` — price and bind each MCP tool call by its `Mcp-Name`
-/// header. Needs `l402 on;` in the same location (checked at merge).
+/// header. Needs `l402 on;` for the location, set there or inherited (checked
+/// at merge).
 ///
 /// # Safety
 /// `cf` and `conf` are the valid, non-null pointers Nginx passes to

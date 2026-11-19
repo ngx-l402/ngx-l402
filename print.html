@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-c96a2a6f.js";
+            window.path_to_searchindex_js = "searchindex-d106ce22.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-247960a4.js"></script>
+        <script src="toc-c240f234.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -260,7 +260,7 @@ missing price, an uninitialised module — are unrelated to payment.</p>
 <hr>
 <h2 id="quick-start"><a class="header" href="#quick-start">Quick Start</a></h2>
 <blockquote>
-<p><strong>Note</strong>: This module requires <strong>NGINX version 1.28.0</strong> or later.</p>
+<p><strong>Note</strong>: This module requires <strong>NGINX 1.30.7+</strong> (stable) or <strong>1.31.9+</strong> (mainline).</p>
 </blockquote>
 <p>The fastest way to get started is with Docker:</p>
 <pre><code class="language-bash">docker run -d \
@@ -282,7 +282,7 @@ curl -i http://localhost:8000/protected
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="manual-installation"><a class="header" href="#manual-installation">Manual Installation</a></h1>
 <blockquote>
-<p><strong>Note</strong>: This module requires <strong>NGINX version 1.28.0</strong> or later. Earlier versions will cause module version mismatch errors.</p>
+<p><strong>Note</strong>: This module requires <strong>NGINX 1.30.7+</strong> (stable) or <strong>1.31.9+</strong> (mainline). Older releases lack the fixes for the HTTP/2 bugs CVE-2026-123007 and CVE-2026-123633.</p>
 </blockquote>
 <h2 id="steps"><a class="header" href="#steps">Steps</a></h2>
 <h3 id="1-download-the-module"><a class="header" href="#1-download-the-module">1. Download the Module</a></h3>
@@ -509,7 +509,7 @@ docker stop l402-nginx
 </code></pre>
 <hr>
 <h2 id="specific-versions"><a class="header" href="#specific-versions">Specific Versions</a></h2>
-<pre><code class="language-bash">docker pull ghcr.io/ngx-l402/ngx-l402:&lt;version&gt;   # e.g. 1.3.2
+<pre><code class="language-bash">docker pull ghcr.io/ngx-l402/ngx-l402:&lt;version&gt;   # e.g. 1.4.0
 </code></pre>
 <p>See the <a href="https://github.com/orgs/ngx-l402/packages/container/package/ngx-l402">available tags</a>.</p>
 <div style="break-before: page; page-break-before: always;"></div>
@@ -1293,6 +1293,177 @@ differ, so verification fails and the client is charged the VIP price.</p>
 </div>
 <p>Realms are opt-in. Locations without <code>l402_realm</code> keep exact-path binding.</p>
 <div style="break-before: page; page-break-before: always;"></div>
+<h1 id="mcp-tool-pricing"><a class="header" href="#mcp-tool-pricing">MCP Tool Pricing</a></h1>
+<p>A remote <a href="https://modelcontextprotocol.io">MCP</a> server takes every message as a
+<code>POST</code> to one URL, with the tool to run in the body. With plain <code>l402 on;</code> every
+message costs the same and one token opens every tool. <code>l402_mcp on;</code> prices and
+binds each <strong>tool call</strong> instead, without adding payment code to the server:</p>
+<pre><code class="language-nginx">location /mcp {
+    l402                      on;
+    l402_mcp                  on;
+    l402_mcp_upstream_validates on;          # see "Trust model" below
+    l402_amount_msat_default  1000;          # price of a tool without its own line
+    l402_mcp_tool  summarize  5000;          # a tool with its own price
+    proxy_pass                http://mcp-server;
+}
+</code></pre>
+<ul>
+<li><strong>Discovery is free.</strong> <code>tools/list</code> and every other method pass through, so a
+client can see what is for sale before paying.</li>
+<li><strong>Each tool has its own price.</strong> A tool without an <code>l402_mcp_tool</code> line costs
+the default, so a new tool is never free by accident.</li>
+<li><strong>A token buys one tool.</strong> The macaroon carries <code>McpTool = &lt;name&gt;</code> and
+<code>McpMethod = &lt;method&gt;</code> next to the path and HTTP method, so a token bought
+for a cheap tool is rejected on an expensive one, and one bought for
+<code>tools/call</code> doesn’t open <code>prompts/get</code> of the same name. With
+<a href="#realms-one-payment-many-paths"><code>l402_realm</code></a> the token is bound to the realm instead of the
+path, so it also works for the same tool and method on any other path in
+that realm.</li>
+</ul>
+<hr>
+<h2 id="trust-model--read-this-first"><a class="header" href="#trust-model--read-this-first">Trust model — read this first</a></h2>
+<p>The module never reads the request body. It reads the tool from the headers the
+2026-07-28 Streamable HTTP transport mirrors from the body:</p>
+<pre><code class="language-http">POST /mcp
+MCP-Protocol-Version: 2026-07-28
+Mcp-Method: tools/call
+Mcp-Name: summarize
+</code></pre>
+<p>The same spec requires the <strong>MCP server</strong> to reject a request whose headers
+disagree with its body (<code>400</code>, <code>HeaderMismatch</code>). That check is what stops a
+client from sending <code>Mcp-Name: search</code> and calling <code>summarize</code> in the body.</p>
+<p>So header-based pricing is only as strong as the upstream’s validation:</p>
+<ul>
+<li><strong>The upstream must implement 2026-07-28 or later</strong> and enforce the
+header/body check. Against a server that ignores the headers, a client can pay
+for the cheapest tool and run any other.</li>
+<li><strong>You declare that it does</strong> with <code>l402_mcp_upstream_validates on;</code>. The
+module can’t see whether the upstream checks, and the client’s
+<code>MCP-Protocol-Version</code> can’t vouch for it either, because the client chooses
+it. nginx refuses to start with <code>l402_mcp on</code> and no declaration.</li>
+<li>The client’s version is checked as well: the headers are trusted only when
+<code>MCP-Protocol-Version</code> is a real date, <code>2026-07-28</code> or later. Anything older is
+refused (see below).</li>
+</ul>
+<hr>
+<h2 id="how-requests-are-handled"><a class="header" href="#how-requests-are-handled">How requests are handled</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Request</th><th>Result</th></tr>
+</thead>
+<tbody>
+<tr><td>Anything but <code>POST</code> (e.g. an older client’s <code>GET</code> stream or session <code>DELETE</code>)</td><td><code>405</code>, <code>Allow: POST</code></td></tr>
+<tr><td>A method not in <code>l402_mcp_charge</code> (e.g. <code>tools/list</code>)</td><td>Passes through free</td></tr>
+<tr><td><code>tools/call</code> with <code>Mcp-Name</code></td><td>Charged at that tool’s price; <code>402</code> until paid</td></tr>
+<tr><td>No <code>MCP-Protocol-Version</code></td><td><code>400</code>, <code>-32020</code></td></tr>
+<tr><td><code>MCP-Protocol-Version</code> older than <code>2026-07-28</code>, or not a revision date</td><td><code>400</code>, <code>-32022</code></td></tr>
+<tr><td>No <code>Mcp-Method</code></td><td><code>400</code></td></tr>
+<tr><td><code>tools/call</code>, <code>resources/read</code> or <code>prompts/get</code> without <code>Mcp-Name</code></td><td><code>400</code></td></tr>
+<tr><td>A duplicated <code>Mcp-Method</code>, <code>Mcp-Name</code> or <code>MCP-Protocol-Version</code></td><td><code>400</code></td></tr>
+<tr><td>An <code>Mcp-Name</code> that is malformed, doesn’t decode, or decodes to control characters</td><td><code>400</code></td></tr>
+</tbody>
+</table>
+</div>
+<p>Every other <code>400</code> carries a JSON-RPC error with code <code>-32020</code>
+(<code>HeaderMismatch</code>). An unsupported version gets <code>-32022</code>
+(<code>UnsupportedProtocolVersion</code>) with <code>data: {"supported": ["2026-07-28"], "requested": "…"}</code>, so a client that also speaks 2026-07-28 can retry with it.
+<code>requested</code> echoes the client’s value only when it is a real date, and is <code>""</code>
+otherwise. Neither carries an <code>id</code>, the shape the spec uses for
+transport-level rejections.</p>
+<p>A request the headers can’t vouch for is <strong>refused rather than charged at the
+default price</strong>: a default-priced token for a request that can’t be tied to a
+tool would let a cheap payment open an expensive tool.</p>
+<p><code>Mcp-Name</code> values outside plain ASCII arrive base64-encoded
+(<code>=?base64?c3VtbWFyaXpl?=</code>). They are decoded before the price lookup, so an
+encoded tool name still gets its own price. Only padded, standard-alphabet
+base64 is accepted, the form the spec’s examples use.</p>
+<p><code>OPTIONS</code> preflight requests can pass through with <code>l402_exempt_methods OPTIONS;</code>,
+which is checked before the <code>405</code>.</p>
+<hr>
+<h2 id="directives"><a class="header" href="#directives">Directives</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Directive</th><th>Meaning</th></tr>
+</thead>
+<tbody>
+<tr><td><code>l402_mcp on|off;</code></td><td>Price per tool. Needs <code>l402 on;</code> for the location, set there or inherited — nginx refuses to start otherwise.</td></tr>
+<tr><td><code>l402_mcp_tool &lt;name&gt; &lt;msat&gt;;</code></td><td>One tool’s price. Repeat per tool; the name is compared exactly with the decoded <code>Mcp-Name</code>.</td></tr>
+<tr><td><code>l402_mcp_charge &lt;method&gt;...;</code></td><td>Methods that cost money. Default <code>tools/call</code>. Also accepts <code>resources/read</code> (priced by URI) and <code>prompts/get</code>, the other methods that carry an <code>Mcp-Name</code>.</td></tr>
+<tr><td><code>l402_mcp_upstream_validates on|off;</code></td><td>Declares that the upstream rejects a request whose <code>Mcp-Method</code> / <code>Mcp-Name</code> disagree with its body. Required by <code>l402_mcp on</code>.</td></tr>
+</tbody>
+</table>
+</div>
+<p>All four inherit into nested locations like the other <code>l402_*</code> directives.
+Everything else — Cashu, auto-detect, rate limits, dry run, tenants, realms,
+<code>l402_indefinite_access</code> — works on an MCP location as on any other.</p>
+<hr>
+<h2 id="pricing-and-redis"><a class="header" href="#pricing-and-redis">Pricing and Redis</a></h2>
+<p>The price of a call is the first of:</p>
+<ol>
+<li>the tool’s Redis key, <code>mcp-tool:&lt;path&gt;:&lt;tool&gt;</code></li>
+<li>the tool’s <code>l402_mcp_tool</code> line</li>
+<li>the location’s Redis key (<code>&lt;path&gt;</code>, as in <a href="#redis--dynamic-configuration">Redis &amp; Dynamic Config</a>)</li>
+<li><code>l402_amount_msat_default</code></li>
+</ol>
+<p>In the Redis key the tool name is percent-encoded except for letters, digits
+and <code>-_.~/</code>:</p>
+<pre><code>SET mcp-tool:/mcp:summarize 8000
+SET "mcp-tool:/mcp:get%20weather" 2000     # tool "get weather"
+</code></pre>
+<hr>
+<h2 id="the-402-response"><a class="header" href="#the-402-response">The 402 response</a></h2>
+<p>An unpaid tool call gets <code>402</code> with the usual <code>WWW-Authenticate: L402 …</code> header
+(and <code>X-Cashu</code> when Cashu is on), so existing L402 clients work unchanged. The
+body is a JSON-RPC error an MCP client can read:</p>
+<pre><code class="language-json">{
+  "jsonrpc": "2.0",
+  "error": {
+    "code": 402,
+    "message": "Payment required to call summarize",
+    "data": {
+      "tool": "summarize",
+      "amount_msat": 5000,
+      "www_authenticate": "L402 macaroon=\"…\", invoice=\"lnbc…\"",
+      "macaroon": "…",
+      "invoice": "lnbc…"
+    }
+  }
+}
+</code></pre>
+<p>MCP defines no payment error, and the 2026-07-28 spec asks for new codes
+outside the JSON-RPC server range (<code>-32768</code> to <code>-32000</code>), so the code is <code>402</code>.
+<code>-32002</code> would read as “resource not found” to MCP clients. <code>l402_payment_html</code> does not apply to MCP calls; they always get JSON.</p>
+<hr>
+<h2 id="limitations"><a class="header" href="#limitations">Limitations</a></h2>
+<ul>
+<li>
+<p><strong>Older clients</strong> (protocol versions before 2026-07-28) don’t send the
+headers and are refused, discovery included. Keep a separate plain
+<code>l402 on;</code> location for them if needed. Reading the body to support them is
+planned.</p>
+</li>
+<li>
+<p><strong>Retries are new calls.</strong> A client that re-sends a <code>tools/call</code> — after an
+input-required result, or a dropped response stream — needs a new payment
+under the default replay check. MRTR retries carry a new JSON-RPC <code>id</code>, and
+the state tying them to the first call (<code>requestState</code>) is in the body, so
+the module can’t tell them from a fresh call. For tools that ask for input,
+let one payment cover a short window instead; the token still opens only
+its own tool and MCP method:</p>
+<pre><code class="language-nginx">location /mcp {
+    # ...
+    l402_indefinite_access on;   # a token works until it expires
+    l402_macaroon_timeout  300;  # 5 minutes: room for the retries
+}
+</code></pre>
+</li>
+<li>
+<p><strong>stdio MCP servers</strong> have no HTTP to sit in front of.</p>
+</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
 <h1 id="lightning-network-payments"><a class="header" href="#lightning-network-payments">Lightning Network Payments</a></h1>
 <p>ngx_l402 implements the <a href="https://docs.lightning.engineering/the-lightning-network/l402">L402 protocol</a>, enabling API monetization via <strong>Lightning Network payments</strong>. When a client hits a protected endpoint without a valid token, the module responds with <code>402 Payment Required</code> and a Lightning invoice. The client pays the invoice, receives a preimage, and presents it alongside the macaroon to gain access.</p>
 <hr>
@@ -1579,13 +1750,13 @@ cd ngx-l402
 <blockquote>
 <p>⚠️ <strong>Important</strong>: You must download the exact Nginx source code matching your target version and set the <code>NGINX_SOURCE_DIR</code> environment variable before building.</p>
 </blockquote>
-<pre><code class="language-bash"># Example for Nginx 1.28.0
-curl -fsSL http://nginx.org/download/nginx-1.28.0.tar.gz -o nginx.tar.gz
+<pre><code class="language-bash"># Example for Nginx 1.30.7
+curl -fsSL http://nginx.org/download/nginx-1.30.7.tar.gz -o nginx.tar.gz
 tar -xzf nginx.tar.gz
-cd nginx-1.28.0
+cd nginx-1.30.7
 ./configure --with-compat
 cd ..
-export NGINX_SOURCE_DIR=$(pwd)/nginx-1.28.0
+export NGINX_SOURCE_DIR=$(pwd)/nginx-1.30.7
 
 cargo build --release --features export-modules
 </code></pre>

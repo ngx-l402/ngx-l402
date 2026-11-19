@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-c96a2a6f.js";
+            window.path_to_searchindex_js = "searchindex-d106ce22.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-247960a4.js"></script>
+        <script src="toc-c240f234.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -211,13 +211,13 @@ cd ngx-l402
 <blockquote>
 <p>⚠️ <strong>Important</strong>: You must download the exact Nginx source code matching your target version and set the <code>NGINX_SOURCE_DIR</code> environment variable before building.</p>
 </blockquote>
-<pre><code class="language-bash"># Example for Nginx 1.28.0
-curl -fsSL http://nginx.org/download/nginx-1.28.0.tar.gz -o nginx.tar.gz
+<pre><code class="language-bash"># Example for Nginx 1.30.7
+curl -fsSL http://nginx.org/download/nginx-1.30.7.tar.gz -o nginx.tar.gz
 tar -xzf nginx.tar.gz
-cd nginx-1.28.0
+cd nginx-1.30.7
 ./configure --with-compat
 cd ..
-export NGINX_SOURCE_DIR=$(pwd)/nginx-1.28.0
+export NGINX_SOURCE_DIR=$(pwd)/nginx-1.30.7
 
 cargo build --release --features export-modules
 </code></pre>

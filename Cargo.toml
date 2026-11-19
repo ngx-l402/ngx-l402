@@ -17,9 +17,7 @@ exclude = ["grpc-server", "stress-test"]
 
 [dependencies]
 ngx = { version = "0.5.1" }
-# Pinned to l402_middleware main (#33, RequestBinding::with_bound) until it is released;
-# switch back to the crates.io version before this merges.
-l402_middleware = { git = "https://github.com/DhananjayPurohit/l402_middleware", rev = "297548ef24be356917ec7f7a7ea6b6f50e228895", default-features = false }
+l402_middleware = { version = "2.3.6", default-features = false }
 ngx_l402_core = { path = "ngx_l402_core" }
 tokio = { version = "1.33.0", features = ["full"] }
 futures = "0.3"

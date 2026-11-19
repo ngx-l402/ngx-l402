@@ -9,19 +9,21 @@ use ngx::ffi::{
     ngx_http_module_t, ngx_http_phases_NGX_HTTP_ACCESS_PHASE, ngx_http_request_t,
     ngx_http_send_special, ngx_int_t, ngx_log_s, ngx_module_t, ngx_shared_memory_add,
     ngx_shm_zone_t, ngx_slab_alloc, ngx_slab_pool_t, ngx_str_t, ngx_test_config, ngx_uint_t,
-    NGX_CONF_1MORE, NGX_CONF_NOARGS, NGX_CONF_TAKE1, NGX_DECLINED, NGX_DONE, NGX_ERROR,
-    NGX_HTTP_COPY, NGX_HTTP_DELETE, NGX_HTTP_GET, NGX_HTTP_HEAD, NGX_HTTP_INTERNAL_SERVER_ERROR,
-    NGX_HTTP_LAST, NGX_HTTP_LOCK, NGX_HTTP_LOC_CONF, NGX_HTTP_LOC_CONF_OFFSET, NGX_HTTP_MAIN_CONF,
-    NGX_HTTP_MKCOL, NGX_HTTP_MODULE, NGX_HTTP_MOVE, NGX_HTTP_NOT_ALLOWED, NGX_HTTP_OPTIONS,
-    NGX_HTTP_PATCH, NGX_HTTP_POST, NGX_HTTP_PROPFIND, NGX_HTTP_PROPPATCH, NGX_HTTP_PUT,
-    NGX_HTTP_SRV_CONF, NGX_HTTP_TRACE, NGX_HTTP_UNLOCK, NGX_LOG_EMERG, NGX_LOG_ERR, NGX_LOG_INFO,
-    NGX_LOG_NOTICE, NGX_LOG_WARN, NGX_OK, NGX_RS_MODULE_SIGNATURE,
+    NGX_CONF_1MORE, NGX_CONF_NOARGS, NGX_CONF_TAKE1, NGX_CONF_TAKE2, NGX_DECLINED, NGX_DONE,
+    NGX_ERROR, NGX_HTTP_COPY, NGX_HTTP_DELETE, NGX_HTTP_GET, NGX_HTTP_HEAD,
+    NGX_HTTP_INTERNAL_SERVER_ERROR, NGX_HTTP_LAST, NGX_HTTP_LOCK, NGX_HTTP_LOC_CONF,
+    NGX_HTTP_LOC_CONF_OFFSET, NGX_HTTP_MAIN_CONF, NGX_HTTP_MKCOL, NGX_HTTP_MODULE, NGX_HTTP_MOVE,
+    NGX_HTTP_NOT_ALLOWED, NGX_HTTP_OPTIONS, NGX_HTTP_PATCH, NGX_HTTP_POST, NGX_HTTP_PROPFIND,
+    NGX_HTTP_PROPPATCH, NGX_HTTP_PUT, NGX_HTTP_SRV_CONF, NGX_HTTP_TRACE, NGX_HTTP_UNLOCK,
+    NGX_LOG_EMERG, NGX_LOG_ERR, NGX_LOG_INFO, NGX_LOG_NOTICE, NGX_LOG_WARN, NGX_OK,
+    NGX_RS_MODULE_SIGNATURE,
 };
 use ngx::http::{
     HTTPStatus, HttpModule, HttpModuleLocationConf, HttpModuleMainConf, HttpModuleServerConf,
     Merge, MergeConfigError, NgxHttpCoreModule, Request,
 };
 use ngx::{ngx_log_error, ngx_string};
+use ngx_l402_core::{McpDecision, McpHeaders};
 use r2d2::Pool;
 use redis::Client as RedisClient;
 use redis::Commands;
@@ -1208,21 +1210,34 @@ impl L402Module {
     /// Fetch per-path price (`<path>` key) and LNURL override (`lnurl:<path>` key)
     /// in a single Redis pipeline. Two GETs become one round-trip.
     /// Returns `(0, None)` if Redis is unavailable or the keys are missing.
-    pub fn get_dynamic_config(&self, path: &str) -> (i64, Option<String>) {
+    /// Redis price and LNURL for `path`, plus the price under `tool_key` when
+    /// the request is an MCP tool call. Prices are 0 when unset.
+    pub fn get_dynamic_config(
+        &self,
+        path: &str,
+        tool_key: Option<&str>,
+    ) -> (i64, Option<String>, i64) {
         let Some(pool) = redis_pool() else {
-            return (0, None);
+            return (0, None, 0);
         };
         let Ok(mut conn) = pool.get() else {
-            return (0, None);
+            return (0, None, 0);
         };
         let lnurl_key = format!("lnurl:{}", path);
-        match redis::pipe()
-            .get(path)
-            .get(&lnurl_key)
-            .query::<(Option<i64>, Option<String>)>(&mut *conn)
+        let mut pipe = redis::pipe();
+        pipe.get(path).get(&lnurl_key);
+        let Some(tool_key) = tool_key else {
+            return match pipe.query::<(Option<i64>, Option<String>)>(&mut *conn) {
+                Ok((price, lnurl)) => (price.unwrap_or(0), lnurl, 0),
+                Err(_) => (0, None, 0),
+            };
+        };
+        match pipe
+            .get(tool_key)
+            .query::<(Option<i64>, Option<String>, Option<i64>)>(&mut *conn)
         {
-            Ok((price, lnurl)) => (price.unwrap_or(0), lnurl),
-            Err(_) => (0, None),
+            Ok((price, lnurl, tool_price)) => (price.unwrap_or(0), lnurl, tool_price.unwrap_or(0)),
+            Err(_) => (0, None, 0),
         }
     }
 }
@@ -1459,9 +1474,28 @@ pub struct ModuleConfig {
     // `.well-known/l402-services` capability manifest. The route is still gated as
     // normal — this just makes it not discoverable.
     manifest_hidden: bool,
+    // `l402_mcp on;`: price and bind each MCP tool call by its `Mcp-Name`
+    // header instead of treating every `POST` to the endpoint alike. Tri-state
+    // like `enable`, so an inner location can turn it off.
+    mcp: Option<bool>,
+    // `l402_mcp_tool <name> <msat>;` lines. A tool without a line costs the
+    // location's default price, so a new tool is never free by accident.
+    mcp_tools: Vec<(String, i64)>,
+    // `l402_mcp_charge` methods. Empty means unset: `tools/call` only.
+    mcp_charge: Vec<String>,
+    // `l402_mcp_upstream_validates on;`: the operator's word that the upstream
+    // rejects a request whose MCP headers disagree with its body. The client's
+    // `MCP-Protocol-Version` cannot vouch for that, so `l402_mcp on` needs it.
+    mcp_upstream_validates: Option<bool>,
 }
 
-pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 19] = [
+/// The caveat key that binds an MCP token to the tool it was bought for.
+const MCP_TOOL_CAVEAT: &str = "McpTool";
+/// The caveat key that binds an MCP token to its MCP method, so a token for
+/// `tools/call summarize` can't open `prompts/get summarize`.
+const MCP_METHOD_CAVEAT: &str = "McpMethod";
+
+pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 23] = [
     ngx_command_t {
         name: ngx_string!("l402"),
         type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1) as ngx_uint_t,
@@ -1610,6 +1644,38 @@ pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 19] = [
         offset: 0,
         post: std::ptr::null_mut(),
     },
+    ngx_command_t {
+        name: ngx_string!("l402_mcp"),
+        type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1) as ngx_uint_t,
+        set: Some(ngx_http_l402_mcp_set),
+        conf: NGX_HTTP_LOC_CONF_OFFSET,
+        offset: 0,
+        post: std::ptr::null_mut(),
+    },
+    ngx_command_t {
+        name: ngx_string!("l402_mcp_tool"),
+        type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE2) as ngx_uint_t,
+        set: Some(ngx_http_l402_mcp_tool_set),
+        conf: NGX_HTTP_LOC_CONF_OFFSET,
+        offset: 0,
+        post: std::ptr::null_mut(),
+    },
+    ngx_command_t {
+        name: ngx_string!("l402_mcp_charge"),
+        type_: (NGX_HTTP_LOC_CONF | NGX_CONF_1MORE) as ngx_uint_t,
+        set: Some(ngx_http_l402_mcp_charge_set),
+        conf: NGX_HTTP_LOC_CONF_OFFSET,
+        offset: 0,
+        post: std::ptr::null_mut(),
+    },
+    ngx_command_t {
+        name: ngx_string!("l402_mcp_upstream_validates"),
+        type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1) as ngx_uint_t,
+        set: Some(ngx_http_l402_mcp_upstream_validates_set),
+        conf: NGX_HTTP_LOC_CONF_OFFSET,
+        offset: 0,
+        post: std::ptr::null_mut(),
+    },
     ngx_command_t::empty(),
 ];
 
@@ -1665,6 +1731,9 @@ pub static mut ngx_http_l402_module: ngx_module_t = ngx_module_t {
 
 impl Merge for ModuleConfig {
     fn merge(&mut self, prev: &ModuleConfig) -> Result<(), MergeConfigError> {
+        // Read before inheriting, so the check below fires only for a location
+        // that turned MCP on itself, not for every child of one.
+        let mcp_set_here = self.mcp == Some(true);
         // Child wins if set: `l402 off;` in an inner location must free it
         // even when the outer scope charges.
         if self.enable.is_none() {
@@ -1739,6 +1808,42 @@ impl Merge for ModuleConfig {
         // route silently loses the preimage replay check it explicitly asked for.
         if self.indefinite_access.is_none() {
             self.indefinite_access = prev.indefinite_access;
+        }
+        if self.mcp.is_none() {
+            self.mcp = prev.mcp;
+        }
+        if self.mcp_tools.is_empty() && !prev.mcp_tools.is_empty() {
+            self.mcp_tools = prev.mcp_tools.clone();
+        }
+        if self.mcp_charge.is_empty() && !prev.mcp_charge.is_empty() {
+            self.mcp_charge = prev.mcp_charge.clone();
+        }
+        if self.mcp_upstream_validates.is_none() {
+            self.mcp_upstream_validates = prev.mcp_upstream_validates;
+        }
+        // `l402_mcp on` only changes how a paywalled location prices requests.
+        // Without `l402 on` it would leave the endpoint free while reading as
+        // charged, so refuse it.
+        if mcp_set_here && !self.enable.unwrap_or(false) {
+            eprintln!(
+                "ngx_l402: l402_mcp on needs l402 on for this location, set here or inherited; \
+                 without it every MCP request passes free."
+            );
+            return Err(MergeConfigError::NoValue);
+        }
+        // The tool comes from headers only the upstream checks against the
+        // body. Without the operator's word that it does, every request would
+        // be refused at runtime, so refuse the config instead.
+        if self.mcp == Some(true)
+            && self.enable.unwrap_or(false)
+            && self.mcp_upstream_validates != Some(true)
+        {
+            eprintln!(
+                "ngx_l402: l402_mcp on needs l402_mcp_upstream_validates on: tools are read \
+                 from the Mcp-Method and Mcp-Name headers, which only the upstream checks \
+                 against the request body. Declare it once the upstream enforces that check."
+            );
+            return Err(MergeConfigError::NoValue);
         }
         // A realm token carries one preimage to every path in the realm. The
         // first request claims it and the replay check rejects the rest, so
@@ -1871,6 +1976,25 @@ unsafe fn is_head(r: *const ngx_http_request_t) -> bool {
 /// # Safety
 /// `r` must be the non-null, valid request pointer supplied by nginx.
 unsafe fn send_html_response(r: *mut ngx_http_request_t, status: u16, body: String) -> isize {
+    unsafe { send_response(r, status, body, "text/html; charset=utf-8") }
+}
+
+/// [`send_html_response`] with a JSON body, for MCP clients.
+///
+/// # Safety
+/// `r` must be the non-null, valid request pointer supplied by nginx.
+unsafe fn send_json_response(r: *mut ngx_http_request_t, status: u16, body: String) -> isize {
+    unsafe { send_response(r, status, body, "application/json; charset=utf-8") }
+}
+
+/// # Safety
+/// `r` must be the non-null, valid request pointer supplied by nginx.
+unsafe fn send_response(
+    r: *mut ngx_http_request_t,
+    status: u16,
+    body: String,
+    content_type: &str,
+) -> isize {
     let rc = unsafe { ngx_http_discard_request_body(r) };
     if rc != NGX_OK as ngx_int_t {
         return rc as isize;
@@ -1898,7 +2022,7 @@ unsafe fn send_html_response(r: *mut ngx_http_request_t, status: u16, body: Stri
 
     req.set_status(HTTPStatus(status as usize));
     req.set_content_length_n(body_len);
-    let _ = req.add_header_out("Content-Type", "text/html; charset=utf-8");
+    let _ = req.add_header_out("Content-Type", content_type);
 
     let send_status = req.send_header();
     if send_status.0 == NGX_ERROR as ngx_int_t || send_status.0 > NGX_OK as ngx_int_t {
@@ -1972,6 +2096,77 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+/// Collect every `Mcp-Method`, `Mcp-Name` and `MCP-Protocol-Version` value and
+/// decide the request. All occurrences are kept so a duplicate is refused
+/// rather than one silently picked, and a value that isn't UTF-8 is refused.
+///
+/// # Safety
+/// `request` must be the valid pointer nginx passed to the access handler.
+unsafe fn classify_mcp(
+    request: *mut ngx_http_request_t,
+    charge: &[String],
+    upstream_validates: bool,
+) -> McpDecision {
+    let req = unsafe { Request::from_ngx_http_request(request) };
+    let (mut method, mut name, mut version) = (Vec::new(), Vec::new(), Vec::new());
+    for (k, v) in req.headers_in_iterator() {
+        let Ok(k) = k.to_str() else { continue };
+        let slot = if k.eq_ignore_ascii_case("mcp-method") {
+            &mut method
+        } else if k.eq_ignore_ascii_case("mcp-name") {
+            &mut name
+        } else if k.eq_ignore_ascii_case("mcp-protocol-version") {
+            &mut version
+        } else {
+            continue;
+        };
+        match v.to_str() {
+            Ok(v) => slot.push(v.to_string()),
+            Err(_) => return McpDecision::Reject(format!("{} header is not valid UTF-8", k)),
+        }
+    }
+    let headers = McpHeaders {
+        method: method.iter().map(String::as_str).collect(),
+        name: name.iter().map(String::as_str).collect(),
+        protocol_version: version.iter().map(String::as_str).collect(),
+    };
+    ngx_l402_core::classify_mcp_request(&headers, charge, upstream_validates)
+}
+
+/// The 402 body for an MCP tool call: a JSON-RPC error whose `data` carries
+/// what a client needs to pay — the price, the L402 challenge, and the NUT-24
+/// request when Cashu is on.
+fn mcp_payment_required_body(
+    tool: &str,
+    amount_msat: i64,
+    www_authenticate: &str,
+    cashu_request: Option<&str>,
+) -> String {
+    use ngx_l402_core::escape_json;
+    let mut data = format!(
+        "{{\"tool\":\"{}\",\"amount_msat\":{},\"www_authenticate\":\"{}\"",
+        escape_json(tool),
+        amount_msat,
+        escape_json(www_authenticate)
+    );
+    if let Some((macaroon, invoice)) = ngx_l402_core::parse_l402_header_value(www_authenticate) {
+        data.push_str(&format!(
+            ",\"macaroon\":\"{}\",\"invoice\":\"{}\"",
+            escape_json(&macaroon),
+            escape_json(&invoice)
+        ));
+    }
+    if let Some(cashu) = cashu_request {
+        data.push_str(&format!(",\"cashu\":\"{}\"", escape_json(cashu)));
+    }
+    data.push('}');
+    ngx_l402_core::jsonrpc_error_body(
+        ngx_l402_core::MCP_PAYMENT_REQUIRED,
+        &format!("Payment required to call {}", tool),
+        Some(&data),
+    )
+}
+
 /// Read the NUT-24 `X-Cashu` request header, if the client sent one.
 ///
 /// Nginx only breaks out well-known headers as struct fields, so a custom one
@@ -2023,6 +2218,9 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         indefinite_access,
         realm,
         log_format_json,
+        mcp_charge,
+        mcp_tools,
+        mcp_upstream_validates,
     ) = unsafe {
         // NOTE: `authorization` can be null — not every request carries the header.
         let auth_header = if !r.headers_in.authorization.is_null() {
@@ -2091,6 +2289,16 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         let indefinite_access = conf.indefinite_access.unwrap_or(false);
         let realm = conf.realm.clone();
         let log_format_json = conf.log_format_json.unwrap_or(false);
+        // `Some` only on an MCP location: the methods it charges.
+        let mcp_charge = conf.mcp.unwrap_or(false).then(|| {
+            if conf.mcp_charge.is_empty() {
+                vec!["tools/call".to_string()]
+            } else {
+                conf.mcp_charge.clone()
+            }
+        });
+        let mcp_tools = conf.mcp_tools.clone();
+        let mcp_upstream_validates = conf.mcp_upstream_validates.unwrap_or(false);
 
         (
             auth_header,
@@ -2106,8 +2314,92 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
             indefinite_access,
             realm,
             log_format_json,
+            mcp_charge,
+            mcp_tools,
+            mcp_upstream_validates,
         )
     };
+
+    // 2026-07-28 removed the GET stream and the DELETE that ended a session,
+    // and tells a server to answer both with `405`. Only `POST` carries the
+    // mirrored headers, so nothing else is classified or let through. Methods
+    // in `l402_exempt_methods` (a CORS `OPTIONS`, say) have already returned.
+    if mcp_charge.is_some() && method != NGX_HTTP_POST {
+        ngx_log_error!(
+            NGX_LOG_INFO,
+            log_ref,
+            "L402 MCP endpoint takes POST only; got {}",
+            method_caveat_value(method)
+        );
+        // Shadow mode never blocks.
+        if dry_run {
+            return NGX_DECLINED as isize;
+        }
+        // SAFETY: `request` is the valid pointer nginx passed to this handler.
+        let req = unsafe { Request::from_ngx_http_request(request) };
+        let _ = req.add_header_out("Allow", "POST");
+        // SAFETY: as above.
+        return unsafe {
+            send_response(
+                request,
+                405,
+                "MCP endpoints take POST only\n".to_string(),
+                "text/plain; charset=utf-8",
+            )
+        };
+    }
+
+    // An MCP endpoint takes every call as `POST` to one URL, so the tool comes
+    // from the mirrored `Mcp-Name` header. Discovery passes free; a request the
+    // headers can't vouch for is refused rather than priced.
+    let mut mcp_method: Option<String> = None;
+    let mcp_tool: Option<String> = match &mcp_charge {
+        None => None,
+        // SAFETY: `request` is the valid pointer nginx passed to this handler.
+        Some(charge) => match unsafe { classify_mcp(request, charge, mcp_upstream_validates) } {
+            McpDecision::Free => return NGX_DECLINED as isize,
+            McpDecision::Charged { method, name } => {
+                mcp_method = Some(method);
+                Some(name)
+            }
+            // A header problem (`-32020`) or an unsupported protocol version
+            // (`-32022`); both are a `400` with a JSON-RPC body.
+            refused @ (McpDecision::Reject(_) | McpDecision::UnsupportedVersion { .. }) => {
+                let reason = refused.reject_reason().unwrap_or_default();
+                ngx_log_error!(
+                    NGX_LOG_INFO,
+                    log_ref,
+                    "L402 MCP request rejected: {}",
+                    reason
+                );
+                if log_format_json {
+                    log_json_event(
+                        "l402_mcp_rejected",
+                        &uri,
+                        backend_label(),
+                        &format!(
+                            ",\"client_ip\":\"{}\",\"reason\":\"{}\",\"dry_run\":{}",
+                            ngx_l402_core::escape_json(&get_client_ip(request)),
+                            ngx_l402_core::escape_json(&reason),
+                            dry_run
+                        ),
+                    );
+                }
+                // Shadow mode never blocks, rejections included.
+                if dry_run {
+                    return NGX_DECLINED as isize;
+                }
+                let body = refused.reject_body().unwrap_or_default();
+                // SAFETY: `request` is the valid pointer nginx passed to this handler.
+                return unsafe { send_json_response(request, 400, body) };
+            }
+        },
+    };
+    // The tool's own `l402_mcp_tool` price, when it has one.
+    let mcp_static_price = mcp_tool
+        .as_ref()
+        .and_then(|name| mcp_tools.iter().find(|(n, _)| n == name))
+        .map(|(_, price)| *price);
 
     // Bind the macaroon to the exact request URI and HTTP method so a
     // token paid for `GET /v1/data` can't be replayed against `POST /v1/data`.
@@ -2120,6 +2412,22 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
     let request_method = method_caveat_value(method);
     // One binding drives mint, verify, and the dry-run log — so they can't drift.
     let binding = request_binding(realm.as_deref(), &request_path, request_method);
+    // An MCP token also names its tool and MCP method, so one bought for a
+    // cheap tool can't call an expensive one on the same endpoint, and one
+    // bought for `tools/call` can't open `prompts/get` of the same name.
+    let binding = match (&mcp_tool, &mcp_method) {
+        (Some(name), Some(m)) => match binding
+            .with_bound(MCP_TOOL_CAVEAT, name.as_str())
+            .and_then(|b| b.with_bound(MCP_METHOD_CAVEAT, m.as_str()))
+        {
+            Some(b) => b,
+            None => {
+                error!("Failed to bind the token to MCP tool; returning 500");
+                return 500;
+            }
+        },
+        _ => binding,
+    };
     let caveats = binding.to_caveats();
 
     let module = match MODULE.get() {
@@ -2132,16 +2440,21 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
 
     // Fetch dynamic config (price + lnurl) from Redis only when it can affect the
     // outcome: the Cashu auth path needs the per-path amount + lnurl for verification,
-    // and every path that ends in a 402 challenge needs them to quote the price. The
-    // L402 macaroon path uses neither, so we skip the Redis round-trip entirely for it.
+    // and every path that ends in a 402 challenge needs them to quote the price. An
+    // L402 macaroon is checked without either, so its Redis round-trip waits until
+    // the check ends in a 402 (an auto-detect retry whose invoice is unpaid).
     let needs_dynamic_config = match auth_header.as_deref() {
         Some(s) => !ngx_l402_core::is_l402_scheme(s),
         None => true,
     };
 
-    let (final_amount, final_lnurl_addr, price_source) = if needs_dynamic_config {
+    let resolve_price = || -> (i64, Option<String>, &'static str) {
         let redis_start = Instant::now();
-        let (dynamic_amount, dynamic_lnurl) = module.get_dynamic_config(&request_path);
+        let tool_key = mcp_tool
+            .as_deref()
+            .map(|name| ngx_l402_core::mcp_tool_price_key(&request_path, name));
+        let (dynamic_amount, dynamic_lnurl, dynamic_tool_amount) =
+            module.get_dynamic_config(&request_path, tool_key.as_deref());
         if perf_log_enabled() {
             debug!(
                 "perf: stage=redis_dynamic_config duration_us={} path={}",
@@ -2149,16 +2462,30 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
                 request_path
             );
         }
-        let (amount, src) = if dynamic_amount > 0 {
+        // Most specific first: the tool's Redis price, its `l402_mcp_tool`
+        // line, then the location's Redis price and default.
+        let (amount, src) = if dynamic_tool_amount > 0 {
+            (dynamic_tool_amount, "dynamic")
+        } else if let Some(price) = mcp_static_price {
+            (price, "static")
+        } else if dynamic_amount > 0 {
             (dynamic_amount, "dynamic")
         } else {
             (amount_msat, "static")
         };
-        (amount, dynamic_lnurl.or(lnurl_addr), src)
+        (amount, dynamic_lnurl.or_else(|| lnurl_addr.clone()), src)
+    };
+
+    let (mut final_amount, mut final_lnurl_addr, mut price_source) = if needs_dynamic_config {
+        resolve_price()
     } else {
-        // L402 macaroon path skips the Redis lookup entirely — there is no
-        // dynamic price to compare against, so the source is "static".
-        (amount_msat, lnurl_addr, "static")
+        // Not read by the L402 macaroon check; replaced below if it ends in a
+        // challenge.
+        (
+            mcp_static_price.unwrap_or(amount_msat),
+            lnurl_addr.clone(),
+            "static",
+        )
     };
 
     metrics::inc(metrics::Metric::RequestsTotal);
@@ -2175,6 +2502,11 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         indefinite_access,
         macaroon_timeout,
     );
+    // The replacement challenge must quote what a fresh one would: the Redis
+    // tool or path price and the Redis LNURL, not the static fallback.
+    if !needs_dynamic_config && result == 402 {
+        (final_amount, final_lnurl_addr, price_source) = resolve_price();
+    }
     let auth_duration = auth_start.elapsed();
 
     if perf_log_enabled() {
@@ -2430,11 +2762,18 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
                         &request_path,
                         backend_label(),
                         &format!(
-                            ",\"client_ip\":\"{}\",\"auth_state\":\"missing\",\"price_msat\":{},\"price_source\":\"{}\",\"latency_ms\":{}",
+                            ",\"client_ip\":\"{}\",\"auth_state\":\"missing\",\"price_msat\":{},\"price_source\":\"{}\",\"latency_ms\":{}{}",
                             ngx_l402_core::escape_json(&get_client_ip(request)),
                             final_amount,
                             price_source,
-                            invoice_start.elapsed().as_millis()
+                            invoice_start.elapsed().as_millis(),
+                            mcp_tool
+                                .as_deref()
+                                .map(|t| format!(
+                                    ",\"mcp_tool\":\"{}\"",
+                                    ngx_l402_core::escape_json(t)
+                                ))
+                                .unwrap_or_default()
                         ),
                     );
                 }
@@ -2454,6 +2793,25 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
                 // API clients that check WWW-Authenticate will still function
                 // correctly because the header is already set above.
                 //
+                // An MCP client gets the challenge as a JSON-RPC error it can
+                // read, alongside the same `WWW-Authenticate` header existing
+                // L402 clients use.
+                if let Some(name) = &mcp_tool {
+                    let cashu_pr = if cashu_ecash_support {
+                        module.get_cashu_payment_request(final_amount)
+                    } else {
+                        None
+                    };
+                    let body = mcp_payment_required_body(
+                        name,
+                        final_amount,
+                        &header_value,
+                        cashu_pr.as_deref(),
+                    );
+                    // SAFETY: `request` is the valid pointer nginx passed to this handler.
+                    return unsafe { send_json_response(request, 402, body) };
+                }
+
                 // `l402_payment_html off` stops here: the challenge headers are
                 // already attached, and an API client or agent only discards the
                 // page.
@@ -4327,6 +4685,151 @@ pub unsafe extern "C" fn ngx_http_l402_exempt_methods_set(
         conf.exempt_methods = methods;
     }
 
+    std::ptr::null_mut()
+}
+
+/// `l402_mcp on|off;` — price and bind each MCP tool call by its `Mcp-Name`
+/// header. Needs `l402 on;` for the location, set there or inherited (checked
+/// at merge).
+///
+/// # Safety
+/// `cf` and `conf` are the valid, non-null pointers Nginx passes to
+/// directive-parsing callbacks; `conf` points to this location's `ModuleConfig`.
+pub unsafe extern "C" fn ngx_http_l402_mcp_set(
+    cf: *mut ngx_conf_t,
+    _cmd: *mut ngx_command_t,
+    conf: *mut c_void,
+) -> *mut c_char {
+    // SAFETY: `cf`, `conf`, and `(*cf).args` are guaranteed valid by Nginx
+    // during config-parsing callbacks. `args.add(1)` is safe because
+    // NGX_CONF_TAKE1 ensures exactly one argument is present.
+    unsafe {
+        let conf = &mut *(conf as *mut ModuleConfig);
+        let args = (*(*cf).args).elts as *mut ngx_str_t;
+        let val = (*args.add(1)).to_str().unwrap_or_default();
+        if val.eq_ignore_ascii_case("on") {
+            conf.mcp = Some(true);
+            info!("⚙️ l402_mcp on — MCP tool calls are priced per tool");
+        } else if val.eq_ignore_ascii_case("off") {
+            conf.mcp = Some(false);
+        } else {
+            return conf_error(
+                cf,
+                &format!("l402_mcp: expected 'on' or 'off', got '{val}'"),
+            );
+        }
+    }
+    std::ptr::null_mut()
+}
+
+/// `l402_mcp_upstream_validates on|off;` — the operator's declaration that the
+/// upstream rejects a request whose `Mcp-Method` / `Mcp-Name` headers disagree
+/// with its body. `l402_mcp on` needs it (checked at merge).
+///
+/// # Safety
+/// `cf` and `conf` are the valid, non-null pointers Nginx passes to
+/// directive-parsing callbacks; `conf` points to this location's `ModuleConfig`.
+pub unsafe extern "C" fn ngx_http_l402_mcp_upstream_validates_set(
+    cf: *mut ngx_conf_t,
+    _cmd: *mut ngx_command_t,
+    conf: *mut c_void,
+) -> *mut c_char {
+    // SAFETY: as in `ngx_http_l402_mcp_set`; NGX_CONF_TAKE1 ensures exactly one
+    // argument is present.
+    unsafe {
+        let conf = &mut *(conf as *mut ModuleConfig);
+        let args = (*(*cf).args).elts as *mut ngx_str_t;
+        let val = (*args.add(1)).to_str().unwrap_or_default();
+        if val.eq_ignore_ascii_case("on") {
+            conf.mcp_upstream_validates = Some(true);
+        } else if val.eq_ignore_ascii_case("off") {
+            conf.mcp_upstream_validates = Some(false);
+        } else {
+            return conf_error(
+                cf,
+                &format!("l402_mcp_upstream_validates: expected 'on' or 'off', got '{val}'"),
+            );
+        }
+    }
+    std::ptr::null_mut()
+}
+
+/// `l402_mcp_tool <name> <msat>;` — the price of one MCP tool. The name is
+/// compared exactly with the decoded `Mcp-Name` header.
+///
+/// # Safety
+/// `cf` and `conf` are the valid, non-null pointers Nginx passes to
+/// directive-parsing callbacks; `conf` points to this location's `ModuleConfig`.
+pub unsafe extern "C" fn ngx_http_l402_mcp_tool_set(
+    cf: *mut ngx_conf_t,
+    _cmd: *mut ngx_command_t,
+    conf: *mut c_void,
+) -> *mut c_char {
+    // SAFETY: as above; NGX_CONF_TAKE2 ensures exactly two arguments.
+    unsafe {
+        let conf = &mut *(conf as *mut ModuleConfig);
+        let args = (*(*cf).args).elts as *mut ngx_str_t;
+        let name = (*args.add(1)).to_str().unwrap_or_default();
+        let price = (*args.add(2)).to_str().unwrap_or_default();
+        if name.is_empty() || name.chars().any(char::is_control) {
+            return conf_error(
+                cf,
+                "l402_mcp_tool: the tool name must be non-empty with no control characters",
+            );
+        }
+        if conf.mcp_tools.iter().any(|(n, _)| n == name) {
+            return conf_error(cf, &format!("l402_mcp_tool: \"{name}\" is priced twice"));
+        }
+        let Some(price) = price.parse::<i64>().ok().filter(|p| *p > 0) else {
+            return conf_error(
+                cf,
+                &format!("l402_mcp_tool: price for \"{name}\" must be a positive msat amount"),
+            );
+        };
+        info!("⚙️ l402_mcp_tool {} = {} msat", name, price);
+        conf.mcp_tools.push((name.to_string(), price));
+    }
+    std::ptr::null_mut()
+}
+
+/// `l402_mcp_charge tools/call [resources/read] [prompts/get];` — the MCP
+/// methods that cost money here. Unset means `tools/call` only; every other
+/// method passes free so clients can discover what is for sale.
+///
+/// # Safety
+/// `cf` and `conf` are the valid, non-null pointers Nginx passes to
+/// directive-parsing callbacks; `conf` points to this location's `ModuleConfig`.
+pub unsafe extern "C" fn ngx_http_l402_mcp_charge_set(
+    cf: *mut ngx_conf_t,
+    _cmd: *mut ngx_command_t,
+    conf: *mut c_void,
+) -> *mut c_char {
+    // SAFETY: as above; NGX_CONF_1MORE ensures at least one argument.
+    unsafe {
+        let conf = &mut *(conf as *mut ModuleConfig);
+        let args_arr = &*(*cf).args;
+        let args = args_arr.elts as *mut ngx_str_t;
+        let mut methods = Vec::new();
+        for i in 1..args_arr.nelts {
+            let m = (*args.add(i)).to_str().unwrap_or_default();
+            // Only methods whose name the transport mirrors into `Mcp-Name`;
+            // anything else could be charged but not priced or bound per name.
+            if !ngx_l402_core::MCP_CHARGEABLE_METHODS.contains(&m) {
+                return conf_error(
+                    cf,
+                    &format!(
+                        "l402_mcp_charge: '{m}' is not one of {}",
+                        ngx_l402_core::MCP_CHARGEABLE_METHODS.join(", ")
+                    ),
+                );
+            }
+            if !methods.iter().any(|x: &String| x == m) {
+                methods.push(m.to_string());
+            }
+        }
+        info!("⚙️ l402_mcp_charge = {:?}", methods);
+        conf.mcp_charge = methods;
+    }
     std::ptr::null_mut()
 }
 

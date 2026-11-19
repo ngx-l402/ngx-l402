@@ -278,6 +278,9 @@ jobs:
       - name: Run Integration Tests - Nested l402 off
         run: bash .github/scripts/test-nested-off.sh nginx-lnurl
 
+      - name: Run Integration Tests - MCP tool pricing
+        run: bash .github/scripts/test-mcp.sh nginx-lnurl
+
       - name: Run Integration Tests - Dry-Run (Shadow) Mode & Metrics
         run: |
           echo "Testing l402_dry_run shadow mode and l402_metrics endpoint..."

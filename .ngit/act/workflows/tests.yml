@@ -149,6 +149,20 @@ jobs:
           fi
           echo "PASS: /api-only returns 402 + WWW-Authenticate with an empty body"
 
+          # A HEAD response must end at its header: pipeline HEAD + GET on one
+          # connection and expect the GET's status line right after the header.
+          echo "Testing HEAD /protected pipelined with GET /..."
+          pipelined=$(exec 3<>/dev/tcp/127.0.0.1/8000
+            printf 'HEAD /protected HTTP/1.1\r\nHost: localhost\r\n\r\nGET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3
+            timeout 30 cat <&3) || true
+          if ! echo "$pipelined" | tr -d '\r' | awk 'b {print; exit} /^$/ {b=1}' | grep -q '^HTTP/1.1 200'; then
+            echo "FAIL: HEAD /protected was not followed by the GET's 200 — the HEAD response carried a body"
+            echo "$pipelined" | head -30
+            docker logs nginx-lnurl
+            exit 1
+          fi
+          echo "PASS: HEAD /protected ends at its header"
+
           # Flush Redis to clear any previously stored preimages (replay protection)
           echo "Flushing Redis for clean test state..."
           echo "Keys before flush:"

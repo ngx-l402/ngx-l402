@@ -34,7 +34,9 @@ For local contributor setup on macOS (Docker nginx recommended), see `docs/macos
 
 ## ⚡ Quick Start
 
-> Requires **NGINX 1.28.0** or later.
+> Requires **NGINX 1.30.7+** (stable) or **1.31.9+** (mainline). Older releases,
+> 1.28 and 1.29 included, lack the fixes for the HTTP/2 bugs CVE-2026-123007 and
+> CVE-2026-123633, and the module logs a warning at startup when loaded into one.
 >
 > Pre-built binaries are published for several NGINX versions — see the assets on
 > the [latest release](https://github.com/ngx-l402/ngx-l402/releases/latest). For

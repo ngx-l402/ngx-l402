@@ -28,6 +28,10 @@ location /mcp {
   path, so it also works for the same tool and method on any other path in
   that realm.
 
+A runnable version, with a real MCP server, a paying MCP client and a regtest
+Lightning network, is in
+[`examples/mcp-tool-pricing`](https://github.com/ngx-l402/ngx-l402/tree/main/examples/mcp-tool-pricing).
+
 ---
 
 ## Trust model — read this first

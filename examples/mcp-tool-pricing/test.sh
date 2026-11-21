@@ -3,25 +3,37 @@
 # Every request is a real MCP JSON-RPC call sent through the gateway to the
 # MCP server; every payment is a real Lightning payment over the regtest
 # channel. Needs curl and jq.
+#
+# While it runs it spends regtest sats, sets a Redis price for `search` (your
+# own, if you set one, is put back at the end), and starts a second nginx on
+# port 8001 inside the gateway container for the auto-detect checks.
 set -uo pipefail
 cd "$(dirname "$0")" || exit 1
 
-if [ ! -f .env ] || ! curl -s -o /dev/null http://localhost:8402/mcp; then
+GW=http://localhost:8402/mcp
+V=2026-07-28
+PRICE_KEY=mcp-tool:/mcp:search
+failures=0
+
+if [ ! -f .env ] || ! curl -s -o /dev/null "$GW"; then
     echo "The example isn't running. Start it with ./setup.sh first." >&2
     exit 1
 fi
 
+redis() { docker compose exec -T redis redis-cli "$@"; }
+saved_price=$(redis get "$PRICE_KEY")
 # Undo what the checks change, even if they're interrupted: the Redis price
-# override and the second nginx used for auto-detect.
+# for search, and the second nginx used for auto-detect.
 cleanup() {
-    docker compose exec -T redis redis-cli del mcp-tool:/mcp:search >/dev/null 2>&1
+    if [ -n "$saved_price" ]; then
+        redis set "$PRICE_KEY" "$saved_price" >/dev/null 2>&1
+    else
+        redis del "$PRICE_KEY" >/dev/null 2>&1
+    fi
     docker compose exec -T gateway sh -c '[ -f /tmp/auto.pid ] && nginx -c /tmp/auto.conf -s quit' >/dev/null 2>&1
 }
 trap cleanup EXIT
-
-GW=http://localhost:8402/mcp
-V=2026-07-28
-failures=0
+redis del "$PRICE_KEY" >/dev/null
 
 check() {
     if [ "$1" = "$2" ]; then
@@ -84,10 +96,10 @@ check "$status" 402 "an unpaid tools/call gets 402"
 check "$(jq -r '.error.data.amount_msat' <<<"$out")" 10000 "search costs the default, 10 sats"
 mcp "$GW" tools/call summarize "$SUMMARIZE"
 check "$(jq -r '.error.data.amount_msat' <<<"$out")" 50000 "summarize costs its l402_mcp_tool price, 50 sats"
-docker compose exec -T redis redis-cli set mcp-tool:/mcp:search 20000 >/dev/null
+redis set "$PRICE_KEY" 20000 >/dev/null
 mcp "$GW" tools/call search "$SEARCH"
 check "$(jq -r '.error.data.amount_msat' <<<"$out")" 20000 "a Redis price overrides it"
-docker compose exec -T redis redis-cli del mcp-tool:/mcp:search >/dev/null
+redis del "$PRICE_KEY" >/dev/null
 
 echo "Paying:"
 token=$(buy search "$SEARCH")
@@ -119,7 +131,10 @@ check "$status" 405 "GET (the removed SSE stream)"
 echo "Auto-detect retry (l402_auto_detect_payment):"
 # A second nginx in the gateway container, on port 8001, with auto-detect on:
 # a client that paid may send just the macaroon and the gateway asks its node.
-docker compose exec -T gateway sh -c 'sed "s/listen 8000;/listen 8001;/; s|pid .*|pid /tmp/auto.pid;|; s|l402_mcp_upstream_validates on;|& l402_auto_detect_payment on;|" /etc/nginx/nginx.conf > /tmp/auto.conf && nginx -c /tmp/auto.conf 2>/dev/null'
+if ! docker compose exec -T gateway sh -c 'sed "s/listen 8000;/listen 8001;/; s|pid .*|pid /tmp/auto.pid;|; s|l402_mcp_upstream_validates on;|& l402_auto_detect_payment on;|" /etc/nginx/nginx.conf > /tmp/auto.conf && { nginx -c /tmp/auto.conf >/tmp/auto-start.log 2>&1 || { cat /tmp/auto-start.log; exit 1; }; }'; then
+    echo "  ✗ could not start the second nginx on port 8001" >&2
+    exit 1
+fi
 # Port 8001 isn't published, so these requests run from inside the container.
 auto() { docker compose exec -T gateway curl -s "$@"; }
 amcp() {
@@ -131,7 +146,7 @@ amcp() {
     status=${out##*$'\n'}
     out=${out%$'\n'*}
 }
-docker compose exec -T redis redis-cli set mcp-tool:/mcp:search 30000 >/dev/null
+redis set "$PRICE_KEY" 30000 >/dev/null
 amcp search "$SEARCH"
 mac=$(jq -r '.error.data.macaroon' <<<"$out")
 inv=$(jq -r '.error.data.invoice' <<<"$out")
@@ -142,6 +157,10 @@ check "$(jq -r '.error.data.amount_msat' <<<"$out")" 30000 "which also quotes th
 pay "$inv" >/dev/null
 amcp search "$SEARCH" -H "Authorization: L402 $mac"
 check "$status" 200 "after paying, the macaroon alone runs the tool"
+
+echo "The client's spending cap:"
+cap=$(docker compose run --rm -e MAX_SATS=20 client 2>&1 | grep -c "Not paying: summarize costs 50 sats")
+check "$cap" 1 "with MAX_SATS=20 the client refuses summarize (50 sats)"
 
 echo
 if [ "$failures" -ne 0 ]; then

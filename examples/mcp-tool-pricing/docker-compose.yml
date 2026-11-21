@@ -13,8 +13,10 @@ x-lnd: &lnd
   image: lightninglabs/lnd:v0.20.0-beta
   depends_on: [bitcoind]
   restart: unless-stopped
+  # Healthy once the node answers RPC, not just once its files exist: the
+  # files outlive a restart in the volume.
   healthcheck:
-    test: ["CMD", "test", "-f", "/root/.lnd/data/chain/bitcoin/regtest/admin.macaroon"]
+    test: ["CMD", "lncli", "-n", "regtest", "getinfo"]
     interval: 2s
     retries: 60
 
@@ -22,6 +24,7 @@ services:
   bitcoind:
     image: lncm/bitcoind:v25.0
     user: root
+    restart: unless-stopped
     command: >-
       -regtest -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0
       -rpcuser=user -rpcpassword=pass -fallbackfee=0.0001 -txindex=1
@@ -75,19 +78,29 @@ services:
       - --tlsextradomain=lnd-wallet
     volumes: [lnd-wallet:/root/.lnd]
 
+  # The gateway records every spent token here, which is what makes a token
+  # single-use. It must survive a restart, and must never evict those records
+  # to make room, or a spent token works again.
   redis:
     image: redis:7.2
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory-policy noeviction
+    volumes: [redis:/data]
 
   mcp-server:
     build: .
+    restart: unless-stopped
     command: ["python", "server.py"]
 
   gateway:
-    # Builds the module from this checkout. Once a release with `l402_mcp`
-    # is out, `image: ghcr.io/ngx-l402/ngx-l402:latest` works the same.
+    # Builds the module from this checkout of ngx-l402, so a copy of this
+    # folder alone needs `context` pointed at a checkout. Once a release with
+    # `l402_mcp` is out, `image: ghcr.io/ngx-l402/ngx-l402:latest` without
+    # `build` works the same.
     build:
       context: ../..
     image: ngx-l402:mcp-example
+    restart: unless-stopped
     depends_on:
       lnd-gateway: { condition: service_healthy }
       mcp-server: { condition: service_started }
@@ -124,5 +137,6 @@ services:
 
 volumes:
   bitcoind:
+  redis:
   lnd-gateway:
   lnd-wallet:

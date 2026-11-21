@@ -1,7 +1,7 @@
-"""A plain MCP server with one cheap tool and one expensive one.
+"""A plain MCP server with two tools.
 
 It knows nothing about payments: ngx-l402 in front of it decides what each
-tool call costs. What it must do is reject a request whose `Mcp-Method` /
+tool call costs (nginx.conf prices `search` at 10 sats and `summarize` at 50). What it must do is reject a request whose `Mcp-Method` /
 `Mcp-Name` headers disagree with its body, which the MCP Python SDK does for
 every 2026-07-28 request. That check is what `l402_mcp_upstream_validates on`
 vouches for in nginx.conf.
@@ -15,13 +15,13 @@ mcp = MCPServer("paid-tools")
 
 @mcp.tool()
 def search(query: str) -> str:
-    """Search the catalogue. Cheap: 10 sats."""
+    """Search the catalogue."""
     return f"3 results for {query!r}: alpha, beta, gamma"
 
 
 @mcp.tool()
 def summarize(text: str) -> str:
-    """Summarize a text. Expensive: 50 sats."""
+    """Summarize a text."""
     words = text.split()
     return " ".join(words[:8]) + (" ..." if len(words) > 8 else "")
 

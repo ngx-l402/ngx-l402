@@ -35,6 +35,7 @@ synced() { lncli "$1" getinfo | grep -q '"synced_to_chain": *true'; }
 for node in lnd-gateway lnd-wallet; do wait_for 120 "$node to sync" synced "$node"; done
 
 pubkey=$(lncli lnd-gateway getinfo | sed -n 's/.*"identity_pubkey": *"\([^"]*\)".*/\1/p')
+[ -n "$pubkey" ] || { echo "could not read the gateway node's pubkey" >&2; exit 1; }
 # Also after a restart, when the nodes don't reconnect on their own right away.
 connected() {
     lncli lnd-wallet connect "$pubkey@lnd-gateway:9735" >/dev/null 2>&1 || true
@@ -71,5 +72,6 @@ pays() {
 }
 wait_for 60 "a test payment to the gateway" pays
 
-echo "Ready: the gateway listens on http://localhost:8402/mcp"
-echo "Run the paying client with: docker compose run --rm client"
+echo "Ready. The gateway is at http://localhost:8402/mcp from this machine"
+echo "(http://gateway:8000/mcp inside Docker). Run the paying client with:"
+echo "  docker compose run --rm client"

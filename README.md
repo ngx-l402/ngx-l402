@@ -64,6 +64,10 @@ curl -i http://localhost:8000/protected  # 402 Payment Required
 
 ---
 
+## Community
+
+Questions, ideas, or want to follow along? Join the ngx_l402 community on [Discord](https://discord.gg/QYwcj2wuQ).
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.

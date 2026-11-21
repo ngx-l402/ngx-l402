@@ -18,6 +18,7 @@ import httpx2
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 
+
 def env(name: str) -> str:
     """docker-compose.yml sets these; outside compose, point them at your own."""
     value = os.environ.get(name)
@@ -32,7 +33,11 @@ MAX_SATS = int(os.environ.get("MAX_SATS", "100"))
 
 
 class LndWallet:
-    """Pays BOLT11 invoices through an LND node's REST API."""
+    """Pays BOLT11 invoices through an LND node's REST API.
+
+    Uses the node's admin macaroon, which can spend: fine for this regtest
+    wallet, but give a real wallet a macaroon limited to what it needs.
+    """
 
     def __init__(self, rest_url: str, lnd_dir: str) -> None:
         macaroon = f"{lnd_dir}/data/chain/bitcoin/regtest/admin.macaroon"

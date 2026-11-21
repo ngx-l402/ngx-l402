@@ -1,0 +1,2 @@
+# setup.sh writes the gateway's secret ROOT_KEY here.
+.env

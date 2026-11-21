@@ -1,48 +1,61 @@
 # MCP tool pricing
 
-Charge for each **tool** of an MCP server over Lightning, without adding
-payment code to the server. ngx-l402 sits in front of the server, reads which
-tool a request calls from the `Mcp-Name` header the 2026-07-28 Streamable HTTP
-transport sends, and prices it:
+Charge for each **tool** of an [MCP](https://modelcontextprotocol.io) server
+over Lightning, without adding payment code to the server. ngx-l402 sits in
+front of the server as an nginx module, sees which tool a request calls, and
+asks for payment before passing it on:
 
 ```nginx
 location /mcp {
     l402                        on;
     l402_mcp                    on;
-    l402_mcp_upstream_validates on;
+    l402_mcp_upstream_validates on;      # see "Why the server matters" below
     l402_amount_msat_default    10000;   # 10 sats: any tool without its own line
     l402_mcp_tool  summarize    50000;   # 50 sats
-    proxy_pass                  http://mcp-server:8000;
+
+    proxy_pass         http://mcp-server:8000;
+    proxy_http_version 1.1;
+    proxy_buffering    off;              # tool results can stream back
 }
 ```
 
-Everything runs locally: a regtest Bitcoin node, two Lightning nodes with a
-channel between them, the gateway, an MCP server and an MCP client that pays.
+Everything runs locally on a throwaway test network. No real money is
+involved: "sats" here are regtest coins.
 
 ```
 client ──► gateway (nginx + ngx-l402) ──► mcp-server
   │             │
-lnd-wallet ══ lnd-gateway
+lnd-wallet ══ lnd-gateway        (a Lightning channel; the client pays through it)
 ```
 
-| File | What it is |
-|---|---|
-| [`nginx.conf`](nginx.conf) | The gateway config above. |
-| [`server.py`](server.py) | A plain [MCP Python SDK](https://pypi.org/project/mcp/) server with two tools, `search` and `summarize`. No payment code. |
-| [`client.py`](client.py) | The SDK's own client plus a short `httpx2.Auth` hook that pays a 402 and retries with the token. |
-| [`setup.sh`](setup.sh) | Starts the stack, funds both nodes and opens the channel. |
-| [`test.sh`](test.sh) | End-to-end checks: prices, payment, reuse, per-tool tokens, mismatched headers, auto-detect. |
+## Before you start
+
+- **Docker** with Compose v2 (`docker compose`), plus `curl`, `jq` and
+  `openssl`.
+- **Port 8402** free on your machine. The gateway listens there, on
+  `127.0.0.1` only.
+- **A few minutes for the first run.** It builds the ngx-l402 module from
+  this checkout.
+- **An MCP client that speaks protocol `2026-07-28`.** ngx-l402 reads the tool
+  name from the `Mcp-Name` header, which that revision added. Clients on older
+  revisions (such as `2025-11-25`) don't send it and are refused with `400`.
+  The client in this example uses the MCP Python SDK 2.3.0, which speaks
+  2026-07-28.
 
 ## Run it
 
-Needs Docker, `curl`, `jq` and `openssl`. The first run builds the module from
-this checkout, which takes a few minutes.
+From a clone of this repository:
 
 ```bash
 cd examples/mcp-tool-pricing
 ./setup.sh
 docker compose run --rm client
 ```
+
+`setup.sh` starts everything, funds the client's Lightning wallet, opens a
+channel to the gateway's node, and makes a 1-sat test payment so you know
+payments go through. Then the client lists the tools for free and pays for
+one call of each:
 
 ```
 Connected to http://gateway:8000/mcp (protocol 2026-07-28)
@@ -56,68 +69,115 @@ Calling summarize
 Spent 60 sats
 ```
 
-Then run the checks:
+To check everything the example claims, with real requests and payments:
 
 ```bash
 ./test.sh
 ```
 
-`setup.sh` is safe to re-run, also after `docker compose down` and `up`: it
-reconnects the nodes and reuses the channel.
+`setup.sh` is safe to run again, including after `docker compose down` and
+`up`. Remove everything with `docker compose down -v`.
 
-Clean up with `docker compose down -v`.
+## What's in the folder
 
-A few things the example does that a copy of it should keep:
-
-- **Its own `ROOT_KEY`.** The gateway signs tokens with it, and anyone who knows
-  it can mint tokens that pass. `setup.sh` writes a random one to `.env`
-  (gitignored), and compose won't start the gateway without it.
-- **Local only.** The gateway is published on `127.0.0.1:8402`, not on every
-  interface.
-- **A spending cap.** `client.py` refuses an invoice above `MAX_SATS` (default
-  100) instead of paying whatever the server asks for. Set it with
-  `docker compose run --rm -e MAX_SATS=20 client`.
+| File | What it is |
+|---|---|
+| [`nginx.conf`](nginx.conf) | The gateway config shown above. |
+| [`server.py`](server.py) | A plain [MCP Python SDK](https://pypi.org/project/mcp/) server with two tools, `search` and `summarize`. It has no payment code. |
+| [`client.py`](client.py) | The SDK's own client plus a short `httpx2.Auth` hook that pays a `402` and retries with the token. |
+| [`docker-compose.yml`](docker-compose.yml) | Bitcoin (regtest), two LND nodes, Redis, the MCP server, the gateway and the client. |
+| [`setup.sh`](setup.sh) | Starts the stack, funds the wallet, opens the channel. |
+| [`test.sh`](test.sh) | 18 end-to-end checks: prices, paying, reuse, one tool per token, headers that lie about the body, and auto-detect payment. |
 
 ## What happens on a tool call
 
-1. The client sends `tools/call` with `Mcp-Method: tools/call` and
+A few terms first. **L402** is a way for an HTTP server to say "pay first":
+it answers `402 Payment Required` with a Lightning **invoice** and a
+**macaroon**, a signed token. Paying the invoice reveals a secret, the
+**preimage**. The client then sends `Authorization: L402 <macaroon>:<preimage>`,
+which proves it paid.
+
+1. The client sends `tools/call` with the headers `Mcp-Method: tools/call` and
    `Mcp-Name: search`. Listing tools, and every other method, passes free.
-2. The gateway answers `402` with a Lightning invoice for that tool's price
-   and a macaroon bound to it (`McpTool = search`). The body is a JSON-RPC
-   error, so an MCP client can read it; `WWW-Authenticate` carries the same
-   challenge for existing L402 clients.
-3. The client pays and retries with `Authorization: L402 <macaroon>:<preimage>`.
-4. The gateway checks the token and proxies the call. The MCP server checks
-   that the headers match the body, and runs the tool.
+2. The gateway answers `402` with an invoice for that tool's price and a
+   macaroon bound to it: it only works for `tools/call` on `search`, at this
+   path, once. The body is a JSON-RPC error that an MCP client can read, and
+   the `WWW-Authenticate` header carries the same challenge for existing L402
+   clients.
+3. The client pays the invoice and sends the same request again with the
+   token.
+4. The gateway checks the token and passes the call to the MCP server, which
+   runs the tool.
 
-A token works once, and only for its own tool: a `search` token is refused on
-`summarize`. A client that sends `Mcp-Name: search` with a `summarize` body
-gets past nginx, which never reads the body, and is refused by the MCP server
-with `400` / `HeaderMismatch`. That server-side check is what
-`l402_mcp_upstream_validates on` declares. Only set it for an upstream that
-implements 2026-07-28 and enforces it, as the MCP Python SDK 2.3.0
-does.
+## Why the server matters
 
-## Prices from Redis
+nginx never reads the request body. It prices the call by the `Mcp-Name`
+header, but the server runs whatever tool the body names. So a client could
+send `Mcp-Name: search` (10 sats) with a body that calls `summarize`
+(50 sats).
 
-The gateway reads a tool's price from Redis before its `l402_mcp_tool` line,
-so you can change prices without reloading nginx:
+The 2026-07-28 spec closes that gap on the server side: a server must refuse
+a request whose headers don't match its body. `test.sh` shows it happening:
+nginx lets the request through, and the MCP server answers
+`400` / `HeaderMismatch`.
+
+`l402_mcp_upstream_validates on` is you telling ngx-l402 that your server does
+this check. nginx won't start `l402_mcp` without it. Only set it for a server
+that implements 2026-07-28 and enforces the check, as the MCP Python SDK
+2.3.0 does.
+
+## Keep these if you copy it
+
+- **Your own `ROOT_KEY`.** The gateway signs tokens with it, and anyone who
+  knows it can create tokens that pass without paying. `setup.sh` writes a
+  random one to `.env`, which is gitignored, and compose won't start the
+  gateway without one.
+- **Local only.** The gateway is published on `127.0.0.1:8402`, not on every
+  network interface. Nothing else in the stack is published.
+- **A spending cap.** `client.py` refuses an invoice above `MAX_SATS` (default
+  100 per call) instead of paying whatever the server asks. Try it with
+  `docker compose run --rm -e MAX_SATS=20 client`: it pays for `search` and
+  stops at `summarize`.
+
+## Changing prices
+
+A tool's price can also come from Redis, which wins over its
+`l402_mcp_tool` line and takes effect without reloading nginx:
 
 ```bash
 docker compose exec redis redis-cli set mcp-tool:/mcp:search 20000   # 20 sats
+docker compose exec redis redis-cli del mcp-tool:/mcp:search         # back to 10
 ```
+
+Prices are in millisatoshis (1 sat = 1000 msat).
 
 ## Using your own server and wallet
 
-- **Server:** any MCP server on the 2026-07-28 transport that validates the
-  mirrored headers. Point `proxy_pass` at it.
+- **Server:** any MCP server on the 2026-07-28 transport that checks the
+  headers against the body. Point `proxy_pass` at it. If you keep the SDK's
+  DNS-rebinding protection, the server's `allowed_hosts` must include the
+  host nginx proxies to (`mcp-server:8000` here), or it refuses every request.
 - **Gateway node:** set `LN_CLIENT_TYPE` and its variables for your backend
-  (LND, CLN, LNURL, NWC, ...); see the [configuration docs](../../docs/config-env-vars.md).
-  An invoice-only macaroon is enough for LND.
-- **Client:** `client.py`'s `L402Auth` works with any MCP SDK client built on
-  `httpx2`; swap `LndWallet` for your own wallet. Outside compose, set
-  `MCP_URL`, `LND_REST_URL` and `LND_DIR` yourself; the example's LND REST
-  port isn't published to the host.
+  (LND, CLN, LNURL, NWC and others); see the
+  [configuration docs](../../docs/config-env-vars.md). For LND, an
+  invoice-only macaroon is enough: the gateway issues and checks invoices,
+  it never spends.
+- **Client:** `L402Auth` in `client.py` works with any client built on
+  `httpx2`, which the MCP Python SDK uses. Swap `LndWallet` for your own
+  wallet, and give it a macaroon or key that can only pay. Outside compose,
+  set `MCP_URL`, `LND_REST_URL` and `LND_DIR` yourself.
+
+## If something goes wrong
+
+| What you see | What to do |
+|---|---|
+| `required variable ROOT_KEY is missing` | Run `./setup.sh` first; it creates `.env`. |
+| `port is already allocated` on 8402 | Free the port, or change `127.0.0.1:8402` in `docker-compose.yml` and `GW` in `test.sh`. |
+| `timed out waiting for ...` from `setup.sh` | Run it again. If it keeps happening, look at `docker compose logs lnd-wallet lnd-gateway`. |
+| `400` with code `-32022` | The client speaks an MCP protocol older than 2026-07-28. Upgrade it. |
+| `400` with code `-32020` | A header is missing or malformed, or (from the MCP server) doesn't match the body. |
+| `Not paying: ... more than MAX_SATS` | The tool costs more than the client's cap. Raise `MAX_SATS` if that's expected. |
+| Client changes don't show up | `setup.sh` builds the client image; after editing `client.py` without it, run `docker compose --profile client build client`. |
 
 More on the directives, the trust model and the limits in
 [docs/mcp.md](../../docs/mcp.md).

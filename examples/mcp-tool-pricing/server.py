@@ -32,6 +32,8 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000,
         # Keep DNS-rebinding protection on, and accept the Host nginx sends
-        # when it proxies to `http://mcp-server:8000`.
+        # when it proxies to `http://mcp-server:8000`. If you change
+        # proxy_pass in nginx.conf, change this to match, or every request
+        # is refused.
         transport_security=TransportSecuritySettings(allowed_hosts=["mcp-server:8000"]),
     )

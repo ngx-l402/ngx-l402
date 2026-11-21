@@ -6,6 +6,11 @@
 set -uo pipefail
 cd "$(dirname "$0")" || exit 1
 
+if [ ! -f .env ] || ! curl -s -o /dev/null http://localhost:8402/mcp; then
+    echo "The example isn't running. Start it with ./setup.sh first." >&2
+    exit 1
+fi
+
 # Undo what the checks change, even if they're interrupted: the Redis price
 # override and the second nginx used for auto-detect.
 cleanup() {

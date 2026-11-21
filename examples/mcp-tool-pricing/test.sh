@@ -159,8 +159,11 @@ amcp search "$SEARCH" -H "Authorization: L402 $mac"
 check "$status" 200 "after paying, the macaroon alone runs the tool"
 
 echo "The client's spending cap:"
-cap=$(docker compose run --rm -e MAX_SATS=20 client 2>&1 | grep -c "Not paying: summarize costs 50 sats")
-check "$cap" 1 "with MAX_SATS=20 the client refuses summarize (50 sats)"
+# Back to the configured prices: search 10 sats, summarize 50.
+redis del "$PRICE_KEY" >/dev/null
+capped=$(docker compose run --rm -e MAX_SATS=20 client 2>&1)
+check "$(grep -c "paying 10 sats" <<<"$capped")" 1 "with MAX_SATS=20 the client still pays for search (10 sats)"
+check "$(grep -c "Not paying: summarize costs 50 sats" <<<"$capped")" 1 "but refuses summarize (50 sats)"
 
 echo
 if [ "$failures" -ne 0 ]; then

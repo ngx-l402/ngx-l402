@@ -106,7 +106,7 @@ port 8001 inside the gateway container for the auto-detect checks.
 | [`client.py`](client.py) | The SDK's own client plus a short `httpx2.Auth` hook that pays a `402` and retries with the token. |
 | [`docker-compose.yml`](docker-compose.yml) | Bitcoin (regtest), two LND nodes, Redis, the MCP server, the gateway and the client. |
 | [`setup.sh`](setup.sh) | Starts the stack, funds the wallet, opens the channel. |
-| [`test.sh`](test.sh) | 19 end-to-end checks: prices, paying, reuse, one tool per token, headers that lie about the body, auto-detect payment, and the client's spending cap. |
+| [`test.sh`](test.sh) | 20 end-to-end checks: prices, paying, reuse, one tool per token, headers that lie about the body, auto-detect payment, and the client's spending cap. |
 
 ## What happens on a tool call
 

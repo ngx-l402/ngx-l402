@@ -1,0 +1,142 @@
+# ngx-l402 pricing each tool of an MCP server, on a throwaway regtest
+# Lightning network:
+#
+#   client ──► gateway (nginx + ngx-l402) ──► mcp-server (MCP Python SDK)
+#     │             │
+#   lnd-wallet ══ lnd-gateway        (a channel; the client pays through it)
+#
+# `./setup.sh` funds the nodes and opens the channel; `./test.sh` runs the
+# checks. See README.md.
+name: ngx-l402-mcp-example
+
+x-lnd: &lnd
+  image: lightninglabs/lnd:v0.20.0-beta
+  depends_on: [bitcoind]
+  restart: unless-stopped
+  # Healthy once the node answers RPC, not just once its files exist: the
+  # files outlive a restart in the volume.
+  healthcheck:
+    test: ["CMD", "lncli", "-n", "regtest", "getinfo"]
+    interval: 2s
+    retries: 60
+
+services:
+  bitcoind:
+    image: lncm/bitcoind:v25.0
+    user: root
+    restart: unless-stopped
+    command: >-
+      -regtest -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0
+      -rpcuser=user -rpcpassword=pass -fallbackfee=0.0001 -txindex=1
+      -zmqpubrawblock=tcp://0.0.0.0:28332 -zmqpubrawtx=tcp://0.0.0.0:28333
+    # Kept across `down`/`up`, or the nodes' channel would point at a chain
+    # that no longer exists.
+    volumes: [bitcoind:/root/.bitcoin]
+
+  # The gateway's node: invoices are issued here and paid to it.
+  lnd-gateway:
+    <<: *lnd
+    command:
+      - --noseedbackup
+      - --nobootstrap
+      - --bitcoin.active
+      - --bitcoin.regtest
+      - --bitcoin.node=bitcoind
+      - --bitcoind.rpchost=bitcoind
+      - --bitcoind.rpcuser=user
+      - --bitcoind.rpcpass=pass
+      - --bitcoind.zmqpubrawblock=tcp://bitcoind:28332
+      - --bitcoind.zmqpubrawtx=tcp://bitcoind:28333
+      - --listen=0.0.0.0:9735
+      - --rpclisten=0.0.0.0:10009
+      - --restlisten=0.0.0.0:8080
+      - --alias=gateway
+      - --tlsextradomain=lnd-gateway
+      # LND keeps its data directory private (0700); write the invoice
+      # macaroon beside tls.cert so the gateway's nginx workers can read it.
+      - --invoicemacaroonpath=/root/.lnd/invoice.macaroon
+    volumes: [lnd-gateway:/root/.lnd]
+
+  # The client's wallet: it pays the gateway's invoices.
+  lnd-wallet:
+    <<: *lnd
+    command:
+      - --noseedbackup
+      - --nobootstrap
+      - --bitcoin.active
+      - --bitcoin.regtest
+      - --bitcoin.node=bitcoind
+      - --bitcoind.rpchost=bitcoind
+      - --bitcoind.rpcuser=user
+      - --bitcoind.rpcpass=pass
+      - --bitcoind.zmqpubrawblock=tcp://bitcoind:28332
+      - --bitcoind.zmqpubrawtx=tcp://bitcoind:28333
+      - --listen=0.0.0.0:9735
+      - --rpclisten=0.0.0.0:10009
+      - --restlisten=0.0.0.0:8080
+      - --alias=wallet
+      - --tlsextradomain=lnd-wallet
+    volumes: [lnd-wallet:/root/.lnd]
+
+  # The gateway records every spent token here, which is what makes a token
+  # single-use. It must survive a restart, and must never evict those records
+  # to make room, or a spent token works again.
+  redis:
+    image: redis:7.2
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory-policy noeviction
+    volumes: [redis:/data]
+
+  mcp-server:
+    build: .
+    restart: unless-stopped
+    command: ["python", "server.py"]
+
+  gateway:
+    # Builds the module from this checkout of ngx-l402, so a copy of this
+    # folder alone needs `context` pointed at a checkout. Once a release with
+    # `l402_mcp` is out, `image: ghcr.io/ngx-l402/ngx-l402:latest` without
+    # `build` works the same.
+    build:
+      context: ../..
+    image: ngx-l402:mcp-example
+    restart: unless-stopped
+    depends_on:
+      lnd-gateway: { condition: service_healthy }
+      mcp-server: { condition: service_started }
+      redis: { condition: service_started }
+    environment:
+      - LN_CLIENT_TYPE=LND
+      - LND_ADDRESS=lnd-gateway:10009
+      # Invoice-only: the gateway issues and looks up invoices, it never spends.
+      - MACAROON_FILE_PATH=/lnd/invoice.macaroon
+      - CERT_FILE_PATH=/lnd/tls.cert
+      # Anyone who knows this key can mint tokens that pass, so it isn't in
+      # the repo: setup.sh writes a random one to .env (gitignored).
+      - ROOT_KEY=${ROOT_KEY:?run ./setup.sh first, it writes ROOT_KEY to .env}
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - lnd-gateway:/lnd:ro
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      # Local only: the example's gateway isn't meant to be reachable from
+      # the network.
+      - "127.0.0.1:8402:8000"
+
+  # `docker compose run --rm client`: an MCP SDK client that pays per call.
+  client:
+    build: .
+    command: ["python", "client.py"]
+    profiles: [client]
+    environment:
+      - MCP_URL=http://gateway:8000/mcp
+      - LND_REST_URL=https://lnd-wallet:8080
+      - LND_DIR=/lnd
+    volumes:
+      - lnd-wallet:/lnd:ro
+
+volumes:
+  bitcoind:
+  redis:
+  lnd-gateway:
+  lnd-wallet:

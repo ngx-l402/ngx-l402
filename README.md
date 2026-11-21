@@ -1,5 +1,7 @@
 # ngx_l402 — L402 Nginx Module
 
+[![Join us on Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/QYwcj2wuQ)
+
 An [L402](https://docs.lightning.engineering/the-lightning-network/l402) authentication module for Nginx that enables Lightning Network-based monetization for your REST APIs (HTTP/1 and HTTP/2).
 
 Supports **LND**, **LNC**, **CLN**, **Eclair**, **LNURL**, **NWC**, and **BOLT12** backends.
@@ -64,9 +66,18 @@ curl -i http://localhost:8000/protected  # 402 Payment Required
 
 ---
 
-## Community
+## 💬 Community
 
-Questions, ideas, or want to follow along? Join the ngx_l402 community on [Discord](https://discord.gg/QYwcj2wuQ).
+Building something paid with Lightning, or thinking about it? Come hang out with the people building ngx_l402 and the folks running it in front of their APIs and MCP servers.
+
+- **Get unstuck fast.** Ask about setup, your Lightning backend, or an nginx config that won't behave.
+- **Shape what comes next.** New features like MCP tool pricing get discussed there first, so your use case can steer them.
+- **Show what you built.** Share your paid API, your pricing ideas, or a demo.
+- **Find something to work on.** A good place to start if you want to contribute.
+
+<p>
+  <a href="https://discord.gg/QYwcj2wuQ"><img alt="Join ngx_l402 on Discord" src="https://img.shields.io/badge/Join%20us%20on%20Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
+</p>
 
 ## Contributing
 

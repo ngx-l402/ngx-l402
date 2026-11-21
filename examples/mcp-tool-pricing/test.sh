@@ -6,6 +6,14 @@
 set -uo pipefail
 cd "$(dirname "$0")" || exit 1
 
+# Undo what the checks change, even if they're interrupted: the Redis price
+# override and the second nginx used for auto-detect.
+cleanup() {
+    docker compose exec -T redis redis-cli del mcp-tool:/mcp:search >/dev/null 2>&1
+    docker compose exec -T gateway sh -c '[ -f /tmp/auto.pid ] && nginx -c /tmp/auto.conf -s quit' >/dev/null 2>&1
+}
+trap cleanup EXIT
+
 GW=http://localhost:8402/mcp
 V=2026-07-28
 failures=0
@@ -129,8 +137,6 @@ check "$(jq -r '.error.data.amount_msat' <<<"$out")" 30000 "which also quotes th
 pay "$inv" >/dev/null
 amcp search "$SEARCH" -H "Authorization: L402 $mac"
 check "$status" 200 "after paying, the macaroon alone runs the tool"
-docker compose exec -T redis redis-cli del mcp-tool:/mcp:search >/dev/null
-docker compose exec -T gateway nginx -c /tmp/auto.conf -s quit 2>/dev/null
 
 echo
 if [ "$failures" -ne 0 ]; then

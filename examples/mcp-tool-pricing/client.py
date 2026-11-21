@@ -17,11 +17,18 @@ import sys
 import httpx2
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
-from mcp.shared._httpx_utils import create_mcp_http_client
 
-MCP_URL = os.environ.get("MCP_URL", "http://localhost:8402/mcp")
-LND_REST_URL = os.environ.get("LND_REST_URL", "https://localhost:8080")
-LND_DIR = os.environ.get("LND_DIR", os.path.expanduser("~/.lnd"))
+def env(name: str) -> str:
+    """docker-compose.yml sets these; outside compose, point them at your own."""
+    value = os.environ.get(name)
+    if not value:
+        sys.exit(f"{name} is not set; run with `docker compose run --rm client`")
+    return value
+
+
+# The most the client pays for one call. A server can put any amount in its
+# invoice, so anything above this is refused instead of paid.
+MAX_SATS = int(os.environ.get("MAX_SATS", "100"))
 
 
 class LndWallet:
@@ -51,10 +58,12 @@ class LndWallet:
         return base64.b64decode(body["payment_preimage"]).hex()
 
 
+class PaymentRefused(Exception):
+    """The server asked for more than MAX_SATS."""
+
+
 class L402Auth(httpx2.Auth):
     """On a 402, pay the invoice and send the request again with the token."""
-
-    requires_response_body = True
 
     def __init__(self, wallet: LndWallet) -> None:
         self.wallet = wallet
@@ -70,6 +79,8 @@ class L402Auth(httpx2.Auth):
             return
         tool = request.headers.get("mcp-name", "?")
         sats = await self.wallet.amount_sat(invoice.group(1))
+        if sats > MAX_SATS:
+            raise PaymentRefused(f"{tool} costs {sats} sats, more than MAX_SATS={MAX_SATS}")
         print(f"  402 for {tool}: paying {sats} sats")
         preimage = await self.wallet.pay(invoice.group(1))
         self.wallet.spent_sat += sats
@@ -78,10 +89,12 @@ class L402Auth(httpx2.Auth):
 
 
 async def main() -> int:
-    wallet = LndWallet(LND_REST_URL, LND_DIR)
-    http = create_mcp_http_client(auth=L402Auth(wallet))
-    async with Client(streamable_http_client(MCP_URL, http_client=http)) as client:
-        print(f"Connected to {MCP_URL} (protocol {client.protocol_version})")
+    mcp_url = env("MCP_URL")
+    wallet = LndWallet(env("LND_REST_URL"), env("LND_DIR"))
+    # The SDK's own timeouts: a tool's response stream may stay open a while.
+    http = httpx2.AsyncClient(auth=L402Auth(wallet), timeout=httpx2.Timeout(30, read=300))
+    async with Client(streamable_http_client(mcp_url, http_client=http)) as client:
+        print(f"Connected to {mcp_url} (protocol {client.protocol_version})")
 
         tools = await client.list_tools()
         print("Tools (listing is free):", ", ".join(t.name for t in tools.tools))
@@ -102,4 +115,7 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    try:
+        sys.exit(asyncio.run(main()))
+    except* PaymentRefused as group:
+        sys.exit(f"Not paying: {group.exceptions[0]}")

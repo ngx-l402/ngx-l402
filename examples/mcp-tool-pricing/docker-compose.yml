@@ -26,6 +26,9 @@ services:
       -regtest -rpcbind=0.0.0.0 -rpcallowip=0.0.0.0/0
       -rpcuser=user -rpcpassword=pass -fallbackfee=0.0001 -txindex=1
       -zmqpubrawblock=tcp://0.0.0.0:28332 -zmqpubrawtx=tcp://0.0.0.0:28333
+    # Kept across `down`/`up`, or the nodes' channel would point at a chain
+    # that no longer exists.
+    volumes: [bitcoind:/root/.bitcoin]
 
   # The gateway's node: invoices are issued here and paid to it.
   lnd-gateway:
@@ -95,14 +98,17 @@ services:
       # Invoice-only: the gateway issues and looks up invoices, it never spends.
       - MACAROON_FILE_PATH=/lnd/invoice.macaroon
       - CERT_FILE_PATH=/lnd/tls.cert
-      # Demo value. Generate your own (`openssl rand -hex 16`) for anything real.
-      - ROOT_KEY=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4
+      # Anyone who knows this key can mint tokens that pass, so it isn't in
+      # the repo: setup.sh writes a random one to .env (gitignored).
+      - ROOT_KEY=${ROOT_KEY:?run ./setup.sh first, it writes ROOT_KEY to .env}
       - REDIS_URL=redis://redis:6379
     volumes:
       - lnd-gateway:/lnd:ro
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
     ports:
-      - "8402:8000"
+      # Local only: the example's gateway isn't meant to be reachable from
+      # the network.
+      - "127.0.0.1:8402:8000"
 
   # `docker compose run --rm client`: an MCP SDK client that pays per call.
   client:
@@ -117,5 +123,6 @@ services:
       - lnd-wallet:/lnd:ro
 
 volumes:
+  bitcoind:
   lnd-gateway:
   lnd-wallet:

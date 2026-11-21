@@ -35,8 +35,8 @@ lnd-wallet ══ lnd-gateway
 
 ## Run it
 
-Needs Docker, `curl` and `jq`. The first run builds the module from this
-checkout, which takes a few minutes.
+Needs Docker, `curl`, `jq` and `openssl`. The first run builds the module from
+this checkout, which takes a few minutes.
 
 ```bash
 cd examples/mcp-tool-pricing
@@ -62,7 +62,21 @@ Then run the checks:
 ./test.sh
 ```
 
+`setup.sh` is safe to re-run, also after `docker compose down` and `up`: it
+reconnects the nodes and reuses the channel.
+
 Clean up with `docker compose down -v`.
+
+A few things the example does that a copy of it should keep:
+
+- **Its own `ROOT_KEY`.** The gateway signs tokens with it, and anyone who knows
+  it can mint tokens that pass. `setup.sh` writes a random one to `.env`
+  (gitignored), and compose won't start the gateway without it.
+- **Local only.** The gateway is published on `127.0.0.1:8402`, not on every
+  interface.
+- **A spending cap.** `client.py` refuses an invoice above `MAX_SATS` (default
+  100) instead of paying whatever the server asks for. Set it with
+  `docker compose run --rm -e MAX_SATS=20 client`.
 
 ## What happens on a tool call
 
@@ -101,7 +115,9 @@ docker compose exec redis redis-cli set mcp-tool:/mcp:search 20000   # 20 sats
   (LND, CLN, LNURL, NWC, ...); see the [configuration docs](../../docs/config-env-vars.md).
   An invoice-only macaroon is enough for LND.
 - **Client:** `client.py`'s `L402Auth` works with any MCP SDK client built on
-  `httpx2`; swap `LndWallet` for your own wallet.
+  `httpx2`; swap `LndWallet` for your own wallet. Outside compose, set
+  `MCP_URL`, `LND_REST_URL` and `LND_DIR` yourself; the example's LND REST
+  port isn't published to the host.
 
 More on the directives, the trust model and the limits in
 [docs/mcp.md](../../docs/mcp.md).

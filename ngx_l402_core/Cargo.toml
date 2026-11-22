@@ -26,5 +26,5 @@ libc = "0.2.189"
 # Proof-to-tenant mapping keys hash the proof secret.
 sha2 = "0.10"
 # `Mcp-Name` values outside header-safe text arrive base64-encoded.
-base64 = "0.22.1"
+base64 = "0.23.1"
 hex = "0.4"

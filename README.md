@@ -68,10 +68,22 @@ curl -i http://localhost:8000/protected  # 402 Payment Required
 
 ## 🌍 Used in production
 
-| Site | What it is | ngx_l402 in use |
-|---|---|---|
-| [sqzit.in](https://sqzit.in) | Short links you own: signed with your Nostr key and paid in sats | L402 paywall, Lightning Address (LNURL) backend |
-| [satboard.bar](https://satboard.bar) | A public billboard with one message; anyone, person or AI agent, can take it over by paying | L402 with auto-detect (pay the QR from any wallet, over NWC), per-tool MCP pricing (`l402_mcp`), prices set live from Redis |
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="https://satboard.bar"><img src="https://satboard.bar/og/1.png" alt="satboard.bar: a billboard you take over by paying sats"></a>
+      <p><b><a href="https://satboard.bar">satboard.bar</a></b><br>
+      One public message. Anyone, person or AI agent, takes it over by paying sats, and every takeover raises the price.</p>
+      <p><sub><b>Uses</b> · L402 with auto-detect over NWC · per-tool MCP pricing (<code>l402_mcp</code>) · prices set live from Redis</sub></p>
+    </td>
+    <td width="50%" valign="top">
+      <a href="https://sqzit.in"><img src="https://sqzit.in/assets/og.png" alt="sqzit.in: short links you own"></a>
+      <p><b><a href="https://sqzit.in">sqzit.in</a></b><br>
+      Short links you own: signed with your Nostr key and paid in sats.</p>
+      <p><sub><b>Uses</b> · L402 paywall · Lightning Address (LNURL) backend</sub></p>
+    </td>
+  </tr>
+</table>
 
 Running ngx_l402 in production? Open a PR to add your site.
 

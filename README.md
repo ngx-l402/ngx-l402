@@ -66,6 +66,15 @@ curl -i http://localhost:8000/protected  # 402 Payment Required
 
 ---
 
+## 🌍 Used in production
+
+| Site | What it is | ngx_l402 in use |
+|---|---|---|
+| [sqzit.in](https://sqzit.in) | Short links you own: signed with your Nostr key and paid in sats | L402 paywall, Lightning Address (LNURL) backend |
+| [satboard.bar](https://satboard.bar) | A public billboard with one message; anyone, person or AI agent, can take it over by paying | L402 with auto-detect (pay the QR from any wallet, over NWC), per-tool MCP pricing (`l402_mcp`), prices set live from Redis |
+
+Running ngx_l402 in production? Open a PR to add your site.
+
 ## 💬 Community
 
 Building something paid with Lightning, or thinking about it? Come hang out with the people building ngx_l402 and the folks running it in front of their APIs and MCP servers.

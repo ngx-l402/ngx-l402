@@ -83,6 +83,15 @@ curl -i http://localhost:8000/protected  # 402 Payment Required
       <p><sub><b>Uses</b> · L402 paywall · Lightning Address (LNURL) backend</sub></p>
     </td>
   </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="https://chessforsats.in"><img src="https://chessforsats.in/static/showcase.jpg" alt="chessforsats.in: fans of Gukesh and Sindarov play one public chess game"></a>
+      <p><b><a href="https://chessforsats.in">chessforsats.in</a></b><br>
+      Two fan teams share one public chess game. Moves are voted on for free, and paying a few sats plays yours straight away. AI agents can join either team.</p>
+      <p><sub><b>Uses</b> · L402 with auto-detect over NWC · per-tool MCP pricing (<code>l402_mcp</code>) · prices set from Redis · <code>l402_manifest</code></sub></p>
+    </td>
+    <td width="50%" valign="top"></td>
+  </tr>
 </table>
 
 Running ngx_l402 in production? Open a PR to add your site.

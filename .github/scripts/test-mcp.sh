@@ -124,6 +124,18 @@ postb() {
         awk '{status=$NF; $NF=""; print status, $0}'
 }
 
+# post_status <path> <body> <header>... — prints the status alone, for a
+# response whose body isn't one line of JSON (a rejected token gets nginx's
+# HTML error page).
+post_status() {
+    local path=$1 data=$2
+    shift 2
+    local args=()
+    for h in "$@"; do args+=(-H "$h"); done
+    curl_in -X POST -H 'Content-Type: application/json' ${args[@]+"${args[@]}"} \
+        --data-binary "$data" -o /dev/null -w '%{http_code}' "http://127.0.0.1:8002$path"
+}
+
 # call <tool> — the body of a `tools/call` for it.
 call() { printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"%s","arguments":{}}}' "$1"; }
 
@@ -162,24 +174,24 @@ if [ -n "$payer" ]; then
     read -r status body < <(postb /mcp "$(call search)" "${H[@]}" 'Mcp-Name: search')
     check "$status" 402 "an unpaid call is challenged"
     token="L402 $(jq -r '.error.data.macaroon' <<<"$body"):$(pay "$(jq -r '.error.data.invoice' <<<"$body")")"
-    read -r status _ < <(postb /mcp "$(call summarize)" "${H[@]}" 'Mcp-Name: summarize' "Authorization: $token")
+    status=$(post_status /mcp "$(call summarize)" "${H[@]}" 'Mcp-Name: summarize' "Authorization: $token")
     check "$status" 401 "the token does not open another tool"
     read -r status body < <(postb /mcp "$(call search)" "${H[@]}" 'Mcp-Name: search' "Authorization: $token")
     check "$status $(jq 'has("result")' <<<"$body")" "200 true" "the paid call reaches the upstream"
-    read -r status _ < <(postb /mcp "$(call search)" "${H[@]}" 'Mcp-Name: search' "Authorization: $token")
+    status=$(post_status /mcp "$(call search)" "${H[@]}" 'Mcp-Name: search' "Authorization: $token")
     check "$status" 401 "the token works once"
 
     echo "Paid calls, older client:"
     read -r status body < <(postb /mcp-legacy "$(call search)" "$O")
     check "$status $(jq -r '.error.code' <<<"$body")" "200 402" "an unpaid call is challenged"
     token="L402 $(jq -r '.error.data.macaroon' <<<"$body"):$(pay "$(jq -r '.error.data.invoice' <<<"$body")")"
-    read -r status _ < <(postb /mcp-legacy "$(call summarize)" "$O" "Authorization: $token")
+    status=$(post_status /mcp-legacy "$(call summarize)" "$O" "Authorization: $token")
     check "$status" 401 "the token does not open another tool"
     read -r status body < <(postb /mcp-legacy "$(call search)" "$O" "Authorization: $token")
     check "$status $(jq 'has("result")' <<<"$body")" "200 true" "the paid call reaches the upstream"
     check "$(docker exec "$container" tail -n 1 /tmp/mcp-upstream.log)" "$(call search)" \
         "with its body unchanged"
-    read -r status _ < <(postb /mcp-legacy "$(call search)" "$O" "Authorization: $token")
+    status=$(post_status /mcp-legacy "$(call search)" "$O" "Authorization: $token")
     check "$status" 401 "the token works once"
 
     if [ "$failures" -ne 0 ]; then

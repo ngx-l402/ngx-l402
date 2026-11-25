@@ -2109,7 +2109,11 @@ jobs:
       - name: Run Integration Tests - MCP paid calls
         # The MCP checks above never pay: the LNURL backend issues invoices
         # nothing in CI can settle. Here lndnode pays nginx-lnd's invoices.
-        run: bash .github/scripts/test-mcp.sh nginx-lnd lndnode
+        run: |
+          # The Cashu cases above recreate nginx-lnd, which puts /root back to
+          # 700 and hides the LND cert and macaroon from the nginx workers.
+          docker exec nginx-lnd chmod 755 /root
+          bash .github/scripts/test-mcp.sh nginx-lnd lndnode
 
       - name: Run Integration test - Cashu P2PK mode
         env:

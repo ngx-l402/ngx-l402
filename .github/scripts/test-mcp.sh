@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Checks `l402_mcp`: discovery passes free, each tool is priced on its own,
+# a tool listed `free` passes unpaid,
 # the token names its tool, and requests whose headers can't be trusted are
 # refused. Run against a started nginx container whose image has the module;
 # a second nginx is served from it on port 8002, proxying to a stub on 8003.
@@ -29,6 +30,7 @@ http {
             l402_mcp_upstream_validates on;
             l402_amount_msat_default 1000;
             l402_mcp_tool summarize 5000;
+            l402_mcp_tool ping free;
             proxy_pass http://127.0.0.1:8003;
         }
         location /mcp-resources {
@@ -37,6 +39,7 @@ http {
             l402_mcp_upstream_validates on;
             l402_mcp_charge tools/call resources/read;
             l402_amount_msat_default 1000;
+            l402_mcp_tool file:///free free;
             proxy_pass http://127.0.0.1:8003;
         }
     }
@@ -94,6 +97,26 @@ read -r status body < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: summa
 check "$(jq -r '.error.data.amount_msat' <<<"$body")" 5000 "l402_mcp_tool sets a tool's price"
 read -r status body < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: =?base64?c3VtbWFyaXpl?=')
 check "$(jq -r '.error.data.amount_msat' <<<"$body")" 5000 "an encoded name is decoded before pricing"
+
+echo "Free tools:"
+read -r status _ < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: ping')
+check "$status" 200 "a tool listed free passes unpaid"
+read -r status _ < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: =?base64?cGluZw==?=')
+check "$status" 200 "an encoded name is decoded before the free check"
+read -r status _ < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: pings')
+check "$status" 402 "a tool that only resembles a free one is charged"
+read -r status _ < <(post /mcp-resources "$V" 'Mcp-Method: resources/read' 'Mcp-Name: file:///free')
+check "$status" 200 "a free name passes under another charged method"
+read -r status _ < <(post /mcp 'MCP-Protocol-Version: 2025-11-25' 'Mcp-Method: tools/call' 'Mcp-Name: ping')
+check "$status" 400 "a free tool is still refused on an older protocol version"
+docker exec redis redis-cli set mcp-tool:/mcp:ping 2500 >/dev/null
+read -r status _ < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: ping')
+check "$status" 200 "a Redis price does not charge for a free tool"
+docker exec redis redis-cli del mcp-tool:/mcp:ping >/dev/null
+docker exec redis redis-cli set mcp-tool:/mcp:search 0 >/dev/null
+read -r status body < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: search')
+check "$status $(jq -r '.error.data.amount_msat' <<<"$body")" "402 1000" "a Redis price of 0 does not make a tool free"
+docker exec redis redis-cli del mcp-tool:/mcp:search >/dev/null
 
 echo "Token binding:"
 read -r _ body < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: search')
@@ -166,6 +189,8 @@ expect_bad_conf "l402 on; l402_mcp on; $U l402_mcp_charge tools/list;" "an unpri
 expect_bad_conf "l402 on; l402_mcp on; $U l402_mcp_charge completion/complete;" "a method without Mcp-Name can't be charged"
 expect_bad_conf "l402 on; l402_mcp on; $U l402_mcp_tool a 10; l402_mcp_tool a 20;" "a tool priced twice is rejected"
 expect_bad_conf "l402 on; l402_mcp on; $U l402_mcp_tool a 0;" "a non-positive tool price is rejected"
+expect_bad_conf "l402 on; l402_mcp on; $U l402_mcp_tool a FREE;" "a tool price that is neither an amount nor free is rejected"
+expect_bad_conf "l402 on; l402_mcp on; $U l402_mcp_tool a free; l402_mcp_tool a 10;" "a tool both free and priced is rejected"
 
 if [ "$failures" -ne 0 ]; then
     echo "$failures MCP check(s) failed"

@@ -23,7 +23,7 @@ use ngx::http::{
     Merge, MergeConfigError, NgxHttpCoreModule, Request,
 };
 use ngx::{ngx_log_error, ngx_string};
-use ngx_l402_core::{McpDecision, McpHeaders};
+use ngx_l402_core::{McpDecision, McpHeaders, McpToolPrice};
 use r2d2::Pool;
 use redis::Client as RedisClient;
 use redis::Commands;
@@ -1480,7 +1480,7 @@ pub struct ModuleConfig {
     mcp: Option<bool>,
     // `l402_mcp_tool <name> <msat>;` lines. A tool without a line costs the
     // location's default price, so a new tool is never free by accident.
-    mcp_tools: Vec<(String, i64)>,
+    mcp_tools: Vec<(String, McpToolPrice)>,
     // `l402_mcp_charge` methods. Empty means unset: `tools/call` only.
     mcp_charge: Vec<String>,
     // `l402_mcp_upstream_validates on;`: the operator's word that the upstream
@@ -2105,6 +2105,7 @@ thread_local! {
 unsafe fn classify_mcp(
     request: *mut ngx_http_request_t,
     charge: &[String],
+    tools: &[(String, McpToolPrice)],
     upstream_validates: bool,
 ) -> McpDecision {
     let req = unsafe { Request::from_ngx_http_request(request) };
@@ -2130,7 +2131,7 @@ unsafe fn classify_mcp(
         name: name.iter().map(String::as_str).collect(),
         protocol_version: version.iter().map(String::as_str).collect(),
     };
-    ngx_l402_core::classify_mcp_request(&headers, charge, upstream_validates)
+    ngx_l402_core::classify_mcp_request(&headers, charge, tools, upstream_validates)
 }
 
 /// The 402 body for an MCP tool call: a JSON-RPC error whose `data` carries
@@ -2350,13 +2351,16 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
     }
 
     // An MCP endpoint takes every call as `POST` to one URL, so the tool comes
-    // from the mirrored `Mcp-Name` header. Discovery passes free; a request the
-    // headers can't vouch for is refused rather than priced.
+    // from the mirrored `Mcp-Name` header. Discovery and tools listed `free`
+    // pass; a request the headers can't vouch for is refused rather than priced.
     let mut mcp_method: Option<String> = None;
-    let mcp_tool: Option<String> = match &mcp_charge {
+    // SAFETY: `request` is the valid pointer nginx passed to this handler.
+    let mcp_decision = mcp_charge
+        .as_ref()
+        .map(|charge| unsafe { classify_mcp(request, charge, &mcp_tools, mcp_upstream_validates) });
+    let mcp_tool: Option<String> = match mcp_decision {
         None => None,
-        // SAFETY: `request` is the valid pointer nginx passed to this handler.
-        Some(charge) => match unsafe { classify_mcp(request, charge, mcp_upstream_validates) } {
+        Some(decision) => match decision {
             McpDecision::Free => return NGX_DECLINED as isize,
             McpDecision::Charged { method, name } => {
                 mcp_method = Some(method);
@@ -2395,11 +2399,15 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
             }
         },
     };
-    // The tool's own `l402_mcp_tool` price, when it has one.
+    // The tool's own `l402_mcp_tool` price, when it has one. A `free` tool
+    // never gets here: the classifier passed it above.
     let mcp_static_price = mcp_tool
         .as_ref()
         .and_then(|name| mcp_tools.iter().find(|(n, _)| n == name))
-        .map(|(_, price)| *price);
+        .and_then(|(_, price)| match price {
+            McpToolPrice::Msat(msat) => Some(*msat),
+            McpToolPrice::Free => None,
+        });
 
     // Bind the macaroon to the exact request URI and HTTP method so a
     // token paid for `GET /v1/data` can't be replayed against `POST /v1/data`.
@@ -4754,8 +4762,9 @@ pub unsafe extern "C" fn ngx_http_l402_mcp_upstream_validates_set(
     std::ptr::null_mut()
 }
 
-/// `l402_mcp_tool <name> <msat>;` — the price of one MCP tool. The name is
-/// compared exactly with the decoded `Mcp-Name` header.
+/// `l402_mcp_tool <name> <msat>|free;` — the price of one MCP tool, or `free`
+/// to let its calls pass unpaid. The name is compared exactly with the decoded
+/// `Mcp-Name` header.
 ///
 /// # Safety
 /// `cf` and `conf` are the valid, non-null pointers Nginx passes to
@@ -4780,13 +4789,18 @@ pub unsafe extern "C" fn ngx_http_l402_mcp_tool_set(
         if conf.mcp_tools.iter().any(|(n, _)| n == name) {
             return conf_error(cf, &format!("l402_mcp_tool: \"{name}\" is priced twice"));
         }
-        let Some(price) = price.parse::<i64>().ok().filter(|p| *p > 0) else {
+        let Some(price) = McpToolPrice::parse(price) else {
             return conf_error(
                 cf,
-                &format!("l402_mcp_tool: price for \"{name}\" must be a positive msat amount"),
+                &format!(
+                    "l402_mcp_tool: price for \"{name}\" must be a positive msat amount or \"free\""
+                ),
             );
         };
-        info!("⚙️ l402_mcp_tool {} = {} msat", name, price);
+        match price {
+            McpToolPrice::Free => info!("⚙️ l402_mcp_tool {} is free", name),
+            McpToolPrice::Msat(msat) => info!("⚙️ l402_mcp_tool {} = {} msat", name, msat),
+        }
         conf.mcp_tools.push((name.to_string(), price));
     }
     std::ptr::null_mut()

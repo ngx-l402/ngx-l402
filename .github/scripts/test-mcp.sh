@@ -20,7 +20,10 @@ failures=0
 
 # The stub answers in the rewrite phase, but it sits behind proxy_pass, so the
 # paywalled location still runs its access phase first.
-conf='pid /tmp/mcp.pid;
+# `user nginx` as in the image's own config: the workers of an instance started
+# without it run as `nobody`, which can't read the LND cert and macaroon.
+conf='user nginx;
+pid /tmp/mcp.pid;
 error_log /tmp/mcp.log notice;
 load_module /etc/nginx/modules/libngx_l402_lib.so;
 events {}

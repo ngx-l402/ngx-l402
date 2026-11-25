@@ -1,9 +1,21 @@
 version: 2
+# Version updates are off (open-pull-requests-limit: 0 on every job below):
+# the weekly bump PRs piled up faster than they were worked, mostly red
+# against the audit gate. Security updates are unaffected by this setting —
+# they run from the repository's security settings — so advisories still
+# open PRs when a fix exists. Two caveats: the groups below only ever
+# applied to version updates, so a security bump to one cdk or tonic/prost
+# family member arrives alone and may not build (the lockstep pins are the
+# reason the groups exist) — finish those by hand, with the weekly audit
+# cron as the loud backstop. And Docker has no security-update equivalent,
+# so base-image bumps pause entirely while this is off. Delete the limit
+# lines (or set them back to 5) to re-enable version updates.
 updates:
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 0
     commit-message:
       prefix: "chore(deps)"
     cooldown:
@@ -21,6 +33,7 @@ updates:
     directory: /grpc-server
     schedule:
       interval: weekly
+    open-pull-requests-limit: 0
     commit-message:
       prefix: "chore(deps)"
     cooldown:
@@ -39,6 +52,7 @@ updates:
     directory: /stress-test
     schedule:
       interval: weekly
+    open-pull-requests-limit: 0
     commit-message:
       prefix: "chore(deps)"
     cooldown:
@@ -48,6 +62,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 0
     commit-message:
       prefix: "ci"
     cooldown:
@@ -68,6 +83,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 0
     commit-message:
       prefix: "chore(deps)"
     cooldown:
@@ -78,6 +94,7 @@ updates:
     directory: /grpc-server
     schedule:
       interval: weekly
+    open-pull-requests-limit: 0
     commit-message:
       prefix: "chore(deps)"
     cooldown:

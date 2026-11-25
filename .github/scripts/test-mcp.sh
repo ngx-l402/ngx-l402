@@ -42,6 +42,12 @@ http {
             l402_mcp_tool file:///free free;
             proxy_pass http://127.0.0.1:8003;
         }
+        location /plain {
+            l402 on;
+            l402_amount_msat_default 1000;
+            proxy_pass http://127.0.0.1:8003;
+        }
+        location = /manifest { l402_manifest; }
     }
 }'
 printf '%s\n' "$conf" | docker exec -i "$container" sh -c 'cat > /tmp/mcp.conf'
@@ -196,4 +202,24 @@ if [ "$failures" -ne 0 ]; then
     echo "$failures MCP check(s) failed"
     exit 1
 fi
+# expect_good_conf <directives> <case> — the control for the cases above: a
+# rejection only means something if the same location is accepted when valid.
+expect_good_conf() {
+    local good="load_module /etc/nginx/modules/libngx_l402_lib.so;
+events {}
+http { server { listen 8004; location /x { $1 } } }"
+    printf '%s\n' "$good" | docker exec -i "$container" sh -c 'cat > /tmp/mcp-good.conf'
+    if docker exec -e CASHU_ECASH_SUPPORT=false "$container" nginx -t -c /tmp/mcp-good.conf >/dev/null 2>&1; then
+        echo "  ✓ $2"
+    else
+        echo "  ✗ $2: nginx -t refused it"
+        failures=$((failures + 1))
+    fi
+}
 echo "✅ MCP checks passed"
+# The location default: a price nginx can't use used to be logged and dropped,
+# leaving the location to answer 500 or take its parent's price.
+expect_good_conf 'l402 on; l402_amount_msat_default 1000;' "a positive l402_amount_msat_default is accepted"
+expect_bad_conf 'l402 on; l402_amount_msat_default 0;' "l402_amount_msat_default 0 is rejected"
+expect_bad_conf 'l402 on; l402_amount_msat_default -5;' "a negative l402_amount_msat_default is rejected"
+expect_bad_conf 'l402 on; l402_amount_msat_default free;' "an l402_amount_msat_default that is not a number is rejected"

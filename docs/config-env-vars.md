@@ -287,7 +287,7 @@ These are set inside `location {}` blocks in `nginx.conf` (not environment varia
 | Directive | Type | Default | Description |
 |---|---|---|---|
 | `l402` | boolean¹ | `off` | Enable L402 protection for this location; nested locations inherit it, and `l402 off` in one of them leaves it free |
-| `l402_amount_msat_default` | integer | — | Price in millisatoshis (overridden by Redis dynamic pricing). Cashu payment requests carry a whole number of sats, so a sub-sat price is advertised rounded **up** while Lightning is charged exactly; the module warns at startup when the two diverge |
+| `l402_amount_msat_default` | integer | — | Price in millisatoshis (overridden by Redis dynamic pricing). Must be positive: `nginx -t` refuses `0`, a negative value or anything that isn't a number. Cashu payment requests carry a whole number of sats, so a sub-sat price is advertised rounded **up** while Lightning is charged exactly; the module warns at startup when the two diverge |
 | `l402_macaroon_timeout` | integer (seconds) | `0` (disabled) | Macaroon validity window; `0` = no expiry |
 | `l402_lnurl_addr` | string | — | Per-location LNURL address for multi-tenant setups |
 | `l402_tenant_ref` | tenant name | — | Pay this location's revenue to a tenant defined with `l402_tenant`; see [config-multi-tenant.md](config-multi-tenant.md#named-tenants) |

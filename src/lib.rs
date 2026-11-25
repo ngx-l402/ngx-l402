@@ -4417,16 +4417,16 @@ pub unsafe extern "C" fn ngx_http_l402_amount_set(
 
         let val = (*args.add(1)).to_str().unwrap_or_default();
 
-        match val.parse::<i64>() {
-            Ok(amount) if amount > 0 => {
-                conf.amount_msat = amount;
-                info!("⚙️ Set L402 amount_msat to {}", amount);
-            }
-            _ => {
-                error!("❌ Invalid amount_msat configuration value: {}", val);
-                return std::ptr::null_mut();
-            }
-        }
+        // Refused here rather than logged: a location left without a price
+        // answers every request with a 500, or silently takes its parent's.
+        let Some(amount) = val.parse::<i64>().ok().filter(|a| *a > 0) else {
+            return conf_error(
+                cf,
+                &format!("l402_amount_msat_default: \"{val}\" must be a positive msat amount"),
+            );
+        };
+        conf.amount_msat = amount;
+        info!("⚙️ Set L402 amount_msat to {}", amount);
     };
 
     std::ptr::null_mut()

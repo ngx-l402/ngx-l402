@@ -167,6 +167,9 @@ location /mcp {
 - **A nested location that has its own `l402_mcp_tool` lines** replaces the
   parent's list, free tools included.
 
+Free tools are listed in the [capability manifest](./manifest.md#mcp-routes)
+with `"price": {"type": "free"}`, next to the priced ones.
+
 A free tool raises the stakes of the [trust model](#trust-model--read-this-first):
 against an upstream that doesn't reject a header/body mismatch, naming a free
 tool in `Mcp-Name` runs any tool for nothing.

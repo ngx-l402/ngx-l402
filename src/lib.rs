@@ -1489,6 +1489,20 @@ pub struct ModuleConfig {
     mcp_upstream_validates: Option<bool>,
 }
 
+impl ModuleConfig {
+    /// `Some` only on an MCP location: the methods it charges, `tools/call`
+    /// when `l402_mcp_charge` is unset.
+    fn mcp_charged_methods(&self) -> Option<Vec<String>> {
+        self.mcp.unwrap_or(false).then(|| {
+            if self.mcp_charge.is_empty() {
+                vec!["tools/call".to_string()]
+            } else {
+                self.mcp_charge.clone()
+            }
+        })
+    }
+}
+
 /// The caveat key that binds an MCP token to the tool it was bought for.
 const MCP_TOOL_CAVEAT: &str = "McpTool";
 /// The caveat key that binds an MCP token to its MCP method, so a token for
@@ -2290,14 +2304,7 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         let indefinite_access = conf.indefinite_access.unwrap_or(false);
         let realm = conf.realm.clone();
         let log_format_json = conf.log_format_json.unwrap_or(false);
-        // `Some` only on an MCP location: the methods it charges.
-        let mcp_charge = conf.mcp.unwrap_or(false).then(|| {
-            if conf.mcp_charge.is_empty() {
-                vec!["tools/call".to_string()]
-            } else {
-                conf.mcp_charge.clone()
-            }
-        });
+        let mcp_charge = conf.mcp_charged_methods();
         let mcp_tools = conf.mcp_tools.clone();
         let mcp_upstream_validates = conf.mcp_upstream_validates.unwrap_or(false);
 
@@ -4222,6 +4229,12 @@ fn collect_route_snapshots() -> Vec<manifest::RouteSnapshot> {
                 realm: conf.realm.clone(),
                 rate_limit: conf.invoice_rate_limit,
                 auto_detect_payment: conf.auto_detect_payment.unwrap_or(false),
+                mcp: conf
+                    .mcp_charged_methods()
+                    .map(|charged_methods| manifest::McpSnapshot {
+                        charged_methods,
+                        tools: conf.mcp_tools.clone(),
+                    }),
                 hidden: conf.manifest_hidden,
             })
         })

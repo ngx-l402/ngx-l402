@@ -10,6 +10,7 @@
 //! [`RouteSnapshot`], and hands it here for rendering. Keeps this module
 //! free of nginx-FFI internals and trivially unit-testable.
 
+use ngx_l402_core::McpToolPrice;
 use serde_json::{json, Value};
 use std::env;
 use std::sync::OnceLock;
@@ -83,6 +84,15 @@ pub fn cashu_enabled() -> bool {
     env_snapshot().cashu_enabled
 }
 
+/// The MCP side of an `l402_mcp on;` route.
+#[derive(Clone, Debug)]
+pub struct McpSnapshot {
+    /// The MCP methods that cost money here (`l402_mcp_charge`).
+    pub charged_methods: Vec<String>,
+    /// The `l402_mcp_tool` lines, in config order.
+    pub tools: Vec<(String, McpToolPrice)>,
+}
+
 /// Snapshot of a single l402-protected location, taken at manifest-render
 /// time (after all `merge_loc_conf` passes have completed).
 #[derive(Clone, Debug)]
@@ -97,6 +107,8 @@ pub struct RouteSnapshot {
     /// `(max_requests, window_secs)` from `l402_invoice_rate_limit`.
     pub rate_limit: Option<(u32, u64)>,
     pub auto_detect_payment: bool,
+    /// Set on an `l402_mcp on;` route: what it charges for, tool by tool.
+    pub mcp: Option<McpSnapshot>,
     /// True when the operator marked this route with `l402_manifest_hide;` —
     /// exclude from the rendered manifest.
     pub hidden: bool,
@@ -191,10 +203,17 @@ fn route_block(r: &RouteSnapshot) -> Value {
         Some(realm) => format!("Realm = {}", realm),
         None => format!("RequestPath = {}", r.path),
     };
-    block.insert(
-        "caveats_required".to_string(),
-        json!([scope, "RequestMethod = <METHOD>"]),
-    );
+    let mut caveats = vec![scope, "RequestMethod = <METHOD>".to_string()];
+    if r.mcp.is_some() {
+        // A token for an MCP call also names what it was bought for.
+        caveats.push("McpTool = <NAME>".to_string());
+        caveats.push("McpMethod = <MCP_METHOD>".to_string());
+    }
+    block.insert("caveats_required".to_string(), json!(caveats));
+
+    if let Some(mcp) = &r.mcp {
+        block.insert("mcp".to_string(), mcp_block(mcp));
+    }
 
     if r.macaroon_timeout > 0 {
         block.insert(
@@ -224,4 +243,25 @@ fn route_block(r: &RouteSnapshot) -> Value {
     }
 
     Value::Object(block)
+}
+
+/// The `mcp` block of a route: which methods are charged and what each listed
+/// tool costs. A tool that isn't listed costs the route's `price`; one listed
+/// `free` is spelled as a price type, never as an amount of zero.
+fn mcp_block(mcp: &McpSnapshot) -> Value {
+    let tools: Vec<Value> = mcp
+        .tools
+        .iter()
+        .map(|(name, price)| {
+            let price = match price {
+                McpToolPrice::Free => json!({ "type": "free" }),
+                McpToolPrice::Msat(msat) => json!({ "type": "static", "amount_msat": msat }),
+            };
+            json!({ "name": name, "price": price })
+        })
+        .collect();
+    json!({
+        "charged_methods": mcp.charged_methods,
+        "tools": tools,
+    })
 }

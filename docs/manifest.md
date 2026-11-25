@@ -90,11 +90,48 @@ which payment backends are accepted — without any out-of-band integration.
 | `routes[].lnurl_addr` | `l402_lnurl_addr` | Per-route LNURL override for multi-tenant deployments. |
 | `routes[].rate_limit` | `l402_invoice_rate_limit` | Server-side invoice rate limit applied before challenge issuance. |
 | `routes[].auto_detect_payment` | `l402_auto_detect_payment` | When true, clients can omit the preimage and the server settles via node lookup. |
+| `routes[].mcp` | `l402_mcp on` | Present only on an [MCP route](./mcp.md); see below. |
+| `routes[].mcp.charged_methods` | `l402_mcp_charge` | The MCP methods that cost money. Every other method passes free. |
+| `routes[].mcp.tools[]` | `l402_mcp_tool` | Each listed tool: `name` and `price`. |
+| `routes[].mcp.tools[].price` | `l402_mcp_tool` | `{"type": "static", "amount_msat": N}`, or `{"type": "free"}` for a tool listed `free`. A free tool has no `amount_msat`. |
 
 Dynamic (Redis-backed) pricing is **not** reflected in `price.amount_msat` —
 the manifest emits the static default. Dynamic prices change per request
 and would require a Redis round-trip per route to render accurately;
 that's out of scope for v1.
+
+### MCP routes
+
+A route with `l402_mcp on;` carries an `mcp` block, and its
+`caveats_required` adds the two caveats an MCP token is bound to:
+
+```json
+{
+  "path": "/mcp",
+  "price": { "type": "static", "amount_msat": 1000 },
+  "caveats_required": [
+    "RequestPath = /mcp",
+    "RequestMethod = <METHOD>",
+    "McpTool = <NAME>",
+    "McpMethod = <MCP_METHOD>"
+  ],
+  "mcp": {
+    "charged_methods": ["tools/call"],
+    "tools": [
+      { "name": "summarize", "price": { "type": "static", "amount_msat": 5000 } },
+      { "name": "ping", "price": { "type": "free" } }
+    ]
+  }
+}
+```
+
+- `tools` holds only the tools with an `l402_mcp_tool` line. It is not the
+  server's tool list: ask the server with `tools/list`, which is free.
+- A tool that isn't listed costs the route's `price`.
+- A tool with `"type": "free"` passes without payment under every method in
+  `charged_methods`.
+- As with `price`, a tool's Redis price (`mcp-tool:<path>:<tool>`) is not
+  reflected.
 
 ---
 

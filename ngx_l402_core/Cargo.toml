@@ -19,7 +19,7 @@ bip39 = { version = "2.1.0", features = ["rand", "unicode-normalization"] }
 cdk = { version = "0.18.1", default-features = false, features = ["wallet"] }
 # The 402 payment page renders a QR of the invoice and embeds the invoice and
 # macaroon as JSON literals inside an inline <script>.
-qrcode-generator = "4"
+qrcode-generator = "6"
 serde_json = "1.0"
 # glibc's exit handlers, for `install_fast_exit`.
 libc = "0.2.189"

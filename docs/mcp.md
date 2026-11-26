@@ -61,7 +61,8 @@ So header-based pricing is only as strong as the upstream's validation:
   it. nginx refuses to start with `l402_mcp on` and no declaration.
 - The client's version is checked as well: the headers are trusted only when
   `MCP-Protocol-Version` is a real date, `2026-07-28` or later. Anything older is
-  refused (see below).
+  refused (see below), unless [`l402_mcp_legacy`](#older-clients) is on: then
+  it is read from the request body instead, which needs no such declaration.
 
 ---
 
@@ -79,6 +80,10 @@ So header-based pricing is only as strong as the upstream's validation:
 | `tools/call`, `resources/read` or `prompts/get` without `Mcp-Name` | `400` |
 | A duplicated `Mcp-Method`, `Mcp-Name` or `MCP-Protocol-Version` | `400` |
 | An `Mcp-Name` that is malformed, doesn't decode, or decodes to control characters | `400` |
+
+With `l402_mcp_legacy on;`, a request with no `MCP-Protocol-Version`, or one
+older than `2026-07-28`, is handled by its body instead of the rows above; see
+[Older clients](#older-clients).
 
 Every other `400` carries a JSON-RPC error with code `-32020`
 (`HeaderMismatch`). An unsupported version gets `-32022`
@@ -110,8 +115,9 @@ which is checked before the `405`.
 | `l402_mcp_tool <name> <msat>\|free;` | One tool's price, or `free` to let it pass unpaid. Repeat per tool; the name is compared exactly with the decoded `Mcp-Name`. |
 | `l402_mcp_charge <method>...;` | Methods that cost money. Default `tools/call`. Also accepts `resources/read` (priced by URI) and `prompts/get`, the other methods that carry an `Mcp-Name`. |
 | `l402_mcp_upstream_validates on\|off;` | Declares that the upstream rejects a request whose `Mcp-Method` / `Mcp-Name` disagree with its body. Required by `l402_mcp on`. |
+| `l402_mcp_legacy on\|off;` | Also serve clients on protocol versions before 2026-07-28, by reading the method and the tool from the request body. Default `off`. See [Older clients](#older-clients). |
 
-All four inherit into nested locations like the other `l402_*` directives.
+All five inherit into nested locations like the other `l402_*` directives.
 Everything else — Cashu, auto-detect, rate limits, dry run, tenants, realms,
 `l402_indefinite_access` — works on an MCP location as on any other.
 
@@ -205,12 +211,97 @@ outside the JSON-RPC server range (`-32768` to `-32000`), so the code is `402`.
 
 ---
 
+## Older clients
+
+Most MCP clients in use today speak a protocol version before 2026-07-28. They
+send no `Mcp-Method` or `Mcp-Name`, so on a plain `l402_mcp` location they are
+refused, discovery included. `l402_mcp_legacy on;` serves them too:
+
+```nginx
+location /mcp {
+    l402                        on;
+    l402_mcp                    on;
+    l402_mcp_upstream_validates on;
+    l402_mcp_legacy             on;
+    l402_amount_msat_default    21000;
+    l402_mcp_tool  lookup       free;
+    proxy_pass                  http://mcp-server;
+}
+```
+
+**Which requests.** One with no `MCP-Protocol-Version` header (the first
+`initialize` of a session has none), or with a version before `2026-07-28`. A
+2026-07-28 client on the same location is read from its headers as before.
+
+**How they are read.** nginx reads the request body, and the module takes the
+JSON-RPC `method` and `params.name` (`params.uri` for `resources/read`) from
+it. Prices, `free` tools, Redis and the token's `McpTool` / `McpMethod` caveats
+then work exactly as for a newer client. The body goes on to the upstream
+unchanged.
+
+| Request from an older client | Result |
+|---|---|
+| `GET` (the session's event stream) or `DELETE` (ending the session) | Passes through free |
+| A method not in `l402_mcp_charge` (`initialize`, `tools/list`, a notification) | Passes through free |
+| A response to the server (no `method`) | Passes through free |
+| `tools/call` for a tool listed `free` | Passes through free |
+| `tools/call` for any other tool | Charged at that tool's price |
+| A body that can't be read one way only (below) | `400` |
+| A body larger than `client_body_buffer_size` | `413` |
+
+**The challenge is a JSON-RPC error response, not a `402`.** An older client
+reads an HTTP `402` as a broken connection, and some end the whole session on
+it. So an unpaid call is answered with HTTP `200` and the JSON-RPC error for
+that request: the body shown under [The 402 response](#the-402-response), plus
+the request's `id`. The `WWW-Authenticate` header is still sent. A client that
+can pay retries the same call with `Authorization: L402 <macaroon>:<preimage>`;
+one that can't shows its user "Payment required to call …" and carries on. A
+call sent without an `id` can't be answered that way and gets the `402`.
+
+**What is refused.** The upstream parses the same body with its own JSON
+parser. If the two could disagree about the method or the name, a call could be
+priced as one tool and run as another, so such a body gets a `400` rather than
+a guess:
+
+| Body | JSON-RPC code |
+|---|---|
+| Not UTF-8 JSON, or anything after the JSON value (a byte-order mark and UTF-16 included) | `-32700` |
+| A batch array, or any value that isn't one object | `-32600` |
+| A key that appears twice in the request object or in `params` | `-32600` |
+| `method`, `params`, `name` or `uri` in another letter case, or a non-ASCII key next to them | `-32600` |
+| A charged call whose `params` isn't an object, or whose name isn't a non-empty string | `-32602` |
+
+These limits apply to the request object and to `params` of a charged call.
+What a tool receives in `arguments` is not inspected.
+
+**Body size.** The module classifies a body only from memory. One larger than
+[`client_body_buffer_size`](https://nginx.org/en/docs/http/ngx_http_core_module.html#client_body_buffer_size)
+(16k by default) is spooled to disk by nginx and refused with `413`. Raise it on
+the location if your tools take large arguments:
+
+```nginx
+location /mcp {
+    # ...
+    client_body_buffer_size 1m;
+}
+```
+
+**Trust.** For these requests the module prices exactly what the upstream will
+run, so nothing depends on the upstream checking headers. It depends instead on
+the upstream routing by `MCP-Protocol-Version` the same way: a request without
+a 2026-07-28 version must be run from its body, never from an `Mcp-Name` header.
+`l402_mcp_upstream_validates on;` is still required, for the 2026-07-28 clients
+the same location serves.
+
+---
+
 ## Limitations
 
-- **Older clients** (protocol versions before 2026-07-28) don't send the
-  headers and are refused, discovery included. Keep a separate plain
-  `l402 on;` location for them if needed. Reading the body to support them is
-  planned.
+- **Older clients** (protocol versions before 2026-07-28) are refused, discovery
+  included, unless the location sets [`l402_mcp_legacy on;`](#older-clients).
+  With it, batch requests (2025-03-26 only) are still refused, and the separate
+  `GET /sse` + `POST /messages` endpoints of the 2024-11-05 transport are not
+  covered by one location.
 - **Retries are new calls.** A client that re-sends a `tools/call` — after an
   input-required result, or a dropped response stream — needs a new payment
   under the default replay check. MRTR retries carry a new JSON-RPC `id`, and

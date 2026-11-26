@@ -2306,6 +2306,7 @@ dependencies = [
  "hex",
  "libc",
  "qrcode-generator",
+ "serde",
  "serde_json",
  "sha2",
 ]

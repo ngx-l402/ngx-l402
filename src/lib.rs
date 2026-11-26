@@ -5,25 +5,25 @@ use log::{debug, error, info, warn};
 use ngx::core::Buffer;
 use ngx::ffi::{
     nginx_version, ngx_array_push, ngx_chain_t, ngx_command_t, ngx_conf_t, ngx_cycle_s,
-    ngx_http_discard_request_body, ngx_http_finalize_request, ngx_http_handler_pt,
-    ngx_http_module_t, ngx_http_phases_NGX_HTTP_ACCESS_PHASE, ngx_http_request_t,
-    ngx_http_send_special, ngx_int_t, ngx_log_s, ngx_module_t, ngx_shared_memory_add,
-    ngx_shm_zone_t, ngx_slab_alloc, ngx_slab_pool_t, ngx_str_t, ngx_test_config, ngx_uint_t,
-    NGX_CONF_1MORE, NGX_CONF_NOARGS, NGX_CONF_TAKE1, NGX_CONF_TAKE2, NGX_DECLINED, NGX_DONE,
-    NGX_ERROR, NGX_HTTP_COPY, NGX_HTTP_DELETE, NGX_HTTP_GET, NGX_HTTP_HEAD,
-    NGX_HTTP_INTERNAL_SERVER_ERROR, NGX_HTTP_LAST, NGX_HTTP_LOCK, NGX_HTTP_LOC_CONF,
-    NGX_HTTP_LOC_CONF_OFFSET, NGX_HTTP_MAIN_CONF, NGX_HTTP_MKCOL, NGX_HTTP_MODULE, NGX_HTTP_MOVE,
-    NGX_HTTP_NOT_ALLOWED, NGX_HTTP_OPTIONS, NGX_HTTP_PATCH, NGX_HTTP_POST, NGX_HTTP_PROPFIND,
-    NGX_HTTP_PROPPATCH, NGX_HTTP_PUT, NGX_HTTP_SRV_CONF, NGX_HTTP_TRACE, NGX_HTTP_UNLOCK,
-    NGX_LOG_EMERG, NGX_LOG_ERR, NGX_LOG_INFO, NGX_LOG_NOTICE, NGX_LOG_WARN, NGX_OK,
-    NGX_RS_MODULE_SIGNATURE,
+    ngx_http_core_run_phases, ngx_http_discard_request_body, ngx_http_finalize_request,
+    ngx_http_handler_pt, ngx_http_module_t, ngx_http_phases_NGX_HTTP_ACCESS_PHASE,
+    ngx_http_read_client_request_body, ngx_http_request_t, ngx_http_send_special, ngx_int_t,
+    ngx_log_s, ngx_module_t, ngx_shared_memory_add, ngx_shm_zone_t, ngx_slab_alloc,
+    ngx_slab_pool_t, ngx_str_t, ngx_test_config, ngx_uint_t, NGX_CONF_1MORE, NGX_CONF_NOARGS,
+    NGX_CONF_TAKE1, NGX_CONF_TAKE2, NGX_DECLINED, NGX_DONE, NGX_ERROR, NGX_HTTP_COPY,
+    NGX_HTTP_DELETE, NGX_HTTP_GET, NGX_HTTP_HEAD, NGX_HTTP_INTERNAL_SERVER_ERROR, NGX_HTTP_LAST,
+    NGX_HTTP_LOCK, NGX_HTTP_LOC_CONF, NGX_HTTP_LOC_CONF_OFFSET, NGX_HTTP_MAIN_CONF, NGX_HTTP_MKCOL,
+    NGX_HTTP_MODULE, NGX_HTTP_MOVE, NGX_HTTP_NOT_ALLOWED, NGX_HTTP_OPTIONS, NGX_HTTP_PATCH,
+    NGX_HTTP_POST, NGX_HTTP_PROPFIND, NGX_HTTP_PROPPATCH, NGX_HTTP_PUT, NGX_HTTP_SPECIAL_RESPONSE,
+    NGX_HTTP_SRV_CONF, NGX_HTTP_TRACE, NGX_HTTP_UNLOCK, NGX_LOG_EMERG, NGX_LOG_ERR, NGX_LOG_INFO,
+    NGX_LOG_NOTICE, NGX_LOG_WARN, NGX_OK, NGX_RS_MODULE_SIGNATURE,
 };
 use ngx::http::{
     HTTPStatus, HttpModule, HttpModuleLocationConf, HttpModuleMainConf, HttpModuleServerConf,
     Merge, MergeConfigError, NgxHttpCoreModule, Request,
 };
 use ngx::{ngx_log_error, ngx_string};
-use ngx_l402_core::{McpDecision, McpHeaders, McpToolPrice};
+use ngx_l402_core::{McpDecision, McpHeaders, McpSource, McpToolPrice};
 use r2d2::Pool;
 use redis::Client as RedisClient;
 use redis::Commands;
@@ -1487,6 +1487,9 @@ pub struct ModuleConfig {
     // rejects a request whose MCP headers disagree with its body. The client's
     // `MCP-Protocol-Version` cannot vouch for that, so `l402_mcp on` needs it.
     mcp_upstream_validates: Option<bool>,
+    // `l402_mcp_legacy on;`: also serve clients older than the mirrored
+    // headers, by reading the method and the tool from the request body.
+    mcp_legacy: Option<bool>,
 }
 
 impl ModuleConfig {
@@ -1509,7 +1512,7 @@ const MCP_TOOL_CAVEAT: &str = "McpTool";
 /// `tools/call summarize` can't open `prompts/get summarize`.
 const MCP_METHOD_CAVEAT: &str = "McpMethod";
 
-pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 23] = [
+pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 24] = [
     ngx_command_t {
         name: ngx_string!("l402"),
         type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1) as ngx_uint_t,
@@ -1690,6 +1693,14 @@ pub static mut NGX_HTTP_L402_COMMANDS: [ngx_command_t; 23] = [
         offset: 0,
         post: std::ptr::null_mut(),
     },
+    ngx_command_t {
+        name: ngx_string!("l402_mcp_legacy"),
+        type_: (NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1) as ngx_uint_t,
+        set: Some(ngx_http_l402_mcp_legacy_set),
+        conf: NGX_HTTP_LOC_CONF_OFFSET,
+        offset: 0,
+        post: std::ptr::null_mut(),
+    },
     ngx_command_t::empty(),
 ];
 
@@ -1834,6 +1845,9 @@ impl Merge for ModuleConfig {
         }
         if self.mcp_upstream_validates.is_none() {
             self.mcp_upstream_validates = prev.mcp_upstream_validates;
+        }
+        if self.mcp_legacy.is_none() {
+            self.mcp_legacy = prev.mcp_legacy;
         }
         // `l402_mcp on` only changes how a paywalled location prices requests.
         // Without `l402 on` it would leave the endpoint free while reading as
@@ -2110,18 +2124,33 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-/// Collect every `Mcp-Method`, `Mcp-Name` and `MCP-Protocol-Version` value and
-/// decide the request. All occurrences are kept so a duplicate is refused
-/// rather than one silently picked, and a value that isn't UTF-8 is refused.
+/// Every `Mcp-Method`, `Mcp-Name` and `MCP-Protocol-Version` value of one
+/// request, owned so they outlive the header iterator.
+struct McpRequestHeaders {
+    method: Vec<String>,
+    name: Vec<String>,
+    version: Vec<String>,
+}
+
+impl McpRequestHeaders {
+    fn view(&self) -> McpHeaders<'_> {
+        McpHeaders {
+            method: self.method.iter().map(String::as_str).collect(),
+            name: self.name.iter().map(String::as_str).collect(),
+            protocol_version: self.version.iter().map(String::as_str).collect(),
+        }
+    }
+}
+
+/// Collect every `Mcp-Method`, `Mcp-Name` and `MCP-Protocol-Version` value.
+/// All occurrences are kept so a duplicate is refused rather than one silently
+/// picked, and a value that isn't UTF-8 is refused.
 ///
 /// # Safety
 /// `request` must be the valid pointer nginx passed to the access handler.
-unsafe fn classify_mcp(
+unsafe fn mcp_request_headers(
     request: *mut ngx_http_request_t,
-    charge: &[String],
-    tools: &[(String, McpToolPrice)],
-    upstream_validates: bool,
-) -> McpDecision {
+) -> Result<McpRequestHeaders, McpDecision> {
     let req = unsafe { Request::from_ngx_http_request(request) };
     let (mut method, mut name, mut version) = (Vec::new(), Vec::new(), Vec::new());
     for (k, v) in req.headers_in_iterator() {
@@ -2137,15 +2166,116 @@ unsafe fn classify_mcp(
         };
         match v.to_str() {
             Ok(v) => slot.push(v.to_string()),
-            Err(_) => return McpDecision::Reject(format!("{} header is not valid UTF-8", k)),
+            Err(_) => {
+                return Err(McpDecision::Reject(format!(
+                    "{} header is not valid UTF-8",
+                    k
+                )))
+            }
         }
     }
-    let headers = McpHeaders {
-        method: method.iter().map(String::as_str).collect(),
-        name: name.iter().map(String::as_str).collect(),
-        protocol_version: version.iter().map(String::as_str).collect(),
-    };
-    ngx_l402_core::classify_mcp_request(&headers, charge, tools, upstream_validates)
+    Ok(McpRequestHeaders {
+        method,
+        name,
+        version,
+    })
+}
+
+/// The request body of an older MCP client, once nginx has read it.
+enum McpBody {
+    /// nginx is still reading; the handler runs again when it is done.
+    Pending,
+    /// The whole body, from memory.
+    Ready(Vec<u8>),
+    /// nginx spooled the body to a temp file: it is larger than
+    /// `client_body_buffer_size`.
+    TooLarge,
+    /// nginx won't read a body for this request (a subrequest, or a body
+    /// already discarded).
+    Unreadable,
+    /// Reading failed; the status is nginx's.
+    Failed(isize),
+}
+
+thread_local! {
+    // The request whose body read `mcp_request_body` has on the stack, so a
+    // synchronous callback that still finds no body can be told apart from
+    // the first pass. Null outside that call.
+    static MCP_BODY_READ: std::cell::Cell<*mut ngx_http_request_t> =
+        const { std::cell::Cell::new(std::ptr::null_mut()) };
+}
+
+/// Runs when nginx has the whole body: resume the phases, which re-enters the
+/// access handler with `request_body` set.
+///
+/// # Safety
+/// Called by nginx with the valid request it was registered for.
+unsafe extern "C" fn mcp_body_read(r: *mut ngx_http_request_t) {
+    // SAFETY: `r` is the live request nginx read the body for.
+    unsafe {
+        (*r).write_event_handler = Some(ngx_http_core_run_phases);
+        ngx_http_core_run_phases(r);
+    }
+}
+
+/// Get the request body for the body classifier, asking nginx to read it on
+/// the first call. The module reads nothing itself, so the read obeys
+/// `client_max_body_size`, `client_body_timeout` and the rest as it would for
+/// `proxy_pass`, which then reuses the same buffers.
+///
+/// # Safety
+/// `r` must be the valid pointer nginx passed to the access handler.
+unsafe fn mcp_request_body(r: *mut ngx_http_request_t) -> McpBody {
+    // SAFETY: `r` is valid for the handler; `main` is always set.
+    let req = unsafe { &mut *r };
+    if req.request_body.is_null() {
+        // For a subrequest, or a body already discarded, nginx skips the read
+        // and calls the handler straight back with `request_body` still null,
+        // which would re-enter forever. A null body while this request's own
+        // read is on the stack is that case. (`discard_body()` can't tell:
+        // nginx-sys misplaces the request bitfields, see `is_head`.)
+        if r != req.main || MCP_BODY_READ.get() == r {
+            return McpBody::Unreadable;
+        }
+        let outer = MCP_BODY_READ.replace(r);
+        // SAFETY: a main request with no body read yet. nginx takes a
+        // reference on the request for the read; `finalize(NGX_DONE)` gives
+        // back the one the phase engine holds, as ngx_http_mirror_module does.
+        // If the body is already buffered the callback has run by the time
+        // this returns, and the request has been handled.
+        let rc = unsafe { ngx_http_read_client_request_body(r, Some(mcp_body_read)) };
+        MCP_BODY_READ.set(outer);
+        if rc >= NGX_HTTP_SPECIAL_RESPONSE as ngx_int_t {
+            return McpBody::Failed(rc);
+        }
+        unsafe { ngx_http_finalize_request(r, NGX_DONE as ngx_int_t) };
+        return McpBody::Pending;
+    }
+    // SAFETY: checked non-null; nginx owns it for the request's lifetime.
+    let rb = unsafe { &*req.request_body };
+    if !rb.temp_file.is_null() {
+        return McpBody::TooLarge;
+    }
+    let mut body = Vec::new();
+    let mut link = rb.bufs;
+    while !link.is_null() {
+        // SAFETY: `bufs` is a null-terminated chain of nginx buffers; a
+        // memory buffer's `pos..last` is the readable part.
+        unsafe {
+            let buf = (*link).buf;
+            if !buf.is_null() {
+                if (*buf).in_file() != 0 {
+                    return McpBody::TooLarge;
+                }
+                let len = (*buf).last.offset_from((*buf).pos);
+                if len > 0 {
+                    body.extend_from_slice(std::slice::from_raw_parts((*buf).pos, len as usize));
+                }
+            }
+            link = (*link).next;
+        }
+    }
+    McpBody::Ready(body)
 }
 
 /// The 402 body for an MCP tool call: a JSON-RPC error whose `data` carries
@@ -2156,6 +2286,7 @@ fn mcp_payment_required_body(
     amount_msat: i64,
     www_authenticate: &str,
     cashu_request: Option<&str>,
+    request_id: Option<&str>,
 ) -> String {
     use ngx_l402_core::escape_json;
     let mut data = format!(
@@ -2175,11 +2306,20 @@ fn mcp_payment_required_body(
         data.push_str(&format!(",\"cashu\":\"{}\"", escape_json(cashu)));
     }
     data.push('}');
-    ngx_l402_core::jsonrpc_error_body(
-        ngx_l402_core::MCP_PAYMENT_REQUIRED,
-        &format!("Payment required to call {}", tool),
-        Some(&data),
-    )
+    let message = format!("Payment required to call {}", tool);
+    match request_id {
+        Some(id) => ngx_l402_core::jsonrpc_error_response(
+            id,
+            ngx_l402_core::MCP_PAYMENT_REQUIRED,
+            &message,
+            Some(&data),
+        ),
+        None => ngx_l402_core::jsonrpc_error_body(
+            ngx_l402_core::MCP_PAYMENT_REQUIRED,
+            &message,
+            Some(&data),
+        ),
+    }
 }
 
 /// Read the NUT-24 `X-Cashu` request header, if the client sent one.
@@ -2236,6 +2376,7 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         mcp_charge,
         mcp_tools,
         mcp_upstream_validates,
+        mcp_legacy,
     ) = unsafe {
         // NOTE: `authorization` can be null — not every request carries the header.
         let auth_header = if !r.headers_in.authorization.is_null() {
@@ -2307,6 +2448,7 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         let mcp_charge = conf.mcp_charged_methods();
         let mcp_tools = conf.mcp_tools.clone();
         let mcp_upstream_validates = conf.mcp_upstream_validates.unwrap_or(false);
+        let mcp_legacy = conf.mcp_legacy.unwrap_or(false);
 
         (
             auth_header,
@@ -2325,8 +2467,30 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
             mcp_charge,
             mcp_tools,
             mcp_upstream_validates,
+            mcp_legacy,
         )
     };
+
+    // SAFETY: `request` is the valid pointer nginx passed to this handler.
+    let mcp_headers = mcp_charge
+        .as_ref()
+        .map(|_| unsafe { mcp_request_headers(request) });
+    // With `l402_mcp_legacy on`, a client older than the mirrored headers is
+    // classified from its body. Only the version header decides which it is.
+    let mcp_from_body = mcp_legacy
+        && matches!(&mcp_headers, Some(Ok(h))
+            if ngx_l402_core::mcp_source(&h.view()) == Ok(McpSource::Body));
+    // Those clients also hold a session: a `GET` opens its event stream and a
+    // `DELETE` ends it. Neither carries a call, so both pass.
+    if mcp_from_body && (method == NGX_HTTP_GET || method == NGX_HTTP_DELETE) {
+        ngx_log_error!(
+            NGX_LOG_INFO,
+            log_ref,
+            "L402 MCP session {} from an older client; passing through",
+            method_caveat_value(method)
+        );
+        return NGX_DECLINED as isize;
+    }
 
     // 2026-07-28 removed the GET stream and the DELETE that ended a session,
     // and tells a server to answer both with `405`. Only `POST` carries the
@@ -2357,14 +2521,72 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
         };
     }
 
+    // The body of an older client's `POST`. nginx may still be reading it: the
+    // handler then returns and runs again from the top once it is all here.
+    let mcp_body = if mcp_from_body {
+        // SAFETY: `request` is the valid pointer nginx passed to this handler.
+        match unsafe { mcp_request_body(request) } {
+            McpBody::Pending => return NGX_DONE as isize,
+            McpBody::Failed(rc) => return rc,
+            McpBody::Ready(body) => Some(body),
+            unread @ (McpBody::TooLarge | McpBody::Unreadable) => {
+                let too_large = matches!(unread, McpBody::TooLarge);
+                ngx_log_error!(
+                    NGX_LOG_ERR,
+                    log_ref,
+                    "L402 MCP request body can't be classified: {}",
+                    if too_large {
+                        "larger than client_body_buffer_size; raise it for this location"
+                    } else {
+                        "nginx reads no body for a subrequest or a discarded body"
+                    }
+                );
+                // Shadow mode never blocks.
+                if dry_run {
+                    return NGX_DECLINED as isize;
+                }
+                let (status, message) = if too_large {
+                    (413, "Invalid request: the body is too large to classify")
+                } else {
+                    (400, "Invalid request: the body can't be read")
+                };
+                let body = ngx_l402_core::jsonrpc_error_body(
+                    ngx_l402_core::JSONRPC_INVALID_REQUEST,
+                    message,
+                    None,
+                );
+                // SAFETY: `request` is the valid pointer nginx passed to this handler.
+                return unsafe { send_json_response(request, status, body) };
+            }
+        }
+    } else {
+        None
+    };
+
     // An MCP endpoint takes every call as `POST` to one URL, so the tool comes
-    // from the mirrored `Mcp-Name` header. Discovery and tools listed `free`
-    // pass; a request the headers can't vouch for is refused rather than priced.
+    // from the mirrored `Mcp-Name` header, or from the body for an older
+    // client. Discovery and tools listed `free` pass; a request neither can
+    // vouch for is refused rather than priced.
     let mut mcp_method: Option<String> = None;
-    // SAFETY: `request` is the valid pointer nginx passed to this handler.
-    let mcp_decision = mcp_charge
-        .as_ref()
-        .map(|charge| unsafe { classify_mcp(request, charge, &mcp_tools, mcp_upstream_validates) });
+    // The JSON-RPC `id` of an older client's request, to answer it by.
+    let mut mcp_request_id: Option<String> = None;
+    let mcp_decision = match (&mcp_charge, mcp_headers) {
+        (Some(charge), Some(Ok(headers))) => Some(match &mcp_body {
+            Some(body) => {
+                let (decision, id) = ngx_l402_core::classify_mcp_body(body, charge, &mcp_tools);
+                mcp_request_id = id;
+                decision
+            }
+            None => ngx_l402_core::classify_mcp_request(
+                &headers.view(),
+                charge,
+                &mcp_tools,
+                mcp_upstream_validates,
+            ),
+        }),
+        (Some(_), Some(Err(refused))) => Some(refused),
+        _ => None,
+    };
     let mcp_tool: Option<String> = match mcp_decision {
         None => None,
         Some(decision) => match decision {
@@ -2373,9 +2595,12 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
                 mcp_method = Some(method);
                 Some(name)
             }
-            // A header problem (`-32020`) or an unsupported protocol version
-            // (`-32022`); both are a `400` with a JSON-RPC body.
-            refused @ (McpDecision::Reject(_) | McpDecision::UnsupportedVersion { .. }) => {
+            // A header problem (`-32020`), an unsupported protocol version
+            // (`-32022`) or a body that can't be classified; each is a `400`
+            // with a JSON-RPC body.
+            refused @ (McpDecision::Reject(_)
+            | McpDecision::UnsupportedVersion { .. }
+            | McpDecision::BadBody { .. }) => {
                 let reason = refused.reject_reason().unwrap_or_default();
                 ngx_log_error!(
                     NGX_LOG_INFO,
@@ -2822,9 +3047,15 @@ pub unsafe extern "C" fn l402_access_handler_wrapper(request: *mut ngx_http_requ
                         final_amount,
                         &header_value,
                         cashu_pr.as_deref(),
+                        mcp_request_id.as_deref(),
                     );
+                    // An older client reads a `402` as a broken transport, and
+                    // some drop the whole session on it. Its request has an
+                    // `id`, so the challenge goes back as the JSON-RPC error
+                    // response to that request, which every client can read.
+                    let status = if mcp_request_id.is_some() { 200 } else { 402 };
                     // SAFETY: `request` is the valid pointer nginx passed to this handler.
-                    return unsafe { send_json_response(request, 402, body) };
+                    return unsafe { send_json_response(request, status, body) };
                 }
 
                 // `l402_payment_html off` stops here: the challenge headers are
@@ -4737,6 +4968,39 @@ pub unsafe extern "C" fn ngx_http_l402_mcp_set(
             return conf_error(
                 cf,
                 &format!("l402_mcp: expected 'on' or 'off', got '{val}'"),
+            );
+        }
+    }
+    std::ptr::null_mut()
+}
+
+/// `l402_mcp_legacy on|off;` — also serve MCP clients older than the mirrored
+/// headers (protocol revisions before 2026-07-28), by reading the method and
+/// the tool from the request body.
+///
+/// # Safety
+/// `cf` and `conf` are the valid, non-null pointers Nginx passes to
+/// directive-parsing callbacks; `conf` points to this location's `ModuleConfig`.
+pub unsafe extern "C" fn ngx_http_l402_mcp_legacy_set(
+    cf: *mut ngx_conf_t,
+    _cmd: *mut ngx_command_t,
+    conf: *mut c_void,
+) -> *mut c_char {
+    // SAFETY: as in `ngx_http_l402_mcp_set`; NGX_CONF_TAKE1 ensures exactly one
+    // argument is present.
+    unsafe {
+        let conf = &mut *(conf as *mut ModuleConfig);
+        let args = (*(*cf).args).elts as *mut ngx_str_t;
+        let val = (*args.add(1)).to_str().unwrap_or_default();
+        if val.eq_ignore_ascii_case("on") {
+            conf.mcp_legacy = Some(true);
+            info!("⚙️ l402_mcp_legacy on — older MCP clients are classified from the request body");
+        } else if val.eq_ignore_ascii_case("off") {
+            conf.mcp_legacy = Some(false);
+        } else {
+            return conf_error(
+                cf,
+                &format!("l402_mcp_legacy: expected 'on' or 'off', got '{val}'"),
             );
         }
     }

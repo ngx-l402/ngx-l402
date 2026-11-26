@@ -14,6 +14,8 @@
 //! that may belong to a cheaper tool.
 
 use base64::Engine;
+use serde::de::{Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use std::collections::HashSet;
 use std::fmt::Write;
 
 /// The first protocol revision whose servers must validate the mirrored
@@ -27,6 +29,13 @@ pub const MCP_HEADER_MISMATCH: i64 = -32020;
 /// know or support. Its `data` names the supported versions so a client that
 /// also speaks one of them can retry.
 pub const MCP_UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
+
+/// JSON-RPC's own codes, for a request body the paywall can't classify
+/// (`l402_mcp_legacy`): not JSON, not one request object, or a charged call
+/// that doesn't name what it calls.
+pub const JSONRPC_PARSE_ERROR: i64 = -32700;
+pub const JSONRPC_INVALID_REQUEST: i64 = -32600;
+pub const JSONRPC_INVALID_PARAMS: i64 = -32602;
 
 /// JSON-RPC code carried by the 402 body. MCP defines no payment error, and
 /// 2026-07-28 keeps `-32000`..`-32099` off limits: `-32020` up is the spec's
@@ -82,13 +91,19 @@ pub enum McpDecision {
     /// (`requested` holds it) or isn't a revision date at all (`None`, so the
     /// raw value is never echoed).
     UnsupportedVersion { requested: Option<String> },
+    /// Reject with `400` and the given JSON-RPC code: the request was to be
+    /// classified from its body (`l402_mcp_legacy`) and the body can't be read
+    /// the one way every JSON parser would read it.
+    BadBody { code: i64, reason: String },
 }
 
 impl McpDecision {
     /// Why the request is refused, for the log; `None` unless it is.
     pub fn reject_reason(&self) -> Option<String> {
         match self {
-            McpDecision::Reject(reason) => Some(reason.clone()),
+            McpDecision::Reject(reason) | McpDecision::BadBody { reason, .. } => {
+                Some(reason.clone())
+            }
             McpDecision::UnsupportedVersion { requested: Some(v) } => Some(format!(
                 "MCP-Protocol-Version {} predates {}; mirrored headers are not validated",
                 v, MCP_MIN_HEADER_VERSION
@@ -121,6 +136,18 @@ impl McpDecision {
                     None,
                 )
             }),
+            McpDecision::BadBody { code, reason } => {
+                let label = match *code {
+                    JSONRPC_PARSE_ERROR => "Parse error",
+                    JSONRPC_INVALID_PARAMS => "Invalid params",
+                    _ => "Invalid request",
+                };
+                Some(jsonrpc_error_body(
+                    *code,
+                    &format!("{}: {}", label, reason),
+                    None,
+                ))
+            }
             McpDecision::Free | McpDecision::Charged { .. } => None,
         }
     }
@@ -200,23 +227,361 @@ pub fn classify(
         return McpDecision::Free;
     }
     match name {
-        // Decided here rather than as a price of zero: a free call then needs
-        // no Redis lookup, no token and no payment backend.
-        Some(name)
-            if tools
-                .iter()
-                .any(|(n, p)| *n == name && *p == McpToolPrice::Free) =>
-        {
-            McpDecision::Free
-        }
-        Some(name) => McpDecision::Charged {
-            method: method.to_string(),
-            name,
-        },
+        Some(name) => charge_or_free(method, name, tools),
         // A charged method must carry a name to price and bind the token to.
         // Only reached when `charged` holds a method outside
         // `MCP_CHARGEABLE_METHODS`, which the config should refuse.
         None => reject(&format!("{} request without Mcp-Name header", method)),
+    }
+}
+
+/// A call to a charged method, by name: free when the name is listed `free`,
+/// charged otherwise. Decided here rather than as a price of zero: a free call
+/// then needs no Redis lookup, no token and no payment backend.
+fn charge_or_free(method: &str, name: String, tools: &[(String, McpToolPrice)]) -> McpDecision {
+    if tools
+        .iter()
+        .any(|(n, p)| *n == name && *p == McpToolPrice::Free)
+    {
+        return McpDecision::Free;
+    }
+    McpDecision::Charged {
+        method: method.to_string(),
+        name,
+    }
+}
+
+/// Where a request's method and tool are read from on a location that also
+/// serves older clients (`l402_mcp_legacy on`).
+#[derive(Debug, PartialEq, Eq)]
+pub enum McpSource {
+    /// 2026-07-28 or later: the mirrored headers, as [`classify`] reads them.
+    Headers,
+    /// An older revision, or no `MCP-Protocol-Version` at all (the first
+    /// `initialize` of a session carries none): the JSON-RPC body, as
+    /// [`classify_body`] reads it.
+    Body,
+}
+
+/// Pick the source for one request. Only the version header decides, the way
+/// an upstream that serves both eras routes on it; a duplicate, or a value
+/// that isn't a revision date, is refused as [`classify`] refuses it.
+pub fn source(headers: &McpHeaders) -> Result<McpSource, McpDecision> {
+    match single("MCP-Protocol-Version", &headers.protocol_version) {
+        Err(e) => Err(McpDecision::Reject(e)),
+        Ok(None) => Ok(McpSource::Body),
+        Ok(Some(v)) if !is_revision_date(v) => {
+            Err(McpDecision::UnsupportedVersion { requested: None })
+        }
+        Ok(Some(v)) if v < MCP_MIN_HEADER_VERSION => Ok(McpSource::Body),
+        Ok(Some(_)) => Ok(McpSource::Headers),
+    }
+}
+
+/// The `params` key that names what a chargeable method calls.
+fn name_key(method: &str) -> Option<&'static str> {
+    match method {
+        "tools/call" | "prompts/get" => Some("name"),
+        "resources/read" => Some("uri"),
+        _ => None,
+    }
+}
+
+/// Decide a request from its JSON-RPC body, for a client older than the
+/// mirrored headers. `charged` and `tools` are as in [`classify`].
+///
+/// The upstream parses the same bytes with its own JSON parser, and the two
+/// must agree on the method and the name, or a call could be priced as one
+/// tool and run as another. So the body is refused, never guessed at, wherever
+/// parsers are known to differ:
+///
+/// - a key that appears twice in the request object or in `params` (first or
+///   last wins, by parser);
+/// - `method`, `params`, `name` or `uri` in another letter case, or any
+///   non-ASCII key next to them (some parsers match keys case-insensitively,
+///   Unicode case folding included);
+/// - a batch array (allowed only by 2025-03-26, and one body would then hold
+///   several calls);
+/// - anything that isn't UTF-8 JSON with nothing after it.
+///
+/// A body without a `method` is a response to the server and passes free.
+///
+/// Returned with the decision is the request's `id` as JSON text (a string or
+/// a number; `None` for a notification), so a charged call can be answered
+/// with a JSON-RPC error response instead of a bare HTTP status.
+pub fn classify_body(
+    body: &[u8],
+    charged: &[String],
+    tools: &[(String, McpToolPrice)],
+) -> (McpDecision, Option<String>) {
+    let mut de = serde_json::Deserializer::from_slice(body);
+    let mut scan = match de.deserialize_any(TopVisitor).and_then(|top| {
+        de.end()?;
+        Ok(top)
+    }) {
+        Ok(Top::Request(scan)) => scan,
+        other => return (classify_unscanned(other), None),
+    };
+    let id = scan.id.take();
+    (classify_scan(scan, charged, tools), id)
+}
+
+/// The decision for a body that isn't one request object.
+fn classify_unscanned(top: Result<Top, serde_json::Error>) -> McpDecision {
+    match top {
+        // Not reached: `classify_body` keeps a request for `classify_scan`.
+        Ok(Top::Request(_)) => bad_body(JSONRPC_INVALID_REQUEST, "the body was not classified"),
+        Ok(Top::Batch) => bad_body(JSONRPC_INVALID_REQUEST, "batch requests are not supported"),
+        Ok(Top::Other) => bad_body(
+            JSONRPC_INVALID_REQUEST,
+            "the body is not a JSON-RPC request object",
+        ),
+        // The parser's message can quote the body; the client gets none of it.
+        Err(_) => bad_body(JSONRPC_PARSE_ERROR, "the body is not valid JSON"),
+    }
+}
+
+fn classify_scan(
+    scan: RequestScan,
+    charged: &[String],
+    tools: &[(String, McpToolPrice)],
+) -> McpDecision {
+    if let Some(problem) = scan.problem {
+        return bad_body(JSONRPC_INVALID_REQUEST, problem);
+    }
+    let method = match scan.method {
+        Field::Missing => return McpDecision::Free,
+        Field::Other => return bad_body(JSONRPC_INVALID_REQUEST, "method is not a string"),
+        Field::Str(m) => m,
+    };
+    if !charged.contains(&method) {
+        return McpDecision::Free;
+    }
+    // As in `classify`: a charged method must name what it calls.
+    let Some(key) = name_key(&method) else {
+        return bad_body(JSONRPC_INVALID_REQUEST, "this method cannot be charged");
+    };
+    let Some(Params::Object(params)) = scan.params else {
+        return bad_body(JSONRPC_INVALID_PARAMS, "params is not an object");
+    };
+    if let Some(problem) = params.problem {
+        return bad_body(JSONRPC_INVALID_REQUEST, problem);
+    }
+    let name = match if key == "uri" {
+        params.uri
+    } else {
+        params.name
+    } {
+        Field::Str(name) => name,
+        Field::Missing | Field::Other => {
+            return bad_body(
+                JSONRPC_INVALID_PARAMS,
+                if key == "uri" {
+                    "params.uri is not a string"
+                } else {
+                    "params.name is not a string"
+                },
+            )
+        }
+    };
+    // The same bounds a decoded `Mcp-Name` has: the name reaches log lines and
+    // the token's caveat.
+    if name.is_empty() || name.chars().any(char::is_control) {
+        return bad_body(
+            JSONRPC_INVALID_PARAMS,
+            "the name is empty or contains control characters",
+        );
+    }
+    charge_or_free(&method, name, tools)
+}
+
+fn bad_body(code: i64, reason: &str) -> McpDecision {
+    McpDecision::BadBody {
+        code,
+        reason: reason.to_string(),
+    }
+}
+
+/// A value [`classify_body`] reads: absent, a string, or something else.
+#[derive(Default)]
+enum Field {
+    #[default]
+    Missing,
+    Str(String),
+    Other,
+}
+
+impl Field {
+    fn from_value(v: serde_json::Value) -> Self {
+        match v {
+            serde_json::Value::String(s) => Field::Str(s),
+            _ => Field::Other,
+        }
+    }
+}
+
+/// What the keys of one JSON object say, for the keys [`classify_body`] reads.
+/// `problem` is the first reason parsers could disagree about them.
+#[derive(Default)]
+struct RequestScan {
+    /// The request's `id` as JSON text, when it is a string or a number.
+    id: Option<String>,
+    method: Field,
+    params: Option<Params>,
+    problem: Option<&'static str>,
+}
+
+#[derive(Default)]
+struct ParamsScan {
+    name: Field,
+    uri: Field,
+    problem: Option<&'static str>,
+}
+
+enum Params {
+    Object(ParamsScan),
+    Other,
+}
+
+enum Top {
+    Request(RequestScan),
+    Batch,
+    Other,
+}
+
+/// Note one key of an object: `Some` when it makes the object ambiguous.
+/// `reserved` are the lowercase keys read from this object.
+fn key_problem(key: &str, seen: &mut HashSet<String>, reserved: &[&str]) -> Option<&'static str> {
+    if !key.is_ascii() {
+        return Some("a key is not ASCII");
+    }
+    let lower = key.to_ascii_lowercase();
+    if reserved.contains(&lower.as_str()) && key != lower {
+        return Some("a key differs from a JSON-RPC key only in letter case");
+    }
+    if !seen.insert(lower) {
+        return Some("a key appears twice");
+    }
+    None
+}
+
+struct TopVisitor;
+
+impl<'de> Visitor<'de> for TopVisitor {
+    type Value = Top;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a JSON value")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Top, A::Error> {
+        let mut scan = RequestScan::default();
+        let mut seen = HashSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            let problem = key_problem(&key, &mut seen, &["method", "params"]);
+            scan.problem = scan.problem.or(problem);
+            match key.as_str() {
+                "method" => scan.method = Field::from_value(map.next_value()?),
+                "params" => scan.params = Some(map.next_value_seed(ParamsSeed)?),
+                "id" => {
+                    scan.id = match map.next_value::<serde_json::Value>()? {
+                        v @ (serde_json::Value::String(_) | serde_json::Value::Number(_)) => {
+                            serde_json::to_string(&v).ok()
+                        }
+                        _ => None,
+                    }
+                }
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        Ok(Top::Request(scan))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Top, A::Error> {
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(Top::Batch)
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<Top, E> {
+        Ok(Top::Other)
+    }
+    fn visit_i64<E>(self, _: i64) -> Result<Top, E> {
+        Ok(Top::Other)
+    }
+    fn visit_u64<E>(self, _: u64) -> Result<Top, E> {
+        Ok(Top::Other)
+    }
+    fn visit_f64<E>(self, _: f64) -> Result<Top, E> {
+        Ok(Top::Other)
+    }
+    fn visit_str<E>(self, _: &str) -> Result<Top, E> {
+        Ok(Top::Other)
+    }
+    fn visit_unit<E>(self) -> Result<Top, E> {
+        Ok(Top::Other)
+    }
+}
+
+struct ParamsSeed;
+
+impl<'de> serde::de::DeserializeSeed<'de> for ParamsSeed {
+    type Value = Params;
+
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Params, D::Error> {
+        d.deserialize_any(ParamsVisitor)
+    }
+}
+
+struct ParamsVisitor;
+
+impl<'de> Visitor<'de> for ParamsVisitor {
+    type Value = Params;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a JSON value")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Params, A::Error> {
+        let mut scan = ParamsScan::default();
+        let mut seen = HashSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            let problem = key_problem(&key, &mut seen, &["name", "uri"]);
+            scan.problem = scan.problem.or(problem);
+            match key.as_str() {
+                "name" => scan.name = Field::from_value(map.next_value()?),
+                "uri" => scan.uri = Field::from_value(map.next_value()?),
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        Ok(Params::Object(scan))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Params, A::Error> {
+        while seq.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(Params::Other)
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<Params, E> {
+        Ok(Params::Other)
+    }
+    fn visit_i64<E>(self, _: i64) -> Result<Params, E> {
+        Ok(Params::Other)
+    }
+    fn visit_u64<E>(self, _: u64) -> Result<Params, E> {
+        Ok(Params::Other)
+    }
+    fn visit_f64<E>(self, _: f64) -> Result<Params, E> {
+        Ok(Params::Other)
+    }
+    fn visit_str<E>(self, _: &str) -> Result<Params, E> {
+        Ok(Params::Other)
+    }
+    fn visit_unit<E>(self) -> Result<Params, E> {
+        Ok(Params::Other)
     }
 }
 
@@ -289,6 +654,16 @@ pub fn jsonrpc_error_body(code: i64, message: &str, data: Option<&str>) -> Strin
             "{{\"jsonrpc\":\"2.0\",\"error\":{{\"code\":{code},\"message\":\"{message}\"}}}}"
         ),
     }
+}
+
+/// A JSON-RPC error *response*: [`jsonrpc_error_body`] with the `id` of the
+/// request it answers. `id` is JSON text, as [`classify_body`] returns it.
+pub fn jsonrpc_error_response(id: &str, code: i64, message: &str, data: Option<&str>) -> String {
+    let message = crate::escape_json(message);
+    let data = data.map(|d| format!(",\"data\":{d}")).unwrap_or_default();
+    format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"error\":{{\"code\":{code},\"message\":\"{message}\"{data}}}}}"
+    )
 }
 
 fn reject(reason: &str) -> McpDecision {
@@ -429,6 +804,253 @@ mod tests {
         for bad in ["0", "-1", "", "Free", "FREE", "free ", "1.5", "1000msat"] {
             assert_eq!(McpToolPrice::parse(bad), None, "{bad:?}");
         }
+    }
+
+    fn body(json: &str) -> McpDecision {
+        let tools = [
+            tool("ping", McpToolPrice::Free),
+            tool("summarize", McpToolPrice::Msat(5000)),
+        ];
+        classify_body(json.as_bytes(), &tools_only(), &tools).0
+    }
+
+    fn bad_code(d: &McpDecision) -> Option<i64> {
+        match d {
+            McpDecision::BadBody { code, .. } => Some(*code),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn source_follows_the_version_header() {
+        let src = |v: &[&str]| source(&headers(v, &[], &[]));
+        // The first `initialize` of an older session carries no version.
+        assert_eq!(src(&[]), Ok(McpSource::Body));
+        for v in ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"] {
+            assert_eq!(src(&[v]), Ok(McpSource::Body), "{v}");
+        }
+        assert_eq!(src(&["2026-07-28"]), Ok(McpSource::Headers));
+        assert_eq!(src(&["2027-01-01"]), Ok(McpSource::Headers));
+        // Refused as on a header-only location.
+        assert!(matches!(
+            src(&["2025-11-25", "2026-07-28"]),
+            Err(McpDecision::Reject(_))
+        ));
+        assert_eq!(
+            src(&["latest"]),
+            Err(McpDecision::UnsupportedVersion { requested: None })
+        );
+    }
+
+    #[test]
+    fn body_call_is_charged_for_its_tool() {
+        assert_eq!(
+            body(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search","arguments":{"q":"x"}}}"#
+            ),
+            McpDecision::Charged {
+                method: "tools/call".into(),
+                name: "search".into()
+            }
+        );
+        // Key order and escapes don't change what is read.
+        assert_eq!(
+            body(
+                r#"{"params":{"arguments":{},"name":"summ\u0061rize"},"method":"tools\/call","id":"a"}"#
+            ),
+            McpDecision::Charged {
+                method: "tools/call".into(),
+                name: "summarize".into()
+            }
+        );
+    }
+
+    #[test]
+    fn body_request_id_comes_back_as_json_text() {
+        let id = |json: &str| classify_body(json.as_bytes(), &tools_only(), &[]).1;
+        assert_eq!(
+            id(r#"{"id":7,"method":"tools/call","params":{"name":"a"}}"#).as_deref(),
+            Some("7")
+        );
+        assert_eq!(
+            id(r#"{"id":"a\"b","method":"tools/call","params":{"name":"a"}}"#).as_deref(),
+            Some(r#""a\"b""#)
+        );
+        // A notification has none; null, objects and arrays aren't request ids.
+        for json in [
+            r#"{"method":"tools/call","params":{"name":"a"}}"#,
+            r#"{"id":null,"method":"tools/call","params":{"name":"a"}}"#,
+            r#"{"id":{"x":1},"method":"tools/call","params":{"name":"a"}}"#,
+            r#"{"id":[1],"method":"tools/call","params":{"name":"a"}}"#,
+            "[]",
+            "{",
+        ] {
+            assert_eq!(id(json), None, "{json}");
+        }
+        let body = jsonrpc_error_response(r#""a\"b""#, 402, "Pay \"now\"", Some(r#"{"k":1}"#));
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["id"], "a\"b");
+        assert_eq!(v["error"]["code"], 402);
+        assert_eq!(v["error"]["message"], "Pay \"now\"");
+        assert_eq!(v["error"]["data"]["k"], 1);
+    }
+
+    #[test]
+    fn body_free_tool_and_uncharged_methods_pass() {
+        assert_eq!(
+            body(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ping"}}"#),
+            McpDecision::Free
+        );
+        for json in [
+            r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"c","version":"1"}}}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":[1,2]}"#,
+            // `resources/read` isn't charged here, so its params aren't read.
+            r#"{"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"file:///a","URI":"x"}}"#,
+            // A response to the server (a sampling or elicitation result).
+            r#"{"jsonrpc":"2.0","id":7,"result":{"content":[]}}"#,
+        ] {
+            assert_eq!(body(json), McpDecision::Free, "{json}");
+        }
+    }
+
+    #[test]
+    fn body_resources_read_is_priced_by_uri_when_charged() {
+        let charged = vec!["tools/call".to_string(), "resources/read".to_string()];
+        let tools = [tool("file:///free", McpToolPrice::Free)];
+        let call = |json: &str| classify_body(json.as_bytes(), &charged, &tools).0;
+        assert_eq!(
+            call(r#"{"id":1,"method":"resources/read","params":{"uri":"file:///a"}}"#),
+            McpDecision::Charged {
+                method: "resources/read".into(),
+                name: "file:///a".into()
+            }
+        );
+        assert_eq!(
+            call(r#"{"id":1,"method":"resources/read","params":{"uri":"file:///free"}}"#),
+            McpDecision::Free
+        );
+        // `name` doesn't name a resource.
+        assert_eq!(
+            bad_code(&call(
+                r#"{"id":1,"method":"resources/read","params":{"name":"file:///free"}}"#
+            )),
+            Some(JSONRPC_INVALID_PARAMS)
+        );
+    }
+
+    #[test]
+    fn body_parsers_could_read_differently_is_refused() {
+        // Each of these names the free tool to one parser and a paid one, or a
+        // charged method, to another.
+        for json in [
+            // Duplicate keys: first or last wins, by parser.
+            r#"{"method":"tools/call","params":{"name":"ping","name":"summarize"}}"#,
+            r#"{"method":"tools/list","method":"tools/call","params":{"name":"summarize"}}"#,
+            r#"{"method":"tools/call","params":{"name":"ping"},"params":{"name":"summarize"}}"#,
+            // Case-insensitive key matching.
+            r#"{"method":"tools/list","Method":"tools/call","params":{"name":"summarize"}}"#,
+            r#"{"method":"tools/call","params":{"name":"ping","Name":"summarize"}}"#,
+            r#"{"method":"tools/call","params":{"name":"ping"},"PARAMS":{"name":"summarize"}}"#,
+            // Unicode case folding: U+017F folds to `s`, U+212A to `k`.
+            "{\"method\":\"tools/call\",\"params\":{\"name\":\"ping\"},\"param\u{17f}\":{\"name\":\"summarize\"}}",
+            "{\"method\":\"tools/call\",\"params\":{\"name\":\"ping\",\"n\u{e4}me\":\"x\"}}",
+        ] {
+            assert_eq!(
+                bad_code(&body(json)),
+                Some(JSONRPC_INVALID_REQUEST),
+                "{json}"
+            );
+        }
+    }
+
+    #[test]
+    fn body_that_is_not_one_request_is_refused() {
+        for (json, code) in [
+            // A batch could hold a free call and a paid one.
+            (
+                r#"[{"method":"tools/call","params":{"name":"ping"}},{"method":"tools/call","params":{"name":"summarize"}}]"#,
+                JSONRPC_INVALID_REQUEST,
+            ),
+            ("[]", JSONRPC_INVALID_REQUEST),
+            ("\"tools/call\"", JSONRPC_INVALID_REQUEST),
+            ("null", JSONRPC_INVALID_REQUEST),
+            ("7", JSONRPC_INVALID_REQUEST),
+            (r#"{"method":7}"#, JSONRPC_INVALID_REQUEST),
+            ("", JSONRPC_PARSE_ERROR),
+            ("{", JSONRPC_PARSE_ERROR),
+            (
+                r#"{"method":"tools/list"} {"method":"tools/call"}"#,
+                JSONRPC_PARSE_ERROR,
+            ),
+            (r#"{"method":"tools/list"}x"#, JSONRPC_PARSE_ERROR),
+            // A UTF-8 byte-order mark, which some parsers skip.
+            ("\u{feff}{\"method\":\"tools/list\"}", JSONRPC_PARSE_ERROR),
+        ] {
+            assert_eq!(bad_code(&body(json)), Some(code), "{json}");
+        }
+        // UTF-16, which some parsers detect and decode.
+        let utf16: Vec<u8> =
+            r#"{"method":"tools/list"}"#.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        assert_eq!(
+            bad_code(&classify_body(&utf16, &tools_only(), &[]).0),
+            Some(JSONRPC_PARSE_ERROR)
+        );
+    }
+
+    #[test]
+    fn body_charged_call_must_name_its_tool() {
+        for json in [
+            r#"{"method":"tools/call"}"#,
+            r#"{"method":"tools/call","params":null}"#,
+            r#"{"method":"tools/call","params":["ping"]}"#,
+            r#"{"method":"tools/call","params":{}}"#,
+            r#"{"method":"tools/call","params":{"name":7}}"#,
+            r#"{"method":"tools/call","params":{"name":null}}"#,
+            r#"{"method":"tools/call","params":{"name":["ping"]}}"#,
+            r#"{"method":"tools/call","params":{"name":""}}"#,
+            r#"{"method":"tools/call","params":{"name":"pi\r\nng"}}"#,
+            // `uri` doesn't name a tool.
+            r#"{"method":"tools/call","params":{"uri":"ping"}}"#,
+        ] {
+            assert_eq!(
+                bad_code(&body(json)),
+                Some(JSONRPC_INVALID_PARAMS),
+                "{json}"
+            );
+        }
+    }
+
+    #[test]
+    fn body_rejection_is_a_jsonrpc_error_that_quotes_nothing() {
+        let d =
+            body(r#"{"method":"tools/call","params":{"name":"ping","<script>":1,"<script>":2}}"#);
+        let text = d.reject_body().unwrap();
+        assert!(!text.contains("script"), "{text}");
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["error"]["code"], JSONRPC_INVALID_REQUEST);
+        assert!(v.get("id").is_none());
+        let d = body("{\"method\": <script>");
+        assert!(!d.reject_body().unwrap().contains("script"));
+        assert!(!d.reject_reason().unwrap().contains("script"));
+    }
+
+    #[test]
+    fn body_deep_nesting_cannot_exhaust_the_stack() {
+        let nest = |n: usize| format!("{}{}", "[".repeat(n), "]".repeat(n));
+        // In a value that isn't read, depth is skipped without recursion.
+        let ignored = format!(
+            r#"{{"method":"tools/call","params":{{"name":"ping","arguments":{}}}}}"#,
+            nest(100_000)
+        );
+        assert_eq!(body(&ignored), McpDecision::Free);
+        // In a value that is read, the parser's depth limit refuses it.
+        let read = format!(
+            r#"{{"method":"tools/call","params":{{"name":{}}}}}"#,
+            nest(100_000)
+        );
+        assert_eq!(bad_code(&body(&read)), Some(JSONRPC_PARSE_ERROR));
     }
 
     #[test]

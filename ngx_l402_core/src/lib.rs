@@ -34,9 +34,11 @@ pub use fee::{fee_reserve_msat, melt_reserve_msat, sat_to_msat, MSAT_PER_SAT};
 pub use info::{render as render_info, GlobalInfo, LocationInfo};
 pub use l402_header::{is_l402_scheme, parse_l402_header_value};
 pub use mcp::{
-    classify as classify_mcp_request, decode_mcp_name, jsonrpc_error_body, mcp_tool_price_key,
-    McpDecision, McpHeaders, McpToolPrice, MCP_CHARGEABLE_METHODS, MCP_HEADER_MISMATCH,
-    MCP_MIN_HEADER_VERSION, MCP_PAYMENT_REQUIRED, MCP_UNSUPPORTED_PROTOCOL_VERSION,
+    classify as classify_mcp_request, classify_body as classify_mcp_body, decode_mcp_name,
+    jsonrpc_error_body, jsonrpc_error_response, mcp_tool_price_key, source as mcp_source,
+    McpDecision, McpHeaders, McpSource, McpToolPrice, JSONRPC_INVALID_REQUEST,
+    MCP_CHARGEABLE_METHODS, MCP_HEADER_MISMATCH, MCP_MIN_HEADER_VERSION, MCP_PAYMENT_REQUIRED,
+    MCP_UNSUPPORTED_PROTOCOL_VERSION,
 };
 pub use nginx_version::nginx_security_warning;
 pub use p2pk::{parse_p2pk_secret_key, verify_permanent_p2pk_lock, InvalidP2pkKey};

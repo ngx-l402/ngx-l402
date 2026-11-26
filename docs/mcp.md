@@ -12,6 +12,7 @@ location /mcp {
     l402_mcp_upstream_validates on;          # see "Trust model" below
     l402_amount_msat_default  1000;          # price of a tool without its own line
     l402_mcp_tool  summarize  5000;          # a tool with its own price
+    l402_mcp_tool  ping       free;          # a tool that costs nothing
     proxy_pass                http://mcp-server;
 }
 ```
@@ -20,6 +21,8 @@ location /mcp {
   client can see what is for sale before paying.
 - **Each tool has its own price.** A tool without an `l402_mcp_tool` line costs
   the default, so a new tool is never free by accident.
+- **A tool is free only when you say so.** `l402_mcp_tool <name> free;` lets its
+  calls pass unpaid; see [Free tools](#free-tools).
 - **A token buys one tool.** The macaroon carries `McpTool = <name>` and
   `McpMethod = <method>` next to the path and HTTP method, so a token bought
   for a cheap tool is rejected on an expensive one, and one bought for
@@ -50,7 +53,8 @@ So header-based pricing is only as strong as the upstream's validation:
 
 - **The upstream must implement 2026-07-28 or later** and enforce the
   header/body check. Against a server that ignores the headers, a client can pay
-  for the cheapest tool and run any other.
+  for the cheapest tool and run any other — or, when a tool is listed `free`,
+  name that one and run any other without paying.
 - **You declare that it does** with `l402_mcp_upstream_validates on;`. The
   module can't see whether the upstream checks, and the client's
   `MCP-Protocol-Version` can't vouch for it either, because the client chooses
@@ -68,6 +72,7 @@ So header-based pricing is only as strong as the upstream's validation:
 | Anything but `POST` (e.g. an older client's `GET` stream or session `DELETE`) | `405`, `Allow: POST` |
 | A method not in `l402_mcp_charge` (e.g. `tools/list`) | Passes through free |
 | `tools/call` with `Mcp-Name` | Charged at that tool's price; `402` until paid |
+| `tools/call` with the `Mcp-Name` of a tool listed `free` | Passes through free |
 | No `MCP-Protocol-Version` | `400`, `-32020` |
 | `MCP-Protocol-Version` older than `2026-07-28`, or not a revision date | `400`, `-32022` |
 | No `Mcp-Method` | `400` |
@@ -102,7 +107,7 @@ which is checked before the `405`.
 | Directive | Meaning |
 |---|---|
 | `l402_mcp on\|off;` | Price per tool. Needs `l402 on;` for the location, set there or inherited — nginx refuses to start otherwise. |
-| `l402_mcp_tool <name> <msat>;` | One tool's price. Repeat per tool; the name is compared exactly with the decoded `Mcp-Name`. |
+| `l402_mcp_tool <name> <msat>\|free;` | One tool's price, or `free` to let it pass unpaid. Repeat per tool; the name is compared exactly with the decoded `Mcp-Name`. |
 | `l402_mcp_charge <method>...;` | Methods that cost money. Default `tools/call`. Also accepts `resources/read` (priced by URI) and `prompts/get`, the other methods that carry an `Mcp-Name`. |
 | `l402_mcp_upstream_validates on\|off;` | Declares that the upstream rejects a request whose `Mcp-Method` / `Mcp-Name` disagree with its body. Required by `l402_mcp on`. |
 
@@ -128,6 +133,46 @@ and `-_.~/`:
 SET mcp-tool:/mcp:summarize 8000
 SET "mcp-tool:/mcp:get%20weather" 2000     # tool "get weather"
 ```
+
+---
+
+## Free tools
+
+Some servers mix paid tools with free ones. List the free ones by name:
+
+```nginx
+location /mcp {
+    l402                      on;
+    l402_mcp                  on;
+    l402_mcp_upstream_validates on;
+    l402_amount_msat_default  21000;         # every tool not listed below
+    l402_mcp_tool  lookup     free;
+    l402_mcp_tool  status     free;
+    proxy_pass                http://mcp-server;
+}
+```
+
+- **A free call is not a call priced at zero.** It passes like `tools/list`:
+  no token, no Redis lookup, no payment backend. It still needs the same valid
+  headers as a charged call, and gets the same `400` without them.
+- **`free` is the only way.** A price of `0` is refused by `nginx -t`, and a
+  Redis price of `0` means "no Redis price". Redis can't make a tool free, and a
+  Redis price for a tool listed `free` is ignored, so changing which tools are
+  free takes a reload.
+- **Everything else stays paid.** There is no "free by default": a tool the
+  upstream adds later costs the default until you list it.
+- **The name covers every charged method.** With
+  `l402_mcp_charge tools/call prompts/get;`, `l402_mcp_tool status free;` frees
+  both the tool and the prompt named `status`.
+- **A nested location that has its own `l402_mcp_tool` lines** replaces the
+  parent's list, free tools included.
+
+Free tools are listed in the [capability manifest](./manifest.md#mcp-routes)
+with `"price": {"type": "free"}`, next to the priced ones.
+
+A free tool raises the stakes of the [trust model](#trust-model--read-this-first):
+against an upstream that doesn't reject a header/body mismatch, naming a free
+tool in `Mcp-Name` runs any tool for nothing.
 
 ---
 

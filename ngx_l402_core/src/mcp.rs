@@ -42,10 +42,35 @@ pub const MCP_CHARGEABLE_METHODS: [&str; 3] = ["tools/call", "resources/read", "
 const B64_PREFIX: &str = "=?base64?";
 const B64_SUFFIX: &str = "?=";
 
+/// What one `l402_mcp_tool <name> <price>;` line sets for its tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpToolPrice {
+    /// `free`: calls pass without payment, like an uncharged method.
+    Free,
+    /// A positive price in millisatoshi.
+    Msat(i64),
+}
+
+impl McpToolPrice {
+    /// Parse the directive's price argument: `free` or a positive msat
+    /// amount. `0` is refused rather than read as free: elsewhere it means
+    /// "unset", and a stray `0` must not give a tool away.
+    pub fn parse(s: &str) -> Option<Self> {
+        if s == "free" {
+            return Some(McpToolPrice::Free);
+        }
+        s.parse::<i64>()
+            .ok()
+            .filter(|p| *p > 0)
+            .map(McpToolPrice::Msat)
+    }
+}
+
 /// What the paywall does with one MCP request.
 #[derive(Debug, PartialEq, Eq)]
 pub enum McpDecision {
-    /// The method is not charged at this location; pass it through.
+    /// The method is not charged at this location, or the tool is listed
+    /// `free`; pass it through.
     Free,
     /// Charge for the named tool, prompt or resource (already decoded).
     Charged { method: String, name: String },
@@ -113,14 +138,21 @@ pub struct McpHeaders<'a> {
 
 /// Decide whether a request is charged. `charged` is the location's list of
 /// charged methods (`tools/call` unless the operator opts others in), each one
-/// of [`MCP_CHARGEABLE_METHODS`]. `upstream_validates` is the operator's
+/// of [`MCP_CHARGEABLE_METHODS`]. `tools` is the location's `l402_mcp_tool`
+/// lines; a name listed `free` passes under every charged method, after the
+/// same header checks as a charged call. `upstream_validates` is the operator's
 /// declaration that the upstream rejects a request whose headers disagree with
 /// its body; without it no header can be trusted, discovery included.
 ///
 /// Refusing an undeclared upstream here is a backstop: it answers every
 /// client with a `400` for something only the operator can fix, so the config
 /// must refuse `l402_mcp` without the declaration at `nginx -t`.
-pub fn classify(headers: &McpHeaders, charged: &[String], upstream_validates: bool) -> McpDecision {
+pub fn classify(
+    headers: &McpHeaders,
+    charged: &[String],
+    tools: &[(String, McpToolPrice)],
+    upstream_validates: bool,
+) -> McpDecision {
     if !upstream_validates {
         return reject("the upstream is not declared to validate MCP headers against the body");
     }
@@ -168,6 +200,15 @@ pub fn classify(headers: &McpHeaders, charged: &[String], upstream_validates: bo
         return McpDecision::Free;
     }
     match name {
+        // Decided here rather than as a price of zero: a free call then needs
+        // no Redis lookup, no token and no payment backend.
+        Some(name)
+            if tools
+                .iter()
+                .any(|(n, p)| *n == name && *p == McpToolPrice::Free) =>
+        {
+            McpDecision::Free
+        }
         Some(name) => McpDecision::Charged {
             method: method.to_string(),
             name,
@@ -314,7 +355,7 @@ mod tests {
     fn tools_call_is_charged_for_its_tool() {
         let h = headers(&["2026-07-28"], &["tools/call"], &["search"]);
         assert_eq!(
-            classify(&h, &tools_only(), true),
+            classify(&h, &tools_only(), &[], true),
             McpDecision::Charged {
                 method: "tools/call".into(),
                 name: "search".into()
@@ -326,24 +367,83 @@ mod tests {
     fn later_revision_is_trusted() {
         let h = headers(&["2027-01-01"], &["tools/call"], &["search"]);
         assert!(matches!(
-            classify(&h, &tools_only(), true),
+            classify(&h, &tools_only(), &[], true),
             McpDecision::Charged { .. }
         ));
+    }
+
+    fn tool(name: &str, price: McpToolPrice) -> (String, McpToolPrice) {
+        (name.to_string(), price)
+    }
+
+    #[test]
+    fn free_tool_passes_and_others_stay_charged() {
+        let tools = [
+            tool("ping", McpToolPrice::Free),
+            tool("summarize", McpToolPrice::Msat(5000)),
+        ];
+        let call = |name: &'static str| {
+            classify(
+                &headers(&["2026-07-28"], &["tools/call"], &[name]),
+                &tools_only(),
+                &tools,
+                true,
+            )
+        };
+        assert_eq!(call("ping"), McpDecision::Free);
+        // The encoded spelling of the same name is free too.
+        assert_eq!(call("=?base64?cGluZw==?="), McpDecision::Free);
+        // A priced tool, an unlisted one and a near miss are all charged.
+        for name in ["summarize", "search", "Ping", "pings"] {
+            assert!(
+                matches!(call(name), McpDecision::Charged { .. }),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn free_tool_still_needs_trustworthy_headers() {
+        let tools = [tool("ping", McpToolPrice::Free)];
+        let h = headers(&["2025-11-25"], &["tools/call"], &["ping"]);
+        assert!(matches!(
+            classify(&h, &tools_only(), &tools, true),
+            McpDecision::UnsupportedVersion { .. }
+        ));
+        let h = headers(&["2026-07-28"], &["tools/call"], &["ping", "search"]);
+        assert!(matches!(
+            classify(&h, &tools_only(), &tools, true),
+            McpDecision::Reject(_)
+        ));
+        let h = headers(&["2026-07-28"], &["tools/call"], &["ping"]);
+        assert!(matches!(
+            classify(&h, &tools_only(), &tools, false),
+            McpDecision::Reject(_)
+        ));
+    }
+
+    #[test]
+    fn tool_price_parses_free_or_a_positive_amount() {
+        assert_eq!(McpToolPrice::parse("free"), Some(McpToolPrice::Free));
+        assert_eq!(McpToolPrice::parse("5000"), Some(McpToolPrice::Msat(5000)));
+        for bad in ["0", "-1", "", "Free", "FREE", "free ", "1.5", "1000msat"] {
+            assert_eq!(McpToolPrice::parse(bad), None, "{bad:?}");
+        }
     }
 
     #[test]
     fn discovery_passes_free() {
         let h = headers(&["2026-07-28"], &["tools/list"], &[]);
-        assert_eq!(classify(&h, &tools_only(), true), McpDecision::Free);
+        assert_eq!(classify(&h, &tools_only(), &[], true), McpDecision::Free);
     }
 
     #[test]
     fn resources_read_free_unless_opted_in() {
         let h = headers(&["2026-07-28"], &["resources/read"], &["file:///a"]);
-        assert_eq!(classify(&h, &tools_only(), true), McpDecision::Free);
+        assert_eq!(classify(&h, &tools_only(), &[], true), McpDecision::Free);
         let charged = vec!["tools/call".to_string(), "resources/read".to_string()];
         assert_eq!(
-            classify(&h, &charged, true),
+            classify(&h, &charged, &[], true),
             McpDecision::Charged {
                 method: "resources/read".into(),
                 name: "file:///a".into()
@@ -361,7 +461,7 @@ mod tests {
             headers(&["latest"], &["tools/call"], &["search"]),
             headers(&["2026-7-28"], &["tools/call"], &["search"]),
         ] {
-            let d = classify(&h, &tools_only(), true);
+            let d = classify(&h, &tools_only(), &[], true);
             assert!(d.reject_body().is_some(), "{h:?}: {d:?}");
         }
     }
@@ -371,7 +471,7 @@ mod tests {
         // Without validated headers we cannot tell discovery from a tool call.
         let h = headers(&["2025-11-25"], &["tools/list"], &[]);
         assert_eq!(
-            classify(&h, &tools_only(), true),
+            classify(&h, &tools_only(), &[], true),
             McpDecision::UnsupportedVersion {
                 requested: Some("2025-11-25".into())
             }
@@ -383,6 +483,7 @@ mod tests {
         let older = classify(
             &headers(&["2025-11-25"], &["tools/call"], &["search"]),
             &tools_only(),
+            &[],
             true,
         );
         let v: serde_json::Value = serde_json::from_str(&older.reject_body().unwrap()).unwrap();
@@ -395,6 +496,7 @@ mod tests {
         let junk = classify(
             &headers(&["<script>"], &["tools/call"], &["search"]),
             &tools_only(),
+            &[],
             true,
         );
         let body = junk.reject_body().unwrap();
@@ -407,6 +509,7 @@ mod tests {
         let missing = classify(
             &headers(&[], &["tools/call"], &["search"]),
             &tools_only(),
+            &[],
             true,
         );
         let v: serde_json::Value = serde_json::from_str(&missing.reject_body().unwrap()).unwrap();
@@ -421,7 +524,10 @@ mod tests {
             headers(&["2026-07-28", "2026-07-28"], &["tools/call"], &["search"]),
         ] {
             assert!(
-                matches!(classify(&h, &tools_only(), true), McpDecision::Reject(_)),
+                matches!(
+                    classify(&h, &tools_only(), &[], true),
+                    McpDecision::Reject(_)
+                ),
                 "{h:?}"
             );
         }
@@ -431,7 +537,7 @@ mod tests {
     fn named_method_without_name_rejected_even_when_free() {
         let h = headers(&["2026-07-28"], &["prompts/get"], &[]);
         assert!(matches!(
-            classify(&h, &tools_only(), true),
+            classify(&h, &tools_only(), &[], true),
             McpDecision::Reject(_)
         ));
     }
@@ -445,7 +551,7 @@ mod tests {
             &["=?base64?c3VtbWFyaXpl?="],
         );
         assert_eq!(
-            classify(&h, &tools_only(), true),
+            classify(&h, &tools_only(), &[], true),
             McpDecision::Charged {
                 method: "tools/call".into(),
                 name: "summarize".into()
@@ -531,7 +637,10 @@ mod tests {
             headers(&["2026-07-28"], &["tools/list"], &[]),
         ] {
             assert!(
-                matches!(classify(&h, &tools_only(), false), McpDecision::Reject(_)),
+                matches!(
+                    classify(&h, &tools_only(), &[], false),
+                    McpDecision::Reject(_)
+                ),
                 "{h:?}"
             );
         }
@@ -549,7 +658,7 @@ mod tests {
         ] {
             let h = headers(&[v], &["tools/call"], &["search"]);
             assert_eq!(
-                classify(&h, &tools_only(), true),
+                classify(&h, &tools_only(), &[], true),
                 McpDecision::UnsupportedVersion { requested: None },
                 "{v}"
             );
@@ -558,7 +667,7 @@ mod tests {
             let h = headers(&[v], &["tools/call"], &["search"]);
             assert!(
                 matches!(
-                    classify(&h, &tools_only(), true),
+                    classify(&h, &tools_only(), &[], true),
                     McpDecision::Charged { .. }
                 ),
                 "{v}"
@@ -574,7 +683,7 @@ mod tests {
         let h = headers(&["2026-07-28"], &["completion/complete"], &[]);
         let charged = vec!["completion/complete".to_string()];
         assert!(matches!(
-            classify(&h, &charged, true),
+            classify(&h, &charged, &[], true),
             McpDecision::Reject(_)
         ));
     }
@@ -607,7 +716,7 @@ mod tests {
     fn invalid_version_is_not_echoed() {
         for v in ["latest", "9999-99-99", "2026-07-28\u{7f}x", "<script>"] {
             let h = headers(&[v], &["tools/call"], &["search"]);
-            let d = classify(&h, &tools_only(), true);
+            let d = classify(&h, &tools_only(), &[], true);
             let reason = d.reject_reason().unwrap();
             assert!(!reason.contains(v), "{reason}");
             assert!(!reason.contains("predates"), "{reason}");
@@ -617,6 +726,7 @@ mod tests {
         let d = classify(
             &headers(&["2025-11-25"], &["tools/call"], &["search"]),
             &tools_only(),
+            &[],
             true,
         );
         assert!(d.reject_reason().unwrap().contains("2025-11-25 predates"));
@@ -626,7 +736,7 @@ mod tests {
     fn header_values_are_trimmed_of_sp_and_ht() {
         let h = headers(&[" \t2026-07-28\t"], &["\ttools/call "], &[" search\t"]);
         assert_eq!(
-            classify(&h, &tools_only(), true),
+            classify(&h, &tools_only(), &[], true),
             McpDecision::Charged {
                 method: "tools/call".into(),
                 name: "search".into()
@@ -641,7 +751,10 @@ mod tests {
         for name in ["=?base64?not base64!?=", "=?base64?YQ0KYg==?=", "caf\u{e9}"] {
             let h = headers(&["2026-07-28"], &["tools/list"], &[name]);
             assert!(
-                matches!(classify(&h, &tools_only(), true), McpDecision::Reject(_)),
+                matches!(
+                    classify(&h, &tools_only(), &[], true),
+                    McpDecision::Reject(_)
+                ),
                 "{name}"
             );
         }
@@ -651,7 +764,7 @@ mod tests {
     fn method_is_case_sensitive() {
         // Header values are case-sensitive, so `Tools/Call` is not `tools/call`.
         let h = headers(&["2026-07-28"], &["Tools/Call"], &["search"]);
-        assert_eq!(classify(&h, &tools_only(), true), McpDecision::Free);
+        assert_eq!(classify(&h, &tools_only(), &[], true), McpDecision::Free);
     }
 
     #[test]

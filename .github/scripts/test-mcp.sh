@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Checks `l402_mcp`: discovery passes free, each tool is priced on its own,
+# a tool listed `free` passes unpaid, the manifest lists the tools,
 # the token names its tool, and requests whose headers can't be trusted are
 # refused. Run against a started nginx container whose image has the module;
 # a second nginx is served from it on port 8002, proxying to a stub on 8003.
@@ -29,6 +30,7 @@ http {
             l402_mcp_upstream_validates on;
             l402_amount_msat_default 1000;
             l402_mcp_tool summarize 5000;
+            l402_mcp_tool ping free;
             proxy_pass http://127.0.0.1:8003;
         }
         location /mcp-resources {
@@ -37,8 +39,15 @@ http {
             l402_mcp_upstream_validates on;
             l402_mcp_charge tools/call resources/read;
             l402_amount_msat_default 1000;
+            l402_mcp_tool file:///free free;
             proxy_pass http://127.0.0.1:8003;
         }
+        location /plain {
+            l402 on;
+            l402_amount_msat_default 1000;
+            proxy_pass http://127.0.0.1:8003;
+        }
+        location = /manifest { l402_manifest; }
     }
 }'
 printf '%s\n' "$conf" | docker exec -i "$container" sh -c 'cat > /tmp/mcp.conf'
@@ -94,6 +103,41 @@ read -r status body < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: summa
 check "$(jq -r '.error.data.amount_msat' <<<"$body")" 5000 "l402_mcp_tool sets a tool's price"
 read -r status body < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: =?base64?c3VtbWFyaXpl?=')
 check "$(jq -r '.error.data.amount_msat' <<<"$body")" 5000 "an encoded name is decoded before pricing"
+
+echo "Free tools:"
+read -r status _ < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: ping')
+check "$status" 200 "a tool listed free passes unpaid"
+read -r status _ < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: =?base64?cGluZw==?=')
+check "$status" 200 "an encoded name is decoded before the free check"
+read -r status _ < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: pings')
+check "$status" 402 "a tool that only resembles a free one is charged"
+read -r status _ < <(post /mcp-resources "$V" 'Mcp-Method: resources/read' 'Mcp-Name: file:///free')
+check "$status" 200 "a free name passes under another charged method"
+read -r status _ < <(post /mcp 'MCP-Protocol-Version: 2025-11-25' 'Mcp-Method: tools/call' 'Mcp-Name: ping')
+check "$status" 400 "a free tool is still refused on an older protocol version"
+docker exec redis redis-cli set mcp-tool:/mcp:ping 2500 >/dev/null
+read -r status _ < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: ping')
+check "$status" 200 "a Redis price does not charge for a free tool"
+docker exec redis redis-cli del mcp-tool:/mcp:ping >/dev/null
+docker exec redis redis-cli set mcp-tool:/mcp:search 0 >/dev/null
+read -r status body < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: search')
+check "$status $(jq -r '.error.data.amount_msat' <<<"$body")" "402 1000" "a Redis price of 0 does not make a tool free"
+docker exec redis redis-cli del mcp-tool:/mcp:search >/dev/null
+
+echo "Manifest:"
+manifest=$(curl_in http://127.0.0.1:8002/manifest)
+route() { jq -c --arg p "$1" '.routes[] | select(.path == $p)' <<<"$manifest"; }
+check "$(route /mcp | jq -c '.mcp.tools')" \
+    '[{"name":"summarize","price":{"amount_msat":5000,"type":"static"}},{"name":"ping","price":{"type":"free"}}]' \
+    "an MCP route lists its tools, a free one without an amount"
+check "$(route /mcp | jq -r '.price.amount_msat')" 1000 "the route price is the default for unlisted tools"
+check "$(route /mcp | jq -c '.mcp.charged_methods')" '["tools/call"]' "tools/call is the charged method by default"
+check "$(route /mcp-resources | jq -c '.mcp.charged_methods')" '["tools/call","resources/read"]' \
+    "l402_mcp_charge methods are listed"
+check "$(route /mcp | jq -c '.caveats_required | map(select(startswith("Mcp")))')" \
+    '["McpTool = <NAME>","McpMethod = <MCP_METHOD>"]' "an MCP route names the MCP caveats"
+check "$(route /plain | jq -c '[has("mcp"), (.caveats_required | length)]')" '[false,2]' \
+    "a route without l402_mcp has no mcp block and no MCP caveats"
 
 echo "Token binding:"
 read -r _ body < <(post /mcp "$V" 'Mcp-Method: tools/call' 'Mcp-Name: search')
@@ -158,6 +202,20 @@ http { server { listen 8004; location /x { $1 } } }"
         echo "  ✓ $2"
     fi
 }
+# expect_good_conf <directives> <case> — the control for the cases above: a
+# rejection only means something if the same location is accepted when valid.
+expect_good_conf() {
+    local good="load_module /etc/nginx/modules/libngx_l402_lib.so;
+events {}
+http { server { listen 8004; location /x { $1 } } }"
+    printf '%s\n' "$good" | docker exec -i "$container" sh -c 'cat > /tmp/mcp-good.conf'
+    if docker exec -e CASHU_ECASH_SUPPORT=false "$container" nginx -t -c /tmp/mcp-good.conf >/dev/null 2>&1; then
+        echo "  ✓ $2"
+    else
+        echo "  ✗ $2: nginx -t refused it"
+        failures=$((failures + 1))
+    fi
+}
 # Every case but the first declares the upstream, so it fails for its own reason.
 U='l402_mcp_upstream_validates on;'
 expect_bad_conf 'l402 on; l402_mcp on; l402_amount_msat_default 1000;' "l402_mcp on without l402_mcp_upstream_validates on is rejected"
@@ -166,6 +224,14 @@ expect_bad_conf "l402 on; l402_mcp on; $U l402_mcp_charge tools/list;" "an unpri
 expect_bad_conf "l402 on; l402_mcp on; $U l402_mcp_charge completion/complete;" "a method without Mcp-Name can't be charged"
 expect_bad_conf "l402 on; l402_mcp on; $U l402_mcp_tool a 10; l402_mcp_tool a 20;" "a tool priced twice is rejected"
 expect_bad_conf "l402 on; l402_mcp on; $U l402_mcp_tool a 0;" "a non-positive tool price is rejected"
+expect_bad_conf "l402 on; l402_mcp on; $U l402_mcp_tool a FREE;" "a tool price that is neither an amount nor free is rejected"
+expect_bad_conf "l402 on; l402_mcp on; $U l402_mcp_tool a free; l402_mcp_tool a 10;" "a tool both free and priced is rejected"
+# The location default: a price nginx can't use used to be logged and dropped,
+# leaving the location to answer 500 or take its parent's price.
+expect_good_conf 'l402 on; l402_amount_msat_default 1000;' "a positive l402_amount_msat_default is accepted"
+expect_bad_conf 'l402 on; l402_amount_msat_default 0;' "l402_amount_msat_default 0 is rejected"
+expect_bad_conf 'l402 on; l402_amount_msat_default -5;' "a negative l402_amount_msat_default is rejected"
+expect_bad_conf 'l402 on; l402_amount_msat_default free;' "an l402_amount_msat_default that is not a number is rejected"
 
 if [ "$failures" -ne 0 ]; then
     echo "$failures MCP check(s) failed"

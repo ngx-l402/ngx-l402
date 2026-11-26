@@ -1,5 +1,7 @@
 # ngx_l402 — L402 Nginx Module
 
+[![Join us on Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/QYwcj2wuQ)
+
 An [L402](https://docs.lightning.engineering/the-lightning-network/l402) authentication module for Nginx that enables Lightning Network-based monetization for your REST APIs (HTTP/1 and HTTP/2).
 
 Supports **LND**, **LNC**, **CLN**, **Eclair**, **LNURL**, **NWC**, and **BOLT12** backends.
@@ -63,6 +65,49 @@ curl -i http://localhost:8000/protected  # 402 Payment Required
 ```
 
 ---
+
+## 🌍 Used in production
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="https://satboard.bar"><img src="https://satboard.bar/og/1.png" alt="satboard.bar: a billboard you take over by paying sats"></a>
+      <p><b><a href="https://satboard.bar">satboard.bar</a></b><br>
+      One public message. Anyone, person or AI agent, takes it over by paying sats, and every takeover raises the price.</p>
+      <p><sub><b>Uses</b> · L402 with auto-detect over NWC · per-tool MCP pricing (<code>l402_mcp</code>) · prices set live from Redis</sub></p>
+    </td>
+    <td width="50%" valign="top">
+      <a href="https://sqzit.in"><img src="https://sqzit.in/assets/og.png" alt="sqzit.in: short links you own"></a>
+      <p><b><a href="https://sqzit.in">sqzit.in</a></b><br>
+      Short links you own: signed with your Nostr key and paid in sats.</p>
+      <p><sub><b>Uses</b> · L402 paywall · Lightning Address (LNURL) backend</sub></p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="https://chessforsats.in"><img src="https://chessforsats.in/static/showcase.jpg" alt="chessforsats.in: fans of Gukesh and Sindarov play one public chess game"></a>
+      <p><b><a href="https://chessforsats.in">chessforsats.in</a></b><br>
+      Two fan teams share one public chess game. Moves are voted on for free, and paying a few sats plays yours straight away. AI agents can join either team.</p>
+      <p><sub><b>Uses</b> · L402 with auto-detect over NWC · per-tool MCP pricing (<code>l402_mcp</code>) · prices set from Redis · <code>l402_manifest</code></sub></p>
+    </td>
+    <td width="50%" valign="top"></td>
+  </tr>
+</table>
+
+Running ngx_l402 in production? Open a PR to add your site.
+
+## 💬 Community
+
+Building something paid with Lightning, or thinking about it? Come hang out with the people building ngx_l402 and the folks running it in front of their APIs and MCP servers.
+
+- **Get unstuck fast.** Ask about setup, your Lightning backend, or an nginx config that won't behave.
+- **Shape what comes next.** New features like MCP tool pricing get discussed there first, so your use case can steer them.
+- **Show what you built.** Share your paid API, your pricing ideas, or a demo.
+- **Find something to work on.** A good place to start if you want to contribute.
+
+<p>
+  <a href="https://discord.gg/QYwcj2wuQ"><img alt="Join ngx_l402 on Discord" src="https://img.shields.io/badge/Join%20us%20on%20Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
+</p>
 
 ## Contributing
 
